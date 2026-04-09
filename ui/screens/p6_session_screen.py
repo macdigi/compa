@@ -96,8 +96,9 @@ class P6SessionScreen:
         # Backup/restore buttons
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
-            backup_rect = pygame.Rect(16, 370, 100, 30)
-            restore_rect = pygame.Rect(126, 370, 100, 30)
+            # Storage buttons are dynamic position — use the panel area
+            backup_rect = pygame.Rect(16, 370, 90, 22)
+            restore_rect = pygame.Rect(116, 370, 90, 22)
             if backup_rect.collidepoint(mx, my) and self._image_mgr.p6_mounted:
                 self._backup_modal.show(input_mode=True, default_text="")
                 return
@@ -127,159 +128,140 @@ class P6SessionScreen:
             self._save_notes()
 
     def draw(self, surface: pygame.Surface):
-        y = 8
+        y = 6
 
         f_title = theme.font("title")
+        f_hero = theme.font("hero")
         f_large = theme.font("large")
         f_med = theme.font("medium")
         f_small = theme.font("small")
+        f_mono = theme.font("mono")
 
-        title = f_title.render("COMPA", True, theme.ACCENT)
-        surface.blit(title, (16, y))
-        y += 36
+        # ── ASCII-style logo header ──────────────────────────────────
+        logo_lines = [
+            "  ___ ___  __  __ ___  _   ",
+            " / __/ _ \\|  \\/  | _ \\/ \\  ",
+            "| (_| (_) | |\\/| |  _/ _ \\ ",
+            " \\___\\___/|_|  |_|_|/_/ \\_\\",
+        ]
+        for i, line in enumerate(logo_lines):
+            surf = f_mono.render(line, True, theme.ACCENT)
+            surface.blit(surf, (12, y + i * 14))
 
-        # Connection status line
-        p6_status = "CONNECTED" if (self.app.p6 and self.app.p6.connected) else "NOT CONNECTED"
-        p6_color = theme.GREEN if (self.app.p6 and self.app.p6.connected) else theme.RED
-        atom_status = "ATOM SQ" if (self.app.atom_sq and self.app.atom_sq.connected) else ""
+        # Version + tagline next to logo
+        surf = f_small.render("v1.0", True, theme.TEXT_DIM)
+        surface.blit(surf, (240, y + 4))
+        surf = f_small.render("P-6 Companion", True, theme.TEXT_DIM)
+        surface.blit(surf, (240, y + 20))
 
-        status_line = f"P-6: {p6_status}"
-        if atom_status:
-            status_line += f"  |  {atom_status}"
-        surf = f_small.render(status_line, True, p6_color)
-        surface.blit(surf, (16, y))
-        y += 24
+        # Connection status (right of logo)
+        p6_connected = self.app.p6 and self.app.p6.connected
+        status_x = 240
+        status_y = y + 40
+        if p6_connected:
+            pygame.draw.circle(surface, theme.GREEN, (status_x + 5, status_y + 7), 4)
+            surf = f_small.render("P-6 connected", True, theme.GREEN)
+        else:
+            pygame.draw.circle(surface, theme.RED, (status_x + 5, status_y + 7), 4, 1)
+            surf = f_small.render("P-6 not found", True, theme.RED)
+        surface.blit(surf, (status_x + 14, status_y))
 
-        pygame.draw.line(surface, theme.BORDER, (16, y), (theme.SCREEN_WIDTH - 16, y))
-        y += 12
+        y += 62
+        pygame.draw.line(surface, theme.BORDER, (12, y), (theme.SCREEN_WIDTH - 12, y))
+        y += 8
 
-        # ── Left column: Status ──────────────────────────────────────
+        # ── Left column ──────────────────────────────────────────────
         left_x = 16
         col_y = y
 
-        # Transport state
+        # Transport + BPM + Pattern — compact row
+        theme.draw_panel(surface, pygame.Rect(10, col_y - 2, 400, 90))
+
         if self.app.p6 and self.app.p6.state.playing:
-            transport_text = "PLAYING"
-            transport_color = theme.GREEN
+            pygame.draw.circle(surface, theme.GREEN, (left_x + 6, col_y + 10), 5)
+            surf = f_med.render("PLAYING", True, theme.GREEN)
         else:
-            transport_text = "STOPPED"
-            transport_color = theme.TEXT_DIM
+            pygame.draw.circle(surface, theme.TEXT_DIM, (left_x + 6, col_y + 10), 4, 1)
+            surf = f_med.render("STOPPED", True, theme.TEXT_DIM)
+        surface.blit(surf, (left_x + 16, col_y))
 
-        surf = f_large.render(transport_text, True, transport_color)
-        surface.blit(surf, (left_x, col_y))
-        col_y += 32
-
-        # BPM
-        bpm = self.app.p6.state.bpm if self.app.p6 else 120.0
-        surf = f_title.render(f"{bpm:.0f} BPM", True, theme.TEXT)
-        surface.blit(surf, (left_x, col_y))
-        col_y += 40
-
-        # Active pattern
-        pattern = self.app.p6.state.active_pattern if self.app.p6 else 0
-        surf = f_large.render(f"Pattern {pattern + 1}", True, theme.ACCENT)
-        surface.blit(surf, (left_x, col_y))
-        col_y += 36
-
-        # Layer indicator
-        if self.app.router:
-            layer = self.app.router.layer.value.upper()
-            surf = f_med.render(f"Layer: {layer}", True, theme.TEXT_DIM)
-            surface.blit(surf, (left_x, col_y))
-            col_y += 28
-
-        # Auto-record status
-        auto_text = "Auto-Record: ON" if self.app.auto_record else "Auto-Record: off"
-        auto_color = theme.GREEN if self.app.auto_record else theme.TEXT_DIM
-        surf = f_small.render(auto_text, True, auto_color)
-        surface.blit(surf, (left_x, col_y))
-        col_y += 22
-
-        # Recording status
+        # Recording indicator
         if self.app.recorder.is_recording:
             dur = self.app.recorder.duration
-            mins = int(dur) // 60
-            secs = dur % 60
-            rec_text = f"REC  {mins}:{secs:04.1f}"
-            surf = f_large.render(rec_text, True, theme.RED)
-            surface.blit(surf, (left_x, col_y))
-            col_y += 32
+            surf = f_med.render(f"REC {dur:.0f}s", True, theme.RED)
+            surface.blit(surf, (140, col_y))
+        col_y += 22
 
-        # ── Resample calculator ──────────────────────────────────────
-        col_y += 6
+        # BPM big + Pattern
         bpm = self.app.p6.state.bpm if self.app.p6 else 120.0
-        from engine.p6_presets import resample_calc
-        calc = resample_calc(bpm)
+        f_hero = theme.font("hero")
+        surf = f_hero.render(f"{bpm:.0f}", True, theme.TEXT)
+        surface.blit(surf, (left_x, col_y))
+        bpm_w = surf.get_width()
+        surf = f_med.render("BPM", True, theme.TEXT_DIM)
+        surface.blit(surf, (left_x + bpm_w + 6, col_y + 14))
+
+        pattern = self.app.p6.state.active_pattern if self.app.p6 else 0
+        surf = f_large.render(f"Pattern {pattern + 1}", True, theme.ACCENT)
+        surface.blit(surf, (220, col_y + 8))
+
+        col_y += 50
+        # Auto-record indicator
+        if self.app.auto_record:
+            surf = f_small.render("AUTO-REC ON", True, theme.GREEN)
+            surface.blit(surf, (left_x, col_y))
+        recall_secs = self.app.recorder.recall_seconds_available
+        if recall_secs > 0:
+            surf = f_small.render(f"Buffer: {int(recall_secs)}s", True, theme.ACCENT)
+            surface.blit(surf, (140, col_y))
+        col_y += 20
+
+        # ── Resample calc — compact 2-line ───────────────────────────
+        col_y += 4
+        theme.draw_panel(surface, pygame.Rect(10, col_y - 2, 400, 68))
         surf = f_small.render(f"RESAMPLE @ {bpm:.0f} BPM", True, theme.TEXT_DIM)
         surface.blit(surf, (left_x, col_y))
         col_y += 16
+        from engine.p6_presets import resample_calc
+        calc = resample_calc(bpm)
         for row in calc:
             bars = row["bars"]
             secs = row["seconds"]
             fits = row["fits"]
-            marks = ""
-            for rate in [44100, 22050, 14700, 11025]:
-                r_label = f"{rate // 1000}k" if rate >= 1000 else str(rate)
-                marks += f"{'OK' if fits[rate] else '--':>3} "
-            text = f"{bars}bar={secs:5.1f}s  44k {marks}"
-            # Simplified: just show which rates fit
             ok_rates = [f"{r//1000}k" for r, ok in fits.items() if ok]
-            no_rates = [f"{r//1000}k" for r, ok in fits.items() if not ok]
-            if no_rates:
-                line = f" {bars} bar = {secs:.1f}s  {' '.join(ok_rates)}"
-                surf = f_small.render(line, True, theme.TEXT_DIM)
+            if len(ok_rates) == 4:
+                line = f"{bars}bar={secs:.1f}s ALL OK"
+                color = theme.GREEN
             else:
-                line = f" {bars} bar = {secs:.1f}s  ALL rates OK"
-                surf = f_small.render(line, True, theme.GREEN)
+                line = f"{bars}bar={secs:.1f}s {' '.join(ok_rates)}"
+                color = theme.TEXT_DIM
+            surf = f_small.render(line, True, color)
             surface.blit(surf, (left_x, col_y))
-            col_y += 15
-        col_y += 4
+            col_y += 13
+        col_y += 6
 
-        # Recall buffer indicator
-        recall_secs = self.app.recorder.recall_seconds_available
-        if recall_secs > 0:
-            surf = f_small.render(f"Recall buffer: {int(recall_secs)}s", True, theme.ACCENT)
-            surface.blit(surf, (left_x, col_y))
-            col_y += 16
-
-        # ── 6 P-6 pad slots ─────────────────────────────────────────
-        col_y += 4
-        surf = f_small.render("P-6 PADS", True, theme.TEXT_DIM)
-        surface.blit(surf, (left_x, col_y))
-        col_y += 18
-
-        pad_w = 55
-        pad_h = 55
-        pad_gap = 8
-        for i in range(6):
-            px = left_x + i * (pad_w + pad_gap)
-            rect = pygame.Rect(px, col_y, pad_w, pad_h)
-            pygame.draw.rect(surface, theme.PAD_OFF, rect, border_radius=4)
-            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=4)
-            label = f_small.render(f"PAD {i + 1}", True, theme.TEXT_DIM)
-            lr = label.get_rect(center=rect.center)
-            surface.blit(label, lr)
-
-        # ── P-6 Storage (below pads) ─────────────────────────────────
-        storage_y = col_y + pad_h + 12
-        surf = f_small.render("P-6 STORAGE", True, theme.TEXT_DIM)
-        surface.blit(surf, (left_x, storage_y))
-        storage_y += 16
+        # ── P-6 Storage — compact ────────────────────────────────────
+        theme.draw_panel(surface, pygame.Rect(10, col_y - 2, 400, 42))
+        storage_y = col_y
 
         mounted = self._image_mgr.p6_mounted
         mount_text = "USB: READY" if mounted else "USB: NOT MOUNTED"
         mount_color = theme.GREEN if mounted else theme.TEXT_DIM
-        surf = f_small.render(mount_text, True, mount_color)
-        surface.blit(surf, (240, storage_y + 6))
 
-        backup_rect = pygame.Rect(16, storage_y, 100, 30)
+        surf = f_small.render("STORAGE", True, theme.TEXT_DIM)
+        surface.blit(surf, (left_x, storage_y + 2))
+
+        surf = f_small.render(mount_text, True, mount_color)
+        surface.blit(surf, (240, storage_y + 2))
+
+        backup_rect = pygame.Rect(left_x, storage_y + 16, 90, 22)
         b_bg = theme.ACCENT if mounted else theme.BUTTON_BG
         b_tc = theme.BG if mounted else theme.TEXT_DIM
         pygame.draw.rect(surface, b_bg, backup_rect, border_radius=4)
         surf = f_small.render("BACKUP", True, b_tc)
         surface.blit(surf, surf.get_rect(center=backup_rect.center))
 
-        restore_rect = pygame.Rect(126, storage_y, 100, 30)
+        restore_rect = pygame.Rect(116, storage_y + 16, 90, 22)
         r_bg = theme.ACCENT if mounted else theme.BUTTON_BG
         r_tc = theme.BG if mounted else theme.TEXT_DIM
         pygame.draw.rect(surface, r_bg, restore_rect, border_radius=4)
@@ -314,20 +296,14 @@ class P6SessionScreen:
         right_x = 420
 
         # Level meters
-        surf = f_small.render("INPUT LEVEL", True, theme.TEXT_DIM)
-        surface.blit(surf, (right_x, y))
-        meter_y = y + 18
-
-        meter_w = 360
-        meter_h = 16
-        self._draw_meter(surface, right_x, meter_y, meter_w, meter_h,
+        theme.draw_meter(surface, right_x, y, 360, 12,
                         self._disp_peak_l, "L")
-        meter_y += meter_h + 3
-        self._draw_meter(surface, right_x, meter_y, meter_w, meter_h,
+        theme.draw_meter(surface, right_x, y + 16, 360, 12,
                         self._disp_peak_r, "R")
+        meter_y = y + 16 + 12
 
         # Notes label
-        notes_label_y = meter_y + meter_h + 12
+        notes_label_y = meter_y + 12
         surf = f_small.render("SESSION NOTES", True, theme.TEXT_DIM)
         surface.blit(surf, (right_x, notes_label_y))
 

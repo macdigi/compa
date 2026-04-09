@@ -270,23 +270,18 @@ class P6PatternScreen:
         f_mono = theme.font("mono")
 
         # Header
-        title = f_large.render("PATTERNS", True, theme.TEXT)
-        surface.blit(title, (16, 8))
-
-        # Active pattern
         active = self.app.p6.state.active_pattern if self.app.p6 else 0
         active_text = f"Active: {active + 1}"
         name = self._pattern_names[active]
         if name:
             active_text += f" - {name}"
-        surf = f_small.render(active_text, True, theme.ACCENT)
-        surface.blit(surf, (160, 14))
+        theme.draw_screen_header(surface, "PATTERNS", active_text)
 
         # Mode toggle buttons (3 modes)
         modes = [
-            (pygame.Rect(theme.SCREEN_WIDTH - 340, 8, 90, 30), "GRID", "grid"),
-            (pygame.Rect(theme.SCREEN_WIDTH - 240, 8, 90, 30), "CHAIN", "chain"),
-            (pygame.Rect(theme.SCREEN_WIDTH - 140, 8, 90, 30), "SEQ", "seq"),
+            (pygame.Rect(theme.SCREEN_WIDTH - 340, 8, 90, 26), "GRID", "grid"),
+            (pygame.Rect(theme.SCREEN_WIDTH - 240, 8, 90, 26), "CHAIN", "chain"),
+            (pygame.Rect(theme.SCREEN_WIDTH - 140, 8, 90, 26), "SEQ", "seq"),
         ]
         for rect, label, mode in modes:
             bg = theme.ACCENT if self._mode == mode else theme.BUTTON_BG
@@ -305,6 +300,13 @@ class P6PatternScreen:
     def _draw_grid(self, surface, f_small, f_mono):
         active = self.app.p6.state.active_pattern if self.app.p6 else 0
 
+        # Panel behind grid area
+        grid_panel = pygame.Rect(
+            self._grid_x - 6, self._grid_y - 6,
+            self._grid_cols * (self._cell_w + self._cell_gap) + 8,
+            self._grid_rows * (self._cell_h + self._cell_gap) + 8)
+        theme.draw_panel(surface, grid_panel, border=True)
+
         for i in range(64):
             rect = self._cell_rect(i)
             is_active = (i == active)
@@ -312,12 +314,15 @@ class P6PatternScreen:
             if is_active:
                 bg = theme.ACCENT
                 text_color = theme.BG
+                # Glow effect behind active cell
+                glow_rect = rect.inflate(6, 6)
+                pygame.draw.rect(surface, theme.ACCENT, glow_rect, border_radius=6)
             else:
                 bg = theme.PAD_OFF
                 text_color = theme.TEXT_DIM
 
-            pygame.draw.rect(surface, bg, rect, border_radius=3)
-            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=3)
+            pygame.draw.rect(surface, bg, rect, border_radius=4)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=4)
 
             num = f_mono.render(f"{i + 1}", True, text_color)
             nr = num.get_rect(centerx=rect.centerx, top=rect.top + 4)

@@ -1,0 +1,824 @@
+[
+  {
+    "name": "Groove Salad",
+    "url": "https://ice1.somafm.com/groovesalad-128-mp3",
+    "genre": "lofi",
+    "desc": "Ambient/downtempo beats and grooves"
+  },
+  {
+    "name": "Groove Salad Classic",
+    "url": "https://ice1.somafm.com/gsclassic-128-mp3",
+    "genre": "lofi",
+    "desc": "Early 2000s downtempo"
+  },
+  {
+    "name": "Lush",
+    "url": "https://ice1.somafm.com/lush-128-mp3",
+    "genre": "soul",
+    "desc": "Sensuous mellow vocals"
+  },
+  {
+    "name": "Secret Agent",
+    "url": "https://ice1.somafm.com/secretagent-128-mp3",
+    "genre": "jazz",
+    "desc": "Stylish spy lounge soundtrack"
+  },
+  {
+    "name": "Underground 80s",
+    "url": "https://ice1.somafm.com/u80s-128-mp3",
+    "genre": "electronic",
+    "desc": "UK Synthpop and New Wave"
+  },
+  {
+    "name": "The Trip",
+    "url": "https://ice1.somafm.com/thetrip-128-mp3",
+    "genre": "electronic",
+    "desc": "Progressive house and trance"
+  },
+  {
+    "name": "Cliq Hop",
+    "url": "https://ice1.somafm.com/cliqhop-128-mp3",
+    "genre": "hiphop",
+    "desc": "Beats and abstract hip hop"
+  },
+  {
+    "name": "Fluid",
+    "url": "https://ice1.somafm.com/fluid-128-mp3",
+    "genre": "jazz",
+    "desc": "Instrumental hip hop and future soul"
+  },
+  {
+    "name": "Left Coast 70s",
+    "url": "https://ice1.somafm.com/seventies-128-mp3",
+    "genre": "soul",
+    "desc": "West coast 70s soul rock"
+  },
+  {
+    "name": "Beat Blender",
+    "url": "https://ice1.somafm.com/beatblender-128-mp3",
+    "genre": "lofi",
+    "desc": "Deep house and downtempo"
+  },
+  {
+    "name": "Seven Inch Soul",
+    "url": "https://ice1.somafm.com/7soul-128-mp3",
+    "genre": "soul",
+    "desc": "Vintage soul 45s"
+  },
+  {
+    "name": "Suburbs of Goa",
+    "url": "https://ice1.somafm.com/suburbsofgoa-128-mp3",
+    "genre": "world",
+    "desc": "World electronic dub"
+  },
+  {
+    "name": "BAGeL Radio",
+    "url": "https://ice1.somafm.com/bagel-128-mp3",
+    "genre": "hiphop",
+    "desc": "Eclectic mix of hip hop and beats"
+  },
+  {
+    "name": "Boot Liquor",
+    "url": "https://ice1.somafm.com/bootliquor-128-mp3",
+    "genre": "country",
+    "desc": "Americana roots and outlaw country"
+  },
+  {
+    "name": "Vaporwaves",
+    "url": "https://ice5.somafm.com/vaporwaves-128-mp3",
+    "genre": "experimental",
+    "desc": "Slowed-down samples, mall muzak, retrowave"
+  },
+  {
+    "name": "n5MD Radio",
+    "url": "https://ice1.somafm.com/n5md-128-mp3",
+    "genre": "experimental",
+    "desc": "Ambient post-rock electronica"
+  },
+  {
+    "name": "Metal Detector",
+    "url": "https://ice1.somafm.com/metal-128-mp3",
+    "genre": "metal",
+    "desc": "Heavy metal from classic to extreme"
+  },
+  {
+    "name": "The In-Sound",
+    "url": "https://ice5.somafm.com/insound-128-mp3",
+    "genre": "rock",
+    "desc": "60s/70s hipster Euro pop psychedelia"
+  },
+  {
+    "name": "Black Rock FM",
+    "url": "https://ice5.somafm.com/brfm-128-mp3",
+    "genre": "underground",
+    "desc": "Burning Man culture radio"
+  },
+  {
+    "name": "Illinois Street Lounge",
+    "url": "https://ice5.somafm.com/illstreet-128-mp3",
+    "genre": "vintage",
+    "desc": "Bachelor pad exotica and vintage lounge"
+  },
+  {
+    "name": "Tiki Time",
+    "url": "https://ice5.somafm.com/tikitime-128-mp3",
+    "genre": "vintage",
+    "desc": "Classic tiki and vintage island rhythms"
+  },
+  {
+    "name": "KCSM Jazz 91.1",
+    "url": "https://ice7.securenetsystems.net/KCSM",
+    "genre": "jazz",
+    "desc": "San Mateo public jazz radio"
+  },
+  {
+    "name": "WBGO Jazz 88.3",
+    "url": "https://wbgo.streamguys1.com/wbgo128",
+    "genre": "jazz",
+    "desc": "Newark jazz public radio"
+  },
+  {
+    "name": "Radio Swiss Jazz",
+    "url": "https://stream.srg-ssr.ch/m/rsj/mp3_128",
+    "genre": "jazz",
+    "desc": "Swiss jazz non-stop"
+  },
+  {
+    "name": "ABC Jazz",
+    "url": "https://live-radio01.mediahubaustralia.com/JAZW/mp3/",
+    "genre": "jazz",
+    "desc": "Australian jazz radio"
+  },
+  {
+    "name": "Smooth Jazz Florida",
+    "url": "https://us4.internet-radio.com:8266/stream",
+    "genre": "jazz",
+    "desc": "Smooth jazz 24/7"
+  },
+  {
+    "name": "FIP Jazz",
+    "url": "https://icecast.radiofrance.fr/fipjazz-hifi.aac",
+    "genre": "jazz",
+    "desc": "French jazz radio"
+  },
+  {
+    "name": "181.fm Old School HipHop",
+    "url": "https://listen.181fm.com/181-oldschool_128k.mp3",
+    "genre": "hiphop",
+    "desc": "Classic hip hop and rap"
+  },
+  {
+    "name": "181.fm Jammin",
+    "url": "https://listen.181fm.com/181-jammin_128k.mp3",
+    "genre": "hiphop",
+    "desc": "R&B and hip hop hits"
+  },
+  {
+    "name": "FIP Hip Hop",
+    "url": "https://icecast.radiofrance.fr/fiphiphop-hifi.aac",
+    "genre": "hiphop",
+    "desc": "French hip hop radio"
+  },
+  {
+    "name": "181.fm Soul",
+    "url": "https://listen.181fm.com/181-soul_128k.mp3",
+    "genre": "soul",
+    "desc": "Classic soul and R&B"
+  },
+  {
+    "name": "Nightride FM Ebony",
+    "url": "https://stream.nightride.fm/ebony.m4a",
+    "genre": "soul",
+    "desc": "Neo-soul and R&B"
+  },
+  {
+    "name": "181.fm Funk",
+    "url": "https://listen.181fm.com/181-funk_128k.mp3",
+    "genre": "funk",
+    "desc": "Funk and disco grooves"
+  },
+  {
+    "name": "FIP Groove",
+    "url": "https://icecast.radiofrance.fr/fipgroove-hifi.aac",
+    "genre": "funk",
+    "desc": "French funk and groove"
+  },
+  {
+    "name": "Chillsky Lofi",
+    "url": "https://icecast.chillsky.com/lofi",
+    "genre": "lofi",
+    "desc": "Lofi hip hop and chill beats"
+  },
+  {
+    "name": "181.fm Chilled Out",
+    "url": "https://listen.181fm.com/181-chillout_128k.mp3",
+    "genre": "lofi",
+    "desc": "Chillout and downtempo"
+  },
+  {
+    "name": "FluxFM Chillhop",
+    "url": "https://streams.fluxfm.de/Chillhop/mp3-320/streams.fluxfm.de/",
+    "genre": "lofi",
+    "desc": "Chillhop and lofi beats"
+  },
+  {
+    "name": "Nightride FM Chillsynth",
+    "url": "https://stream.nightride.fm/chillsynth.m4a",
+    "genre": "ambient",
+    "desc": "Synthwave and chillsynth"
+  },
+  {
+    "name": "Drone Zone",
+    "url": "https://ice1.somafm.com/dronezone-128-mp3",
+    "genre": "ambient",
+    "desc": "Atmospheric ambient textures"
+  },
+  {
+    "name": "Deep Space One",
+    "url": "https://ice1.somafm.com/deepspaceone-128-mp3",
+    "genre": "ambient",
+    "desc": "Deep ambient space music"
+  },
+  {
+    "name": "FIP Radio",
+    "url": "https://icecast.radiofrance.fr/fip-hifi.aac",
+    "genre": "world",
+    "desc": "French eclectic world music"
+  },
+  {
+    "name": "FIP World",
+    "url": "https://icecast.radiofrance.fr/fipworld-hifi.aac",
+    "genre": "world",
+    "desc": "World music from Radio France"
+  },
+  {
+    "name": "181.fm Reggae",
+    "url": "https://listen.181fm.com/181-reggae_128k.mp3",
+    "genre": "world",
+    "desc": "Reggae roots and dancehall"
+  },
+  {
+    "name": "Radio Caprice Bossa Nova",
+    "url": "http://79.120.39.160:8002/bossanova",
+    "genre": "world",
+    "desc": "Brazilian bossa nova"
+  },
+  {
+    "name": "Radio Caprice Afrobeat",
+    "url": "http://79.120.39.160:8002/afrobeat",
+    "genre": "world",
+    "desc": "African beats and afrobeat"
+  },
+  {
+    "name": "DubLab",
+    "url": "http://dublab.out.airtime.pro:8000/dublab_a",
+    "genre": "world",
+    "desc": "LA future roots and beat culture"
+  },
+  {
+    "name": "181.fm Classic Rock",
+    "url": "https://listen.181fm.com/181-classicrock_128k.mp3",
+    "genre": "rock",
+    "desc": "Classic rock hits"
+  },
+  {
+    "name": "181.fm Rock 181",
+    "url": "https://listen.181fm.com/181-rock181_128k.mp3",
+    "genre": "rock",
+    "desc": "Modern and alternative rock"
+  },
+  {
+    "name": "BBC Radio 6 Music",
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_6music",
+    "genre": "rock",
+    "desc": "BBC alternative and eclectic"
+  },
+  {
+    "name": "181.fm Kickin Country",
+    "url": "https://listen.181fm.com/181-kickincountry_128k.mp3",
+    "genre": "country",
+    "desc": "Modern country hits"
+  },
+  {
+    "name": "181.fm Real Country",
+    "url": "https://listen.181fm.com/181-realcountry_128k.mp3",
+    "genre": "country",
+    "desc": "Classic and outlaw country"
+  },
+  {
+    "name": "181.fm Classical",
+    "url": "https://listen.181fm.com/181-classical_128k.mp3",
+    "genre": "classical",
+    "desc": "Classical music 24/7"
+  },
+  {
+    "name": "Radio Swiss Classic",
+    "url": "https://stream.srg-ssr.ch/m/rsc_de/mp3_128",
+    "genre": "classical",
+    "desc": "Swiss classical music non-stop"
+  },
+  {
+    "name": "Venice Classic Radio",
+    "url": "https://uk2.internet-radio.com:8024/stream",
+    "genre": "classical",
+    "desc": "Italian classical from Venice"
+  },
+  {
+    "name": "181.fm Energy 93",
+    "url": "https://listen.181fm.com/181-energy93_128k.mp3",
+    "genre": "electronic",
+    "desc": "High energy dance and EDM"
+  },
+  {
+    "name": "181.fm Techno Club",
+    "url": "https://listen.181fm.com/181-technoclub_128k.mp3",
+    "genre": "electronic",
+    "desc": "Techno and house beats"
+  },
+  {
+    "name": "Nightride FM Nightride",
+    "url": "https://stream.nightride.fm/nightride.m4a",
+    "genre": "electronic",
+    "desc": "Synthwave and outrun"
+  },
+  {
+    "name": "FluxFM Electro",
+    "url": "https://streams.fluxfm.de/live/mp3-320/streams.fluxfm.de/",
+    "genre": "electronic",
+    "desc": "Berlin electronic music"
+  },
+  {
+    "name": "181.fm Pow3r Metal",
+    "url": "https://listen.181fm.com/181-poweretal_128k.mp3",
+    "genre": "metal",
+    "desc": "Power and thrash metal"
+  },
+  {
+    "name": "181.fm True Metal",
+    "url": "https://listen.181fm.com/181-truemetal_128k.mp3",
+    "genre": "metal",
+    "desc": "Classic and true heavy metal"
+  },
+  {
+    "name": "181.fm Hard Rock",
+    "url": "https://listen.181fm.com/181-hardrock_128k.mp3",
+    "genre": "metal",
+    "desc": "Hard rock and heavy"
+  },
+  {
+    "name": "181.fm Punk",
+    "url": "https://listen.181fm.com/181-punk_128k.mp3",
+    "genre": "punk",
+    "desc": "Punk and skate rock"
+  },
+  {
+    "name": "KEXP 90.3",
+    "url": "https://kexp-mp3-128.streamguys1.com/kexp128.mp3",
+    "genre": "punk",
+    "desc": "Seattle indie and alternative"
+  },
+  {
+    "name": "KFJC 89.7",
+    "url": "http://netcast.kfjc.org/kfjc-320k-aac",
+    "genre": "punk",
+    "desc": "Freeform radio, experimental, obscure"
+  },
+  {
+    "name": "181.fm Gospel",
+    "url": "https://listen.181fm.com/181-gospel_128k.mp3",
+    "genre": "gospel",
+    "desc": "Gospel music and spiritual"
+  },
+  {
+    "name": "181.fm Oldies",
+    "url": "https://listen.181fm.com/181-oldies_128k.mp3",
+    "genre": "rock",
+    "desc": "50s, 60s, 70s oldies hits"
+  },
+  {
+    "name": "181.fm Blues",
+    "url": "https://listen.181fm.com/181-blues_128k.mp3",
+    "genre": "blues",
+    "desc": "Blues music 24/7"
+  },
+  {
+    "name": "Radio Caprice Blues",
+    "url": "http://79.120.39.160:8002/blues",
+    "genre": "blues",
+    "desc": "Blues classics"
+  },
+  {
+    "name": "181.fm Salsa",
+    "url": "https://listen.181fm.com/181-salsa_128k.mp3",
+    "genre": "reggaeton",
+    "desc": "Salsa and Latin rhythms"
+  },
+  {
+    "name": "181.fm Latina",
+    "url": "https://listen.181fm.com/181-latina_128k.mp3",
+    "genre": "reggaeton",
+    "desc": "Latin pop and reggaeton"
+  },
+  {
+    "name": "NPR News",
+    "url": "https://npr-ice.streamguys1.com/live.mp3",
+    "genre": "news",
+    "desc": "NPR live news stream"
+  },
+  {
+    "name": "BBC World Service",
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
+    "genre": "news",
+    "desc": "BBC international news 24/7"
+  },
+  {
+    "name": "KQED FM",
+    "url": "https://streams2.kqed.org/kqedradio",
+    "genre": "news",
+    "desc": "San Francisco NPR and public radio"
+  },
+  {
+    "name": "BBC Radio 4",
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_fourfm",
+    "genre": "talk",
+    "desc": "BBC spoken word, drama, comedy, news"
+  },
+  {
+    "name": "WNYC FM",
+    "url": "https://fm939.wnyc.org/wnycfm",
+    "genre": "talk",
+    "desc": "New York public radio and talk"
+  },
+  {
+    "name": "Coast to Coast AM",
+    "url": "https://listen.181fm.com/181-buzz_128k.mp3",
+    "genre": "talk",
+    "desc": "Talk radio and discussion"
+  },
+  {
+    "name": "Her.st Propaganda",
+    "url": "https://radio.her.st/live",
+    "genre": "paranormal",
+    "desc": "24/7 conspiracy, philosophy, propaganda talk"
+  },
+  {
+    "name": "DEF CON Radio",
+    "url": "https://ice5.somafm.com/defcon-128-mp3",
+    "genre": "paranormal",
+    "desc": "Hacker culture, electronic paranoia"
+  },
+  {
+    "name": "1940s Radio",
+    "url": "https://cast2.asurahosting.com/proxy/1940sradio/stream/",
+    "genre": "vintage",
+    "desc": "1940s big band, swing, jive. Golden age"
+  },
+  {
+    "name": "Crime Inc.",
+    "url": "https://cast2.asurahosting.com/proxy/crimeinc/stream/",
+    "genre": "vintage",
+    "desc": "Old time radio crime dramas \u2014 The Shadow, Dragnet, Suspense"
+  },
+  {
+    "name": "American Gold",
+    "url": "https://cast2.asurahosting.com/proxy/americangold/stream/",
+    "genre": "vintage",
+    "desc": "Golden age radio comedy, drama, variety 1930s-1950s"
+  },
+  {
+    "name": "Strange Radio",
+    "url": "https://cast2.asurahosting.com/proxy/strangeradio/stream/",
+    "genre": "vintage",
+    "desc": "Weird old radio \u2014 sci-fi, horror, supernatural mysteries"
+  },
+  {
+    "name": "Venture Radio",
+    "url": "https://cast2.asurahosting.com/proxy/ventureradio/stream/",
+    "genre": "vintage",
+    "desc": "Old time adventure and westerns \u2014 Gunsmoke, Lone Ranger"
+  },
+  {
+    "name": "BritCom Radio",
+    "url": "https://cast2.asurahosting.com/proxy/britcom1/stream/",
+    "genre": "vintage",
+    "desc": "Vintage BBC comedy \u2014 Goon Show, Hancock"
+  },
+  {
+    "name": "Radio Dismuke",
+    "url": "http://74.208.197.50:8087/",
+    "genre": "vintage",
+    "desc": "1920s-1930s pre-war jazz and dance music"
+  },
+  {
+    "name": "The Dark Zone",
+    "url": "https://ice5.somafm.com/darkzone-256-mp3",
+    "genre": "dark",
+    "desc": "Darker side of deep ambient. Staring into the Abyss"
+  },
+  {
+    "name": "Doomed",
+    "url": "https://ice5.somafm.com/doomed-128-mp3",
+    "genre": "dark",
+    "desc": "Dark industrial/ambient for tortured souls"
+  },
+  {
+    "name": "Radio Caprice Dark Ambient",
+    "url": "http://79.120.39.202:9095/",
+    "genre": "dark",
+    "desc": "Industrial, dark, ritual ambient"
+  },
+  {
+    "name": "SF 10-33",
+    "url": "https://ice5.somafm.com/sf1033-128-mp3",
+    "genre": "scanner",
+    "desc": "Ambient music mixed with SF police scanner"
+  },
+  {
+    "name": "SF Police Scanner",
+    "url": "https://ice5.somafm.com/scanner-128-mp3",
+    "genre": "scanner",
+    "desc": "Raw San Francisco public safety scanner"
+  },
+  {
+    "name": "Mission Control",
+    "url": "https://ice5.somafm.com/missioncontrol-128-mp3",
+    "genre": "scanner",
+    "desc": "NASA mission audio mixed with ambient"
+  },
+  {
+    "name": "Space Station Soma",
+    "url": "https://ice5.somafm.com/spacestation-128-mp3",
+    "genre": "scanner",
+    "desc": "Spaced-out orbital soundscapes"
+  },
+  {
+    "name": "Maschinengeist",
+    "url": "http://i.20hz.biz:8000/maschinengeist.org.192.mp3",
+    "genre": "experimental",
+    "desc": "German experimental electronic and noise art"
+  },
+  {
+    "name": "Resonance FM",
+    "url": "http://stream.resonance.fm:8000/resonance",
+    "genre": "experimental",
+    "desc": "London art radio \u2014 sound art, avant-garde"
+  },
+  {
+    "name": "Radio Caprice Avant-Garde",
+    "url": "http://79.111.119.111:9109/",
+    "genre": "experimental",
+    "desc": "Experimental and avant-garde, musique concrete"
+  },
+  {
+    "name": "SF in SF",
+    "url": "https://ice5.somafm.com/sfinsf-128-mp3",
+    "genre": "spoken",
+    "desc": "Sci-fi and horror author readings"
+  },
+  {
+    "name": "WFMU Freeform",
+    "url": "http://stream0.wfmu.org/freeform-128k",
+    "genre": "underground",
+    "desc": "Legendary freeform station since 1958. No rules"
+  },
+  {
+    "name": "WFMU Rock'n'Soul",
+    "url": "http://stream0.wfmu.org/rocknsoull-128k",
+    "genre": "underground",
+    "desc": "WFMU deep cuts, underground rock and soul"
+  },
+  {
+    "name": "NTS Radio 1",
+    "url": "https://stream-relay-geo.ntslive.net/stream",
+    "genre": "underground",
+    "desc": "London underground eclectic radio"
+  },
+  {
+    "name": "NTS Radio 2",
+    "url": "https://stream-relay-geo.ntslive.net/stream2",
+    "genre": "underground",
+    "desc": "NTS second channel, DJ sets, experimental"
+  },
+  {
+    "name": "aNONradio",
+    "url": "http://anonradio.net:8000/anonradio",
+    "genre": "underground",
+    "desc": "Hacker community radio, anything goes"
+  },
+  {
+    "name": "TildeRadio",
+    "url": "https://azuracast.tilderadio.org/radio/8000/radio.mp3",
+    "genre": "underground",
+    "desc": "Tildeverse community radio, eclectic DJs"
+  },
+  {
+    "name": "Radio Free Brooklyn",
+    "url": "http://patmos.cdnstream.com:9300/stream",
+    "genre": "underground",
+    "desc": "Brooklyn community freeform radio"
+  },
+  {
+    "name": "181.fm Hairband",
+    "url": "https://listen.181fm.com/181-hairband_128k.mp3",
+    "genre": "metal",
+    "desc": "80s hair metal and hard rock classics"
+  },
+  {
+    "name": "Steel FM",
+    "url": "http://ice6.securenetsystems.net/STEELFM",
+    "genre": "metal",
+    "desc": "Finnish metal radio"
+  },
+  {
+    "name": "Punkrockers Radio",
+    "url": "https://stream.punkrockers-radio.de:8443/prr.flac",
+    "genre": "metal",
+    "desc": "24/7 punk and metal from Germany"
+  },
+  {
+    "name": "181.fm Good Time Oldies",
+    "url": "https://listen.181fm.com/181-greatoldies_128k.mp3",
+    "genre": "rock",
+    "desc": "Classic oldies from the 50s, 60s, 70s"
+  },
+  {
+    "name": "181.fm Eagle",
+    "url": "https://listen.181fm.com/181-eagle_128k.mp3",
+    "genre": "rock",
+    "desc": "Classic rock hits from the 60s and 70s"
+  },
+  {
+    "name": "Radio Paradise Main",
+    "url": "http://stream.radioparadise.com/aac-320",
+    "genre": "rock",
+    "desc": "DJ-curated eclectic rock mix, 320k"
+  },
+  {
+    "name": "Radio Paradise Rock",
+    "url": "http://stream.radioparadise.com/rock-320",
+    "genre": "rock",
+    "desc": "Dedicated rock mix, 320k"
+  },
+  {
+    "name": "BBC Radio 1",
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_one",
+    "genre": "rock",
+    "desc": "BBC pop and rock, new music"
+  },
+  {
+    "name": "BBC Radio 2",
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_two",
+    "genre": "rock",
+    "desc": "BBC adult contemporary, classic rock"
+  },
+  {
+    "name": "Indie Pop Rocks",
+    "url": "https://ice5.somafm.com/indiepop-128-mp3",
+    "genre": "rock",
+    "desc": "Indie pop and rock, new and classic"
+  },
+  {
+    "name": "Covers",
+    "url": "https://ice5.somafm.com/covers-128-mp3",
+    "genre": "rock",
+    "desc": "Great cover versions of great songs"
+  },
+  {
+    "name": "Blues Music Fan",
+    "url": "https://orbit.citrus3.com:8052/stream",
+    "genre": "blues",
+    "desc": "Commercial-free blues, 320kbps HD"
+  },
+  {
+    "name": "Sonic Universe",
+    "url": "https://ice5.somafm.com/sonicuniverse-128-mp3",
+    "genre": "blues",
+    "desc": "Jazz with blues and funk crossover"
+  },
+  {
+    "name": "181.fm Acid Jazz",
+    "url": "https://listen.181fm.com/181-acidjazz_128k.mp3",
+    "genre": "blues",
+    "desc": "Acid jazz and groove"
+  },
+  {
+    "name": "BBC Radio 3",
+    "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_three",
+    "genre": "classical",
+    "desc": "BBC classical, jazz, world, drama"
+  },
+  {
+    "name": "Radio Classique",
+    "url": "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3",
+    "genre": "classical",
+    "desc": "French classical music, high quality"
+  },
+  {
+    "name": "France Musique",
+    "url": "https://direct.francemusique.fr/live/francemusique-midfi.mp3",
+    "genre": "classical",
+    "desc": "French classical main channel"
+  },
+  {
+    "name": "181.fm Classical Guitar",
+    "url": "https://listen.181fm.com/181-classicalguitar_128k.mp3",
+    "genre": "classical",
+    "desc": "Classical guitar music"
+  },
+  {
+    "name": "181.fm Highway 181",
+    "url": "https://listen.181fm.com/181-highway_128k.mp3",
+    "genre": "country",
+    "desc": "Classic and modern country mix"
+  },
+  {
+    "name": "Folk Forward",
+    "url": "https://ice5.somafm.com/folkfwd-128-mp3",
+    "genre": "country",
+    "desc": "Contemporary folk and Americana"
+  },
+  {
+    "name": "Dub Step Beyond",
+    "url": "https://ice5.somafm.com/dubstep-128-mp3",
+    "genre": "electronic",
+    "desc": "Dubstep, dub, and bass music"
+  },
+  {
+    "name": "PopTron",
+    "url": "https://ice5.somafm.com/poptron-128-mp3",
+    "genre": "electronic",
+    "desc": "Electropop and indie electronic"
+  },
+  {
+    "name": "Digitalis",
+    "url": "https://ice5.somafm.com/digitalis-128-mp3",
+    "genre": "electronic",
+    "desc": "Digitally affected beats and atmospheres"
+  },
+  {
+    "name": "Synphaera",
+    "url": "https://ice5.somafm.com/synphaera-128-mp3",
+    "genre": "ambient",
+    "desc": "Modern electronic ambient and space music"
+  },
+  {
+    "name": "Heavyweight Reggae",
+    "url": "https://ice5.somafm.com/reggae-128-mp3",
+    "genre": "reggaeton",
+    "desc": "Roots, dub, and dancehall reggae"
+  },
+  {
+    "name": "Bossa Beyond",
+    "url": "https://ice5.somafm.com/bossa-128-mp3",
+    "genre": "reggaeton",
+    "desc": "Brazilian bossa nova and beyond"
+  },
+  {
+    "name": "France Inter",
+    "url": "http://direct.franceinter.fr/live/franceinter-midfi.mp3",
+    "genre": "news",
+    "desc": "French public radio news and talk"
+  },
+  {
+    "name": "Al Jazeera English",
+    "url": "https://live-hls-audio-web-aje.getaj.net/VOICE-AJE/01.m3u8",
+    "genre": "news",
+    "desc": "Al Jazeera international news"
+  },
+  {
+    "name": "France Culture",
+    "url": "http://direct.franceculture.fr/live/franceculture-midfi.mp3",
+    "genre": "politics",
+    "desc": "French cultural programming and debate"
+  },
+  {
+    "name": "181.fm Comedy Club",
+    "url": "https://listen.181fm.com/181-comedy_128k.mp3",
+    "genre": "comedy",
+    "desc": "Stand-up comedy 24/7"
+  },
+  {
+    "name": "Thistle Radio",
+    "url": "https://ice5.somafm.com/thistle-128-mp3",
+    "genre": "gospel",
+    "desc": "Celtic and world music with spiritual tones"
+  },
+  {
+    "name": "Radio Caroline",
+    "url": "http://sc3.radiocaroline.net:8030/stream",
+    "genre": "vintage",
+    "desc": "Legendary British pirate radio, classic hits"
+  },
+  {
+    "name": "Crooner Radio Elvis",
+    "url": "http://croonerradio_elvispresley.ice.infomaniak.ch/croonerradio-elvispresley-midfi.mp3",
+    "genre": "vintage",
+    "desc": "24/7 Elvis Presley channel"
+  },
+  {
+    "name": "FIP Bordeaux",
+    "url": "https://direct.fipradio.fr/live/fipbordeaux-midfi.mp3",
+    "genre": "underground",
+    "desc": "French eclectic, no talk, all music"
+  }
+]

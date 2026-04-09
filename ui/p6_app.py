@@ -20,10 +20,12 @@ from ui.screens.p6_pattern_screen import P6PatternScreen
 from ui.screens.p6_record_screen import P6RecordScreen
 from ui.screens.p6_sample_screen import P6SampleScreen
 from ui.screens.p6_help_screen import P6HelpScreen
+from ui.screens.p6_radio_screen import P6RadioScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
 from engine.p6_recorder import P6Recorder
+from ui.splash import run_splash
 
 # Custom pygame events (thread-safe MIDI → UI bridge)
 P6_TRANSPORT_EVENT = pygame.USEREVENT + 1
@@ -79,23 +81,62 @@ class P6App:
         self.config = load_config()
 
         # ── Pygame init ──────────────────────────────────────────────
+        # Framebuffer mode for SPI LCDs (set by start.sh)
+        self._fb_mode = os.environ.get("COMPA_FB_MODE") == "1"
+        self._fb_file = None
+
         if "SDL_VIDEODRIVER" not in os.environ:
             os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
         os.environ.setdefault("SDL_FBDEV", "/dev/fb0")
         pygame.init()
+
+        if self._fb_mode:
+            # SPI LCD: use dummy driver, detect fb size, open fb for writing
+            fb_dev = os.environ.get("COMPA_FB_DEV", "/dev/fb0")
+            fb_num = fb_dev.replace("/dev/fb", "")
+            fb_size = (480, 320)
+            try:
+                with open(f"/sys/class/graphics/fb{fb_num}/virtual_size") as f:
+                    parts = f.read().strip().split(",")
+                    fb_size = (int(parts[0]), int(parts[1]))
+            except Exception:
+                pass
+            self.screen = pygame.display.set_mode(fb_size)
+            self._display_w, self._display_h = fb_size
+            try:
+                import subprocess
+                subprocess.run(["sudo", "chmod", "666", fb_dev], capture_output=True)
+                self._fb_file = open(fb_dev, "wb")
+            except Exception as e:
+                print(f"Cannot open {fb_dev}: {e}", flush=True)
+                self._fb_file = None
+            print(f"FB mode: {fb_size[0]}x{fb_size[1]}", flush=True)
+        else:
+            # HDMI/KMSDRM: detect actual display
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            info = pygame.display.Info()
+            self._display_w = info.current_w
+            self._display_h = info.current_h
+
+        # Update theme with actual dimensions
+        theme.init_display(self._display_w, self._display_h)
         theme.init_fonts()
 
-        self.screen = pygame.display.set_mode(
-            (theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT),
-            pygame.FULLSCREEN,
-        )
         pygame.display.set_caption("Compa")
-        pygame.mouse.set_visible(False)  # Hide cursor for touchscreen
+        pygame.mouse.set_visible(False)
 
-        # Store actual display dimensions for touch mapping
-        info = pygame.display.Info()
-        self._display_w = info.current_w
-        self._display_h = info.current_h
+        print(f"Display: {self._display_w}x{self._display_h}", flush=True)
+
+        # FB mode: start evdev touch reader thread
+        self._evdev_thread = None
+        if self._fb_mode:
+            self._start_evdev_touch()
+
+        # Touch-drag scroll tracking
+        self._touch_start_y = 0
+        self._touch_start_x = 0
+        self._touch_is_scroll = False
+        self._touch_scroll_threshold = 15  # pixels before drag becomes scroll
 
         self.clock = pygame.time.Clock()
         self.fps = 30
@@ -125,29 +166,50 @@ class P6App:
             "pattern": P6PatternScreen(self),
             "record":  P6RecordScreen(self),
             "sample":  P6SampleScreen(self),
+            "radio":   P6RadioScreen(self),
             "help":    P6HelpScreen(self),
         }
         self.current_screen_name = "session"
 
-        # ── Nav bar ──────────────────────────────────────────────────
+        # ── Nav bar (responsive) ─────────────────────────────────────
         nav_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
-        nav_labels = [
-            ("SESSION", "session"),
-            ("CONTROL", "control"),
-            ("PATTERN", "pattern"),
-            ("RECORD",  "record"),
-            ("SAMPLE",  "sample"),
-        ]
+        if theme.SCREEN_WIDTH >= 700:
+            # Wide screen: full labels
+            nav_labels = [
+                ("SESSION", "session"), ("CONTROL", "control"),
+                ("PATTERN", "pattern"), ("RECORD",  "record"),
+                ("SAMPLE",  "sample"),  ("RADIO",   "radio"),
+            ]
+            font_name = "small"
+        elif theme.SCREEN_WIDTH >= 400:
+            # Medium screen: short labels
+            nav_labels = [
+                ("SES", "session"), ("CTL", "control"),
+                ("PAT", "pattern"), ("REC", "record"),
+                ("SMP", "sample"),  ("RAD", "radio"),
+            ]
+            font_name = "tiny"
+        else:
+            # Tiny screen: icons/minimal
+            nav_labels = [
+                ("S", "session"), ("C", "control"),
+                ("P", "pattern"), ("R", "record"),
+                ("F", "sample"),  ("~", "radio"),
+            ]
+            font_name = "tiny"
+
         self.nav_buttons: list[tuple[Button, str]] = []
-        btn_w = 140
-        btn_gap = 6
-        total_w = len(nav_labels) * btn_w + (len(nav_labels) - 1) * btn_gap
-        start_x = (theme.SCREEN_WIDTH - total_w) // 2
+        num_btns = len(nav_labels)
+        btn_gap = 3
+        avail_w = theme.SCREEN_WIDTH - 36  # room for ? button
+        btn_w = (avail_w - (num_btns - 1) * btn_gap) // num_btns
+        btn_h = min(28, theme.NAV_HEIGHT - 24)
+        start_x = 32  # after ? button
         for i, (label, screen_name) in enumerate(nav_labels):
             btn = Button(
-                pygame.Rect(start_x + i * (btn_w + btn_gap), nav_y + 6, btn_w, 32),
+                pygame.Rect(start_x + i * (btn_w + btn_gap), nav_y + 4, btn_w, btn_h),
                 label,
-                font_name="small",
+                font_name=font_name,
             )
             self.nav_buttons.append((btn, screen_name))
 
@@ -193,6 +255,97 @@ class P6App:
         elif self.atom_sq:
             self.atom_sq.on_button = self._on_atomsq_button_fallback
             print("ATOM SQ connected but P-6 not found — navigation only")
+
+    # ── Evdev touch input (for SPI LCD / FB mode) ─────────────────────
+
+    def _start_evdev_touch(self):
+        """Start a thread that reads evdev touch events and posts pygame events."""
+        import threading
+        self._evdev_thread = threading.Thread(target=self._evdev_loop, daemon=True)
+        self._evdev_thread.start()
+
+    def _evdev_loop(self):
+        """Read ADS7846 touch events and convert to pygame mouse events."""
+        try:
+            import evdev
+            import select
+        except ImportError:
+            print("evdev not available for touch input", flush=True)
+            return
+
+        # Find touch device
+        dev = None
+        for path in evdev.list_devices():
+            d = evdev.InputDevice(path)
+            if "touch" in d.name.lower() or "ads" in d.name.lower():
+                dev = d
+                break
+
+        if not dev:
+            print("No touch device found", flush=True)
+            return
+
+        print(f"Evdev touch: {dev.name} at {dev.path}", flush=True)
+
+        # Load tslib calibration from /etc/pointercal if available
+        # Format: A B C D E F S  (affine transform)
+        # screen_x = (A * raw_x + B * raw_y + C) / S
+        # screen_y = (D * raw_x + E * raw_y + F) / S
+        cal = None
+        try:
+            with open("/etc/pointercal") as f:
+                vals = list(map(int, f.read().strip().split()))
+                if len(vals) >= 7:
+                    cal = vals[:7]
+                    print(f"Touch calibration loaded: {cal}", flush=True)
+        except Exception:
+            pass
+
+        if not cal:
+            print("No /etc/pointercal — using raw coordinates", flush=True)
+
+        touch_x = touch_y = 0
+        raw_x = raw_y = 0
+        touching = False
+        sw, sh = self._display_w, self._display_h
+
+        while True:
+            try:
+                r, _, _ = select.select([dev], [], [], 0.05)
+                if not r:
+                    continue
+                for event in dev.read():
+                    if event.type == 3:  # EV_ABS
+                        if event.code == 0:  # ABS_X
+                            raw_x = event.value
+                        elif event.code == 1:  # ABS_Y
+                            raw_y = event.value
+
+                        if cal:
+                            A, B, C, D, E, F, S = cal
+                            touch_x = (A * raw_x + B * raw_y + C) // S
+                            touch_y = (D * raw_x + E * raw_y + F) // S
+                        else:
+                            touch_x = int(raw_x * sw / 4096)
+                            touch_y = int(raw_y * sh / 4096)
+
+                        touch_x = max(0, min(sw - 1, touch_x))
+                        touch_y = max(0, min(sh - 1, touch_y))
+                    elif event.type == 1 and event.code == 330:  # BTN_TOUCH
+                        if event.value == 1 and not touching:
+                            touching = True
+                            pygame.event.post(pygame.event.Event(
+                                pygame.MOUSEBUTTONDOWN, pos=(touch_x, touch_y), button=1))
+                        elif event.value == 0 and touching:
+                            touching = False
+                            pygame.event.post(pygame.event.Event(
+                                pygame.MOUSEBUTTONUP, pos=(touch_x, touch_y), button=1))
+                    elif event.type == 0 and event.code == 0 and touching:  # SYN_REPORT
+                        pygame.event.post(pygame.event.Event(
+                            pygame.MOUSEMOTION, pos=(touch_x, touch_y),
+                            rel=(0, 0), buttons=(1, 0, 0)))
+            except Exception:
+                pass
 
     # ── Transport callbacks ──────────────────────────────────────────
 
@@ -310,25 +463,63 @@ class P6App:
             if event.type == pygame.QUIT:
                 continue
 
-            # Convert touch events to mouse events for all screens
-            # Use actual display dimensions for accurate mapping
+            # Convert touch events to mouse events with scroll detection
             if event.type == pygame.FINGERDOWN:
                 mx = int(event.x * self._display_w)
                 my = int(event.y * self._display_h)
+                self._touch_start_x = mx
+                self._touch_start_y = my
+                self._touch_is_scroll = False
                 event = pygame.event.Event(pygame.MOUSEBUTTONDOWN,
                                            pos=(mx, my), button=1)
             elif event.type == pygame.FINGERUP:
                 mx = int(event.x * self._display_w)
                 my = int(event.y * self._display_h)
-                event = pygame.event.Event(pygame.MOUSEBUTTONUP,
-                                           pos=(mx, my), button=1)
+                if self._touch_is_scroll:
+                    # Was scrolling — don't send click
+                    self._touch_is_scroll = False
+                    event = pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                               pos=(mx, my), button=1)
+                else:
+                    event = pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                               pos=(mx, my), button=1)
             elif event.type == pygame.FINGERMOTION:
                 mx = int(event.x * self._display_w)
                 my = int(event.y * self._display_h)
-                event = pygame.event.Event(pygame.MOUSEMOTION,
-                                           pos=(mx, my), rel=(int(event.dx * self._display_w),
-                                                               int(event.dy * self._display_h)),
-                                           buttons=(1, 0, 0))
+                dy = my - self._touch_start_y
+
+                if not self._touch_is_scroll and abs(dy) > self._touch_scroll_threshold:
+                    self._touch_is_scroll = True
+
+                if self._touch_is_scroll:
+                    # Skip global scroll if a screen is handling its own drag
+                    screen = self.current_screen
+                    if hasattr(screen, '_dragging_scrollbar') and screen._dragging_scrollbar:
+                        # Let the screen handle the drag directly as MOUSEMOTION
+                        event = pygame.event.Event(pygame.MOUSEMOTION,
+                                                   pos=(mx, my),
+                                                   rel=(int(event.dx * self._display_w),
+                                                        int(event.dy * self._display_h)),
+                                                   buttons=(1, 0, 0))
+                        self.current_screen.handle_event(event)
+                        continue
+
+                    # Generate scroll events based on drag direction
+                    scroll_dy = int(event.dy * self._display_h)
+                    if abs(scroll_dy) > 8:
+                        # Scroll up (drag down) or scroll down (drag up)
+                        btn = 4 if scroll_dy > 0 else 5
+                        event = pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                   pos=(mx, my), button=btn)
+                        self._touch_start_y = my  # reset for next increment
+                    else:
+                        continue  # skip small motions
+                else:
+                    event = pygame.event.Event(pygame.MOUSEMOTION,
+                                               pos=(mx, my),
+                                               rel=(int(event.dx * self._display_w),
+                                                    int(event.dy * self._display_h)),
+                                               buttons=(1, 0, 0))
 
             # P-6 transport event (from MIDI thread via pygame event)
             if event.type == P6_TRANSPORT_EVENT:
@@ -347,7 +538,8 @@ class P6App:
                 NAV_KEYS = {
                     pygame.K_F1: "session", pygame.K_F2: "control",
                     pygame.K_F3: "pattern", pygame.K_F4: "record",
-                    pygame.K_F5: "sample", pygame.K_F6: "help",
+                    pygame.K_F5: "sample", pygame.K_F6: "radio",
+                    pygame.K_F7: "help",
                 }
                 if event.key in NAV_KEYS:
                     self.switch_screen(NAV_KEYS[event.key])
@@ -368,6 +560,12 @@ class P6App:
                             meta["bpm_at_record"] = self.p6.state.bpm
                             meta["pattern_at_record"] = self.p6.state.active_pattern
                         self.recorder.start_recording(metadata=meta)
+                    continue
+                elif event.key == pygame.K_F12:
+                    # Screenshot
+                    path = "/tmp/compa_screen.png"
+                    pygame.image.save(self.screen, path)
+                    print(f"Screenshot saved: {path}", flush=True)
                     continue
                 elif event.key == pygame.K_a:
                     # Toggle auto-record
@@ -397,6 +595,26 @@ class P6App:
             self.current_screen.handle_event(event)
 
     def _update(self):
+        # Check for remote screenshot request
+        if os.path.exists("/tmp/compa_screenshot_request"):
+            os.remove("/tmp/compa_screenshot_request")
+            pygame.image.save(self.screen, "/tmp/compa_screen.png")
+            print("Screenshot captured", flush=True)
+
+        # Screenshot all screens at once
+        if os.path.exists("/tmp/compa_screenshot_all"):
+            os.remove("/tmp/compa_screenshot_all")
+            original = self.current_screen_name
+            for name in self.screens:
+                self.switch_screen(name)
+                self.screen.fill(theme.BG)
+                self.current_screen.draw(self.screen)
+                self._draw_nav()
+                pygame.image.save(self.screen, f"/tmp/compa_{name}.png")
+                print(f"Screenshot: {name}", flush=True)
+            self.switch_screen(original)
+            print("All screenshots captured", flush=True)
+
         if hasattr(self.current_screen, "update"):
             self.current_screen.update()
         for btn, screen_name in self.nav_buttons:
@@ -408,77 +626,126 @@ class P6App:
         self._draw_nav()
         pygame.display.flip()
 
+        # SPI LCD: copy pygame surface to framebuffer as RGB565
+        if self._fb_mode and self._fb_file:
+            try:
+                import numpy as np
+                # Get pixels as 3D array (H, W, 3) uint8
+                arr = pygame.surfarray.pixels3d(self.screen)
+                # Transpose from (W,H,3) to (H,W,3)
+                arr = np.transpose(arr, (1, 0, 2))
+                r = arr[:, :, 0].astype(np.uint16)
+                g = arr[:, :, 1].astype(np.uint16)
+                b = arr[:, :, 2].astype(np.uint16)
+                rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+                self._fb_file.seek(0)
+                self._fb_file.write(rgb565.astype(np.uint16).tobytes())
+                self._fb_file.flush()
+            except Exception:
+                pass
+
     def _draw_nav(self):
-        pygame.draw.rect(self.screen, theme.NAV_BG, self._nav_rect)
-        pygame.draw.line(
-            self.screen, theme.BORDER,
-            (0, self._nav_rect.y),
-            (theme.SCREEN_WIDTH, self._nav_rect.y),
-        )
-
-        # Nav buttons (row 1)
-        for btn, _ in self.nav_buttons:
-            btn.draw(self.screen)
-
         f = theme.font("small")
+        f_tiny = theme.font("tiny")
 
-        # Help button (left of nav buttons)
-        help_rect = pygame.Rect(4, self._nav_rect.y + 4, 28, 28)
-        help_bg = theme.ACCENT if self.current_screen_name == "help" else theme.BUTTON_BG
-        help_tc = theme.BG if self.current_screen_name == "help" else theme.TEXT_DIM
-        pygame.draw.rect(self.screen, help_bg, help_rect, border_radius=4)
-        surf = f.render("?", True, help_tc)
+        # Nav bar background with top accent line
+        pygame.draw.rect(self.screen, theme.NAV_BG, self._nav_rect)
+        pygame.draw.line(self.screen, theme.BORDER,
+                        (0, self._nav_rect.y), (theme.SCREEN_WIDTH, self._nav_rect.y))
+        # Subtle accent line at very top of nav
+        pygame.draw.line(self.screen, theme.ACCENT_DIM,
+                        (0, self._nav_rect.y), (theme.SCREEN_WIDTH, self._nav_rect.y))
+
+        # ── Nav buttons (custom drawn for polish) ────────────────────
+        for btn, screen_name in self.nav_buttons:
+            rect = btn.rect
+            active = (screen_name == self.current_screen_name)
+
+            if active:
+                # Active tab: accent background with glow
+                glow = rect.inflate(2, 2)
+                glow_surf = pygame.Surface((glow.width, glow.height), pygame.SRCALPHA)
+                pygame.draw.rect(glow_surf, (*theme.ACCENT[:3], 25),
+                                (0, 0, glow.width, glow.height), border_radius=6)
+                self.screen.blit(glow_surf, glow.topleft)
+                pygame.draw.rect(self.screen, theme.ACCENT, rect, border_radius=6)
+                surf = f.render(btn.label, True, theme.BG)
+            else:
+                # Inactive: subtle background
+                pygame.draw.rect(self.screen, theme.NAV_INACTIVE, rect, border_radius=6)
+                pygame.draw.rect(self.screen, theme.BORDER, rect, 1, border_radius=6)
+                surf = f.render(btn.label, True, theme.TEXT_DIM)
+
+            self.screen.blit(surf, surf.get_rect(center=rect.center))
+
+        # ── Help button ──────────────────────────────────────────────
+        help_rect = pygame.Rect(4, self._nav_rect.y + 4, 26, 26)
+        help_active = self.current_screen_name == "help"
+        if help_active:
+            pygame.draw.rect(self.screen, theme.ACCENT, help_rect, border_radius=13)
+            surf = f.render("?", True, theme.BG)
+        else:
+            pygame.draw.rect(self.screen, theme.BORDER, help_rect, 1, border_radius=13)
+            surf = f_tiny.render("?", True, theme.TEXT_DIM)
         self.screen.blit(surf, surf.get_rect(center=help_rect.center))
 
-        # Status bar (row 2, below nav buttons)
-        status_y = self._nav_rect.y + 36
-        x = 40
+        # ── Status bar (bottom of nav) ───────────────────────────────
+        status_y = self._nav_rect.y + 35
+        x = 36
 
-        # Transport state
+        # Transport dot + state
         if self.p6 and self.p6.state.playing:
-            t_surf = f.render("PLAY", True, theme.GREEN)
+            pygame.draw.circle(self.screen, theme.GREEN, (x, status_y + 7), 4)
+            x += 12
+            surf = f_tiny.render("PLAY", True, theme.GREEN)
         elif self.recorder.is_recording:
-            t_surf = f.render("REC", True, theme.RED)
+            pygame.draw.circle(self.screen, theme.RED, (x, status_y + 7), 4)
+            x += 12
+            surf = f_tiny.render("REC", True, theme.RED)
         else:
-            t_surf = f.render("STOP", True, theme.TEXT_DIM)
-        self.screen.blit(t_surf, (x, status_y))
-        x += t_surf.get_width() + 12
+            pygame.draw.circle(self.screen, theme.TEXT_DIM, (x, status_y + 7), 3, 1)
+            x += 12
+            surf = f_tiny.render("STOP", True, theme.TEXT_DIM)
+        self.screen.blit(surf, (x, status_y))
+        x += surf.get_width() + 10
 
-        # BPM from P-6
+        # BPM
         if self.p6:
             bpm = self.p6.state.bpm
-            bpm_surf = f.render(f"{bpm:.0f}bpm", True, theme.TEXT_DIM)
-            self.screen.blit(bpm_surf, (x, status_y))
-            x += bpm_surf.get_width() + 12
+            surf = f_tiny.render(f"{bpm:.0f}", True, theme.TEXT)
+            self.screen.blit(surf, (x, status_y))
+            x += surf.get_width() + 2
+            surf = f_tiny.render("bpm", True, theme.TEXT_DIM)
+            self.screen.blit(surf, (x, status_y))
+            x += surf.get_width() + 10
 
-        # Auto-record indicator
+        # Auto-record badge
         if self.auto_record:
-            surf = f.render("AUTO", True, theme.RED)
-            self.screen.blit(surf, (x, status_y))
-            x += surf.get_width() + 12
+            badge = pygame.Rect(x, status_y - 1, 38, 16)
+            pygame.draw.rect(self.screen, theme.RED, badge, border_radius=3)
+            surf = f_tiny.render("AUTO", True, theme.TEXT_BRIGHT)
+            self.screen.blit(surf, surf.get_rect(center=badge.center))
+            x += 46
 
-        # Layer indicator
-        if self.router:
-            surf = f.render(self.router.layer.value.upper(), True, theme.ACCENT)
-            self.screen.blit(surf, (x, status_y))
-            x += surf.get_width() + 12
-
-        # Right side: connection status
-        rx = theme.SCREEN_WIDTH - 8
+        # Right side: connection status with dots
+        rx = theme.SCREEN_WIDTH - 10
         if self.p6 and self.p6.connected:
-            surf = f.render("P-6", True, theme.GREEN)
-        else:
-            surf = f.render("NO P-6", True, theme.RED)
-        rx -= surf.get_width()
-        self.screen.blit(surf, (rx, status_y))
-
-        if self.atom_sq and self.atom_sq.connected:
-            surf = f.render("ATOM", True, theme.GREEN)
-            rx -= surf.get_width() + 8
+            surf = f_tiny.render("P-6", True, theme.GREEN)
+            rx -= surf.get_width()
             self.screen.blit(surf, (rx, status_y))
+            pygame.draw.circle(self.screen, theme.GREEN, (rx - 8, status_y + 7), 3)
+            rx -= 16
+        else:
+            surf = f_tiny.render("P-6", True, theme.RED)
+            rx -= surf.get_width()
+            self.screen.blit(surf, (rx, status_y))
+            pygame.draw.circle(self.screen, theme.RED, (rx - 8, status_y + 7), 3, 1)
+            rx -= 16
 
     def _shutdown(self):
         print("Shutting down Compa...")
+        if hasattr(self.screens.get("radio", None), '_radio'):
+            self.screens["radio"]._radio.shutdown()
         self.recorder.shutdown()
         if self.router:
             pass  # Router doesn't need shutdown
@@ -495,6 +762,9 @@ def main():
     def _sigterm(signum, frame):
         app.running = False
     signal.signal(signal.SIGTERM, _sigterm)
+
+    # Animated splash screen
+    run_splash(app.screen, app.clock)
 
     app.run()
 

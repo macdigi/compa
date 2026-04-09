@@ -74,7 +74,7 @@ class P6ControlScreen:
         tab_gap = 5
         total = len(TABS) * tab_w + (len(TABS) - 1) * tab_gap
         start_x = (theme.SCREEN_WIDTH - total) // 2
-        y = 6
+        y = 44
 
         for i, tab_key in enumerate(TABS):
             rect = pygame.Rect(start_x + i * (tab_w + tab_gap), y, tab_w, tab_h)
@@ -84,7 +84,7 @@ class P6ControlScreen:
         """Create knobs for each tab based on P6_CC_MAP."""
         self._knobs = {}
 
-        content_y = 46
+        content_y = 80
         content_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - content_y - 10
         knob_r = 26
         cols = 7
@@ -270,6 +270,9 @@ class P6ControlScreen:
         f_small = theme.font("small")
         f_med = theme.font("medium")
         now = time.monotonic()
+
+        # ── Header ──────────────────────────────────────────────────
+        theme.draw_screen_header(surface, "CONTROL", "P-6 parameters")
 
         # ── Tab buttons (highlight if incoming CC is in that tab) ────
         for i, (rect, tab_key) in enumerate(self._tab_buttons):

@@ -1,4 +1,4 @@
-"""P-6 Record Screen — capture performances with waveform display.
+"""P-6 Record Screen -- capture performances with waveform display.
 
 Features:
 - Record/stop with auto-record on P-6 transport
@@ -101,8 +101,8 @@ class P6RecordScreen:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
-            # Record button
-            rec_rect = pygame.Rect(16, 8, 120, 34)
+            # Row 1 buttons (y=4, h=18)
+            rec_rect = pygame.Rect(16, 4, 90, 18)
             if rec_rect.collidepoint(mx, my):
                 if self.app.recorder.is_recording:
                     self.app.recorder.stop_recording()
@@ -114,34 +114,46 @@ class P6RecordScreen:
                     self.app.recorder.start_recording(metadata=meta)
                 return
 
-            # Recall button
-            recall_rect = pygame.Rect(150, 8, 120, 34)
+            recall_rect = pygame.Rect(112, 4, 90, 18)
             if recall_rect.collidepoint(mx, my):
                 path = self.app.recorder.recall_buffer()
                 if path:
                     self._recall_flash = 30
                 return
 
-            # Stop playback button
-            stop_rect = pygame.Rect(284, 8, 80, 34)
+            stop_rect = pygame.Rect(208, 4, 70, 18)
             if stop_rect.collidepoint(mx, my):
                 self.app.recorder.stop_playback()
                 return
 
-            # Auto-record toggle
-            auto_rect = pygame.Rect(theme.SCREEN_WIDTH - 96, 8, 80, 34)
+            auto_rect = pygame.Rect(296, 4, 70, 18)
             if auto_rect.collidepoint(mx, my):
                 self.app.auto_record = not self.app.auto_record
                 from ui.p6_app import save_config_key
                 save_config_key("P6_AUTO_RECORD", "1" if self.app.auto_record else "0")
                 return
 
-            # Recording list — tap to open detail modal
+            # Row 2 buttons (y=24, h=14)
+            thresh_rect = pygame.Rect(16, 24, 70, 14)
+            if thresh_rect.collidepoint(mx, my):
+                self.app.recorder.toggle_threshold_mode()
+                return
+
+            th_down = pygame.Rect(90, 24, 30, 14)
+            if th_down.collidepoint(mx, my):
+                self.app.recorder.set_threshold(self.app.recorder._threshold - 0.005)
+                return
+            th_up = pygame.Rect(124, 24, 30, 14)
+            if th_up.collidepoint(mx, my):
+                self.app.recorder.set_threshold(self.app.recorder._threshold + 0.005)
+                return
+
+            # Recording list -- tap to open detail modal
             recordings = self.app.recorder.list_recordings()
             list_y = self._list_y
             for i, rec in enumerate(recordings[self._scroll_offset:
                                                self._scroll_offset + self._max_visible]):
-                item_rect = pygame.Rect(16, list_y + i * 28, theme.SCREEN_WIDTH - 32, 26)
+                item_rect = pygame.Rect(16, list_y + i * 26, theme.SCREEN_WIDTH - 32, 24)
                 if item_rect.collidepoint(mx, my):
                     self._detail_rec = rec
                     display_name = rec.get("user_name") or rec["filename"]
@@ -181,17 +193,21 @@ class P6RecordScreen:
         f_med = theme.font("medium")
         f_small = theme.font("small")
 
-        # ── Record button ────────────���───────────────────────────────
+        # -- Header panel with two rows of buttons (y=0-38) ---------------
+        theme.draw_panel(surface, pygame.Rect(0, 0, theme.SCREEN_WIDTH, 40))
+
         recording = self.app.recorder.is_recording
-        rec_rect = pygame.Rect(16, 8, 120, 34)
+        playing = self.app.recorder.is_playing_back
+
+        # Row 1 (y=4): [RECORD 90w] [RECALL 90w] [STOP 70w] gap [AUTO 70w]
+        rec_rect = pygame.Rect(16, 4, 90, 18)
         rec_bg = theme.RED if recording else theme.BUTTON_BG
         rec_text = "STOP REC" if recording else "RECORD"
-        pygame.draw.rect(surface, rec_bg, rec_rect, border_radius=6)
-        surf = f_med.render(rec_text, True, theme.TEXT_BRIGHT)
+        pygame.draw.rect(surface, rec_bg, rec_rect, border_radius=4)
+        surf = f_small.render(rec_text, True, theme.TEXT_BRIGHT)
         surface.blit(surf, surf.get_rect(center=rec_rect.center))
 
-        # ── Recall button ────────────��───────────────────────────────
-        recall_rect = pygame.Rect(150, 8, 120, 34)
+        recall_rect = pygame.Rect(112, 4, 90, 18)
         recall_secs = self.app.recorder.recall_seconds_available
         if self._recall_flash > 0:
             recall_bg = theme.GREEN
@@ -202,64 +218,79 @@ class P6RecordScreen:
         else:
             recall_bg = theme.BUTTON_BG
             recall_text = "RECALL"
-        pygame.draw.rect(surface, recall_bg, recall_rect, border_radius=6)
+        pygame.draw.rect(surface, recall_bg, recall_rect, border_radius=4)
         text_color = theme.BG if (self._recall_flash > 0 or recall_secs >= 1.0) else theme.TEXT_DIM
-        surf = f_med.render(recall_text, True, text_color)
+        surf = f_small.render(recall_text, True, text_color)
         surface.blit(surf, surf.get_rect(center=recall_rect.center))
 
-        # Stop playback button
-        playing = self.app.recorder.is_playing_back
-        stop_rect = pygame.Rect(284, 8, 80, 34)
+        stop_rect = pygame.Rect(208, 4, 70, 18)
         stop_bg = theme.ACCENT if playing else theme.BUTTON_BG
-        pygame.draw.rect(surface, stop_bg, stop_rect, border_radius=6)
-        surf = f_med.render("STOP", True, theme.TEXT_BRIGHT)
+        pygame.draw.rect(surface, stop_bg, stop_rect, border_radius=4)
+        surf = f_small.render("STOP", True, theme.TEXT_BRIGHT)
         surface.blit(surf, surf.get_rect(center=stop_rect.center))
 
-        # Auto-record toggle
-        auto_rect = pygame.Rect(theme.SCREEN_WIDTH - 96, 8, 80, 34)
+        auto_rect = pygame.Rect(296, 4, 70, 18)
         auto_on = self.app.auto_record
         auto_bg = theme.GREEN if auto_on else theme.BUTTON_BG
         auto_text_color = theme.BG if auto_on else theme.TEXT_DIM
-        pygame.draw.rect(surface, auto_bg, auto_rect, border_radius=6)
-        surf = f_med.render("AUTO", True, auto_text_color)
+        pygame.draw.rect(surface, auto_bg, auto_rect, border_radius=4)
+        surf = f_small.render("AUTO", True, auto_text_color)
         surface.blit(surf, surf.get_rect(center=auto_rect.center))
 
-        # Duration / playback status
+        # Duration / status on far right of row 1
         if recording:
             dur = self.app.recorder.duration
             mins = int(dur) // 60
             secs = dur % 60
             dur_text = f"{mins}:{secs:04.1f}"
             surf = f_large.render(dur_text, True, theme.RED)
-            surface.blit(surf, (380, 10))
+            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 16, 0))
         elif playing:
             pf = self.app.recorder.playback_file
             name = os.path.basename(pf) if pf else ""
-            surf = f_med.render(f"Playing: {name}", True, theme.GREEN)
-            surface.blit(surf, (380, 14))
+            surf = f_small.render(f"Playing: {name[:20]}", True, theme.GREEN)
+            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 16, 6))
 
-        # File name
+        # Row 2 (y=24): [THRESH 70w] [-30w] [+30w] threshold value | status
+        th_on = self.app.recorder.threshold_mode
+        thresh_rect = pygame.Rect(16, 24, 70, 14)
+        th_bg = theme.YELLOW if th_on else theme.BUTTON_BG
+        th_tc = theme.BG if th_on else theme.TEXT_DIM
+        pygame.draw.rect(surface, th_bg, thresh_rect, border_radius=3)
+        surf = f_small.render("THRESH", True, th_tc)
+        surface.blit(surf, surf.get_rect(center=thresh_rect.center))
+
+        th_down = pygame.Rect(90, 24, 30, 14)
+        pygame.draw.rect(surface, theme.BUTTON_BG, th_down, border_radius=3)
+        surf = f_small.render("-", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=th_down.center))
+
+        th_up = pygame.Rect(124, 24, 30, 14)
+        pygame.draw.rect(surface, theme.BUTTON_BG, th_up, border_radius=3)
+        surf = f_small.render("+", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=th_up.center))
+
+        th_val = f_small.render(f"{self.app.recorder._threshold:.3f}", True, theme.TEXT_DIM)
+        surface.blit(th_val, (160, 25))
+
+        # File name on row 2 right side
         fname = self.app.recorder.current_file
         if fname and recording:
-            surf = f_small.render(os.path.basename(fname), True, theme.TEXT_DIM)
-            surface.blit(surf, (380, 38))
+            surf = f_small.render(os.path.basename(fname)[:30], True, theme.TEXT_DIM)
+            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 16, 25))
 
-        y = 50
-
-        # ── Level meters ──────────��──────────────────────────────────
+        # -- Level meters (y=42-56, each 6px tall) ------------------------
         meter_x = 16
         meter_w = theme.SCREEN_WIDTH - 32
-        meter_h = 18
+        theme.draw_meter(surface, meter_x, 42, meter_w, 6,
+                         self._disp_peak_l, "L")
+        theme.draw_meter(surface, meter_x, 50, meter_w, 6,
+                         self._disp_peak_r, "R")
 
-        self._draw_meter(surface, meter_x, y, meter_w, meter_h,
-                        self._disp_peak_l, "L")
-        y += meter_h + 3
-        self._draw_meter(surface, meter_x, y, meter_w, meter_h,
-                        self._disp_peak_r, "R")
-        y += meter_h + 8
-
-        # ── Waveform display ─────────────────────────────��───────────
-        wave_rect = pygame.Rect(16, y, theme.SCREEN_WIDTH - 32, 100)
+        # -- Waveform display (y=60-158, 98px tall in panel) --------------
+        wave_panel = pygame.Rect(12, 58, theme.SCREEN_WIDTH - 24, 102)
+        theme.draw_panel(surface, wave_panel, border=True)
+        wave_rect = pygame.Rect(16, 60, theme.SCREEN_WIDTH - 32, 98)
         pygame.draw.rect(surface, theme.WAVEFORM_BG, wave_rect, border_radius=4)
 
         waveform = self.app.recorder.waveform
@@ -282,23 +313,22 @@ class P6RecordScreen:
         pygame.draw.line(surface, theme.BORDER,
                         (wave_rect.x, cy), (wave_rect.right, cy), 1)
 
-        y = wave_rect.bottom + 8
-
-        # ── Recording list ─────────��─────────────────────────────────
+        # -- Recording list label (y=162-170) -----------------------------
         surf = f_small.render("RECORDINGS  (tap for details)", True, theme.TEXT_DIM)
-        surface.blit(surf, (16, y))
-        y += 18
+        surface.blit(surf, (16, 162))
 
+        # -- Recording list (y=172-540, 26px rows, ~14 visible) -----------
+        list_y = 172
         recordings = self.app.recorder.list_recordings()
-        list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - y - 4
-        self._max_visible = list_h // 28
-        self._list_y = y
+        list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - list_y - 4
+        self._max_visible = list_h // 26
+        self._list_y = list_y
 
         visible = recordings[self._scroll_offset:self._scroll_offset + self._max_visible]
+        y = list_y
 
         for i, rec in enumerate(visible):
             dur = rec.get("duration", 0)
-            size = rec.get("size_mb", 0)
             mins = int(dur) // 60
             secs = dur % 60
             starred = rec.get("starred", False)
@@ -309,10 +339,12 @@ class P6RecordScreen:
             is_playing = (self.app.recorder.is_playing_back and
                          self.app.recorder.playback_file == rec["path"])
 
-            # Highlight row
-            item_rect = pygame.Rect(16, y, theme.SCREEN_WIDTH - 32, 26)
+            # Row background (alternating + playing highlight)
+            item_rect = pygame.Rect(16, y, theme.SCREEN_WIDTH - 32, 24)
             if is_playing:
                 pygame.draw.rect(surface, theme.ACCENT_DIM, item_rect, border_radius=2)
+            elif i % 2 == 1:
+                pygame.draw.rect(surface, theme.BG_LIGHTER, item_rect, border_radius=2)
 
             # Star indicator
             star_text = "*" if starred else " "
@@ -326,7 +358,7 @@ class P6RecordScreen:
                 display = ">> " + display
             surf = f_small.render(display[:35], True,
                                   theme.GREEN if is_playing else theme.TEXT)
-            surface.blit(surf, (38, y + 5))
+            surface.blit(surf, (38, y + 4))
 
             # Metadata on right side
             meta_parts = [f"{mins}:{secs:04.1f}"]
@@ -336,13 +368,13 @@ class P6RecordScreen:
                 meta_parts.insert(0, f"P:{int(pat)+1}" if isinstance(pat, (int, float)) else "")
             meta_text = "  ".join(meta_parts)
             surf = f_small.render(meta_text, True, theme.TEXT_DIM)
-            surface.blit(surf, (theme.SCREEN_WIDTH - 16 - surf.get_width(), y + 5))
+            surface.blit(surf, (theme.SCREEN_WIDTH - 16 - surf.get_width(), y + 4))
 
-            y += 28
+            y += 26
 
         if not recordings:
             surf = f_small.render("No recordings yet", True, theme.TEXT_DIM)
-            surface.blit(surf, (16, y))
+            surface.blit(surf, (16, list_y + 10))
 
         # Scroll indicator
         if len(recordings) > self._max_visible:
@@ -354,7 +386,7 @@ class P6RecordScreen:
             pygame.draw.rect(surface, theme.BORDER, (bar_x, self._list_y, 4, bar_h), border_radius=2)
             pygame.draw.rect(surface, theme.ACCENT, (bar_x, thumb_y, 4, thumb_h), border_radius=2)
 
-        # ── Draw modals on top ────────���──────────────────────────────
+        # -- Draw modals on top -------------------------------------------
         self._detail_modal.draw(surface)
         self._rename_modal.draw(surface)
         self._delete_modal.draw(surface)

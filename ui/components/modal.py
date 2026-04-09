@@ -71,14 +71,29 @@ class Modal:
         overlay.fill((0, 0, 0, 160))
         surface.blit(overlay, (0, 0))
 
-        # Dialog box
-        pygame.draw.rect(surface, theme.MODAL_BG, self.rect, border_radius=8)
-        pygame.draw.rect(surface, theme.BORDER, self.rect, 2, border_radius=8)
+        # Dialog box with glow
+        glow = self.rect.inflate(8, 8)
+        glow_surf = pygame.Surface((glow.width, glow.height), pygame.SRCALPHA)
+        pygame.draw.rect(glow_surf, (0, 0, 0, 80), (0, 0, glow.width, glow.height),
+                        border_radius=12)
+        surface.blit(glow_surf, glow.topleft)
+        pygame.draw.rect(surface, theme.MODAL_BG, self.rect, border_radius=10)
+        pygame.draw.rect(surface, theme.ACCENT_DIM, self.rect, 1, border_radius=10)
 
-        # Title
+        # Title bar
+        title_bar = pygame.Rect(self.rect.x, self.rect.y, self.rect.width, 40)
+        pygame.draw.rect(surface, theme.BG_LIGHTER, title_bar,
+                        border_radius=10)
+        # Clip bottom corners of title bar
+        pygame.draw.rect(surface, theme.BG_LIGHTER,
+                        (title_bar.x, title_bar.bottom - 10, title_bar.width, 10))
+        pygame.draw.line(surface, theme.BORDER,
+                        (self.rect.x, self.rect.y + 40),
+                        (self.rect.right, self.rect.y + 40))
+
         f_title = theme.font("large")
-        title_surf = f_title.render(self.title, True, theme.TEXT_BRIGHT)
-        surface.blit(title_surf, (self.rect.x + 20, self.rect.y + 16))
+        title_surf = f_title.render(self.title, True, theme.ACCENT)
+        surface.blit(title_surf, (self.rect.x + 16, self.rect.y + 8))
 
         # Message
         f = theme.font("medium")

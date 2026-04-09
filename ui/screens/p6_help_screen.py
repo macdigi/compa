@@ -194,7 +194,7 @@ class P6HelpScreen:
 
         # ── Search bar (full width top) ──────────────────────────────
         search_rect = pygame.Rect(SIDEBAR_WIDTH + 8, 6, 460, 30)
-        pygame.draw.rect(surface, (30, 30, 42), search_rect, border_radius=6)
+        pygame.draw.rect(surface, theme.BG_PANEL, search_rect, border_radius=6)
         pygame.draw.rect(surface, theme.ACCENT if self._search_text else theme.BORDER,
                         search_rect, 1, border_radius=6)
 
@@ -224,7 +224,8 @@ class P6HelpScreen:
 
         # ── Sidebar (left) ───────────────────────────────────────────
         sidebar_rect = pygame.Rect(0, 0, SIDEBAR_WIDTH, theme.SCREEN_HEIGHT - theme.NAV_HEIGHT)
-        pygame.draw.rect(surface, (25, 25, 32), sidebar_rect)
+        pygame.draw.rect(surface, theme.BG_PANEL, sidebar_rect)
+        pygame.draw.rect(surface, theme.ACCENT, pygame.Rect(0, 0, SIDEBAR_WIDTH, 2))
         pygame.draw.line(surface, theme.BORDER,
                         (SIDEBAR_WIDTH, 0), (SIDEBAR_WIDTH, sidebar_rect.bottom))
 

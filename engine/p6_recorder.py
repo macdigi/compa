@@ -69,6 +69,12 @@ class P6Recorder:
         # Monitoring
         self._monitoring = False
 
+        # Threshold recording
+        self._threshold = 0.02
+        self._threshold_mode = False
+        self._silence_timeout = 3.0
+        self._silence_start = 0.0
+
         # Recall buffer — rolling circular buffer of last N seconds
         self._recall_buf_frames = RECALL_BUFFER_SECONDS * self._sample_rate
         self._recall_buf = np.zeros((self._recall_buf_frames, P6_CHANNELS), dtype=np.float32)
@@ -153,6 +159,18 @@ class P6Recorder:
     @property
     def rms_levels(self) -> tuple[float, float]:
         return (self._rms_l, self._rms_r)
+
+    @property
+    def threshold_mode(self) -> bool:
+        return self._threshold_mode
+
+    def toggle_threshold_mode(self):
+        self._threshold_mode = not self._threshold_mode
+        if not self._threshold_mode and self._recording:
+            self.stop_recording()
+
+    def set_threshold(self, level: float):
+        self._threshold = max(0.005, min(0.5, level))
 
     @property
     def waveform(self) -> np.ndarray:
@@ -323,6 +341,21 @@ class P6Recorder:
             self._peak_r = float(abs_data[:, 1].max())
         else:
             self._peak_l = self._peak_r = float(abs_data.max())
+
+        # Threshold auto-recording
+        if self._threshold_mode:
+            import time as _time
+            peak = max(self._peak_l, self._peak_r)
+            if not self._recording and peak > self._threshold:
+                self.start_recording()
+                self._silence_start = 0
+            elif self._recording:
+                if peak > self._threshold:
+                    self._silence_start = 0
+                elif self._silence_start == 0:
+                    self._silence_start = _time.time()
+                elif _time.time() - self._silence_start > self._silence_timeout:
+                    self.stop_recording()
 
         # Waveform preview
         self._waveform[self._waveform_pos % WAVEFORM_POINTS] = (self._peak_l + self._peak_r) * 0.5
