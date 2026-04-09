@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+venv/
+*.egg-info/
+dist/
+build/
+
+# User data (created at runtime)
+recordings/
+sessions/
+samples/
+
+# Claude Code
+.claude/
+
+# OS
+Thumbs.db
+*.swp
+*.swo
+*~
