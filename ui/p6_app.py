@@ -30,6 +30,7 @@ from engine.midi_router import MidiRouter, Layer
 from engine.p6_recorder import P6Recorder
 from engine.device_profiles import DeviceManager
 from engine.audio_router import AudioRoute, find_device_index
+from engine.midi_lfo import MidiLFO
 from ui.splash import run_splash
 from ui.wizard import run_wizard
 
@@ -212,6 +213,9 @@ class P6App:
 
         # ── Audio routing (device-to-device bridge) ──────────────────
         self.audio_route: AudioRoute | None = None
+
+        # ── LFO automation engine ────────────────────────────────────
+        self.lfo = MidiLFO()
 
         # ── Recorder ─────────────────────────────────────────────────
         self.recorder = P6Recorder(

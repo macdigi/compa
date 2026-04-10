@@ -113,9 +113,14 @@ class P6PatternScreen:
         if self.app.router:
             from engine.midi_router import Layer
             self.app.router.layer = Layer.PATTERN
-        # Rewire chain player callback in case P-6 reconnected
+        # Rewire chain player callback in case device reconnected
         if self.app.p6:
             self.chain_player.on_pattern_change = self.app.p6.send_program_change
+            self.chain_player._midi_out = self.app.p6
+            self.sequencer.set_midi_out(self.app.p6)
+        # Configure sequencer rows for current device
+        self.sequencer.configure_for_device(self.app.device_name)
+        self._recalc_grid()
 
     def on_exit(self):
         if self.app.router:
@@ -138,6 +143,7 @@ class P6PatternScreen:
                 return
             if seq_btn.collidepoint(mx, my):
                 self._mode = "seq"
+                self.sequencer.configure_for_device(self.app.device_name)
                 return
 
             if self._mode == "grid":
@@ -206,6 +212,7 @@ class P6PatternScreen:
         loop_rect = pygame.Rect(200, btn_y, 80, 36)
         sync_rect = pygame.Rect(292, btn_y, 80, 36)
         add_rect = pygame.Rect(theme.SCREEN_WIDTH - 130, btn_y, 110, 36)
+        snap_rect = pygame.Rect(theme.SCREEN_WIDTH - 370, btn_y, 100, 36)
         save_rect = pygame.Rect(theme.SCREEN_WIDTH - 250, btn_y, 100, 36)
 
         if play_rect.collidepoint(mx, my):
@@ -233,6 +240,9 @@ class P6PatternScreen:
             return
         if save_rect.collidepoint(mx, my):
             save_chain(self._chain, self._chains_dir)
+            return
+        if snap_rect.collidepoint(mx, my):
+            self._snap_fx_to_step()
             return
 
         # Step list clicks
@@ -292,6 +302,32 @@ class P6PatternScreen:
         if self.app.p6:
             current = self.app.p6.state.active_pattern
             self._select_pattern(min(self._pattern_count - 1, current + self._grid_cols))
+
+    def _snap_fx_to_step(self):
+        """Capture current FX CC state and store in selected chain step."""
+        if self._chain_selected < 0 or self._chain_selected >= len(self._chain.steps):
+            return
+        if not self.app.p6:
+            return
+
+        step = self._chain.steps[self._chain_selected]
+        # Capture all CC values from the focused device's state
+        snapshot = {}
+        dev = self.app.device
+        if dev and dev.cc_map:
+            from engine.sp404_effects import TAB_FX_LIST
+            for cat_key, params in dev.cc_map.items():
+                # Determine MIDI channel for this category
+                ch = dev.midi_channels.get(cat_key.replace("_fx", ""),
+                       dev.midi_channels.get(cat_key, 0))
+                for mcc in params:
+                    cc_num = mcc.cc if hasattr(mcc, "cc") else mcc[0]
+                    val = self.app.p6.state.cc_values.get(cc_num, 0)
+                    if val != 0:  # Only store non-default values
+                        snapshot[(ch, cc_num)] = val
+
+        step.fx_snapshot = snapshot
+        print(f"FX snapshot: {len(snapshot)} CCs captured for chain step {self._chain_selected + 1}", flush=True)
 
     def update(self):
         pass
@@ -503,6 +539,12 @@ class P6PatternScreen:
             surf = f_med.render(pat_text, True, theme.TEXT)
             surface.blit(surf, (70, row_y + 8))
 
+            # FX snapshot indicator
+            if step.fx_snapshot:
+                fx_count = len(step.fx_snapshot)
+                surf = f_small.render(f"FX:{fx_count}", True, theme.YELLOW)
+                surface.blit(surf, (row_rect.right - 210, row_y + 10))
+
             # Bar count
             bar_rect = pygame.Rect(row_rect.right - 140, row_y + 6, 80, step_h - 14)
             pygame.draw.rect(surface, theme.BUTTON_BG, bar_rect, border_radius=3)
@@ -550,6 +592,8 @@ class P6PatternScreen:
             (pygame.Rect(292, btn_y, 80, 36),
              "SYNC" if self.chain_player.sync_transport else "FREE",
              theme.ACCENT if self.chain_player.sync_transport else theme.BUTTON_BG),
+            (pygame.Rect(theme.SCREEN_WIDTH - 370, btn_y, 100, 36), "SNAP FX",
+             theme.YELLOW if self._chain_selected >= 0 else theme.BUTTON_BG),
             (pygame.Rect(theme.SCREEN_WIDTH - 250, btn_y, 100, 36), "SAVE", theme.BUTTON_BG),
             (pygame.Rect(theme.SCREEN_WIDTH - 130, btn_y, 110, 36), "ADD STEP", theme.ACCENT),
         ]
