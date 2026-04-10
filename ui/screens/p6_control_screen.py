@@ -766,74 +766,111 @@ class P6ControlScreen:
     # ── LFO Automation tab ───────────────────────────────────────────
 
     def _draw_lfo_tab(self, surface, f_small, f_med):
-        """Draw LFO automation controls."""
+        """Draw LFO automation controls with waveform preview."""
+        import math
+        import time as _time
         f_large = theme.font("large")
         lfo = self.app.lfo
-        cx = theme.SCREEN_WIDTH // 2
-
-        # Title + status
         running = lfo.is_running
-        status_color = theme.GREEN if running else theme.TEXT_DIM
-        surf = f_large.render("LFO AUTOMATION", True, theme.ACCENT)
-        surface.blit(surf, surf.get_rect(centerx=cx, top=80))
-        surf = f_small.render("RUNNING" if running else "STOPPED", True, status_color)
-        surface.blit(surf, surf.get_rect(centerx=cx, top=108))
 
-        # Start/Stop button
-        toggle_rect = pygame.Rect(cx - 60, 130, 120, 40)
+        # ── Top: Start/Stop + status ─────────────────────────────────
+        toggle_rect = pygame.Rect(16, 80, 120, 36)
         toggle_bg = theme.RED if running else theme.GREEN
-        toggle_label = "STOP LFO" if running else "START LFO"
+        toggle_label = "STOP" if running else "START"
         pygame.draw.rect(surface, toggle_bg, toggle_rect, border_radius=8)
         surf = f_med.render(toggle_label, True, theme.BG)
         surface.blit(surf, surf.get_rect(center=toggle_rect.center))
         self._lfo_toggle_rect = toggle_rect
 
-        # Target list
-        targets = lfo.targets
-        y = 185
-        self._lfo_target_rects = []
+        status = f"LFO {'RUNNING' if running else 'STOPPED'} — {len(lfo.targets)} target(s)"
+        surf = f_small.render(status, True, theme.GREEN if running else theme.TEXT_DIM)
+        surface.blit(surf, (150, 88))
 
-        if not targets:
-            surf = f_small.render("No LFO targets — tap ADD to create one", True, theme.TEXT_DIM)
-            surface.blit(surf, surf.get_rect(centerx=cx, top=y))
-        else:
-            for i, t in enumerate(targets):
-                row_rect = pygame.Rect(20, y, theme.SCREEN_WIDTH - 40, 32)
-                bg = theme.BG_PANEL if i % 2 == 0 else theme.BG
-                pygame.draw.rect(surface, bg, row_rect, border_radius=3)
-
-                # Target info
-                shape_label = t.shape.upper()[:5]
-                info = f"Ch{t.channel + 1} CC#{t.cc}  {shape_label}  {t.rate_hz:.1f}Hz  {t.min_val}-{t.max_val}"
-                color = theme.GREEN if t.enabled else theme.TEXT_DIM
-                surf = f_small.render(info, True, color)
-                surface.blit(surf, (30, y + 7))
-
-                # Remove button
-                del_rect = pygame.Rect(row_rect.right - 50, y + 4, 40, 24)
-                pygame.draw.rect(surface, theme.RED, del_rect, border_radius=4)
-                surf = f_small.render("DEL", True, theme.TEXT_BRIGHT)
-                surface.blit(surf, surf.get_rect(center=del_rect.center))
-
-                self._lfo_target_rects.append((row_rect, del_rect, i))
-                y += 36
-
-        # ADD button
-        add_y = max(y + 10, 300)
-        add_rect = pygame.Rect(cx - 80, add_y, 160, 36)
+        # ── ADD button ───────────────────────────────────────────────
+        add_rect = pygame.Rect(theme.SCREEN_WIDTH - 160, 80, 140, 36)
         pygame.draw.rect(surface, theme.ACCENT, add_rect, border_radius=8)
-        surf = f_med.render("+ ADD TARGET", True, theme.BG)
+        surf = f_med.render("+ ADD", True, theme.BG)
         surface.blit(surf, surf.get_rect(center=add_rect.center))
         self._lfo_add_rect = add_rect
 
-        # Hint
-        hint_y = add_y + 50
-        surf = f_small.render("LFO modulates CC values with waveforms (sine, saw, random...)",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(centerx=cx, top=hint_y))
-        surf = f_small.render("Add a target: pick bus channel + CC + shape + rate",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(centerx=cx, top=hint_y + 16))
+        # ── Target rows with inline waveform + editable params ───────
+        targets = lfo.targets
+        y = 126
+        row_h = 56
+        self._lfo_target_rects = []
+        self._lfo_shape_rects = []
+        self._lfo_rate_rects = []
+
+        t_now = _time.monotonic() - getattr(lfo, "_start_time", 0) if running else 0
+
+        for i, t in enumerate(targets):
+            row_rect = pygame.Rect(16, y, theme.SCREEN_WIDTH - 32, row_h)
+            bg = theme.BG_PANEL if i % 2 == 0 else theme.BG
+            pygame.draw.rect(surface, bg, row_rect, border_radius=4)
+            if not t.enabled:
+                pygame.draw.rect(surface, theme.BORDER, row_rect, 1, border_radius=4)
+
+            # ── Waveform preview (left, 120x40) ─────────────────────
+            wave_rect = pygame.Rect(22, y + 6, 120, row_h - 12)
+            pygame.draw.rect(surface, (20, 20, 30), wave_rect, border_radius=3)
+            # Draw waveform
+            points = []
+            wave_color = theme.ACCENT if t.enabled else theme.BORDER
+            for px in range(wave_rect.width):
+                phase = (px / wave_rect.width + (t_now * t.rate_hz if running else 0)) % 1.0
+                val = MidiLFO._compute_waveform(t.shape, phase, t)
+                py = wave_rect.bottom - int(val * wave_rect.height)
+                points.append((wave_rect.x + px, py))
+            if len(points) > 1:
+                pygame.draw.lines(surface, wave_color, False, points, 2)
+            # Current position marker
+            if running:
+                cur_phase = (t_now * t.rate_hz) % 1.0
+                marker_x = wave_rect.x + int(cur_phase * wave_rect.width)
+                pygame.draw.line(surface, theme.GREEN,
+                                (marker_x, wave_rect.top), (marker_x, wave_rect.bottom), 1)
+
+            # ── Info text (middle) ───────────────────────────────────
+            info_x = 152
+            surf = f_small.render(f"Ch{t.channel+1}  CC#{t.cc}", True, theme.TEXT)
+            surface.blit(surf, (info_x, y + 4))
+
+            # Shape button (tappable to cycle)
+            shape_rect = pygame.Rect(info_x, y + 22, 70, 22)
+            pygame.draw.rect(surface, theme.BUTTON_BG, shape_rect, border_radius=4)
+            pygame.draw.rect(surface, theme.ACCENT, shape_rect, 1, border_radius=4)
+            surf = f_small.render(t.shape.upper()[:7], True, theme.ACCENT)
+            surface.blit(surf, surf.get_rect(center=shape_rect.center))
+            self._lfo_shape_rects.append((shape_rect, i))
+
+            # Rate (tappable to cycle)
+            rate_rect = pygame.Rect(info_x + 80, y + 22, 70, 22)
+            pygame.draw.rect(surface, theme.BUTTON_BG, rate_rect, border_radius=4)
+            pygame.draw.rect(surface, theme.ACCENT, rate_rect, 1, border_radius=4)
+            surf = f_small.render(f"{t.rate_hz:.2f}Hz", True, theme.ACCENT)
+            surface.blit(surf, surf.get_rect(center=rate_rect.center))
+            self._lfo_rate_rects.append((rate_rect, i))
+
+            # Range
+            range_text = f"{t.min_val}–{t.max_val}"
+            surf = f_small.render(range_text, True, theme.TEXT_DIM)
+            surface.blit(surf, (info_x + 160, y + 26))
+
+            # ── DEL button (right) ───────────────────────────────────
+            del_rect = pygame.Rect(row_rect.right - 50, y + (row_h - 24) // 2, 40, 24)
+            pygame.draw.rect(surface, theme.RED, del_rect, border_radius=4)
+            surf = f_small.render("DEL", True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=del_rect.center))
+
+            self._lfo_target_rects.append((row_rect, del_rect, i))
+            y += row_h + 4
+
+        if not targets:
+            surf = f_med.render("No LFO targets — tap + ADD", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y + 20))
+            surf = f_small.render("Modulate FX knobs with sine, saw, random waveforms",
+                                 True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y + 46))
 
     def _handle_lfo_click(self, mx, my):
         """Handle clicks on LFO tab elements."""
@@ -848,6 +885,27 @@ class P6ControlScreen:
                 lfo.start()
             return True
 
+        # Shape cycle (tap shape button to change waveform)
+        if hasattr(self, "_lfo_shape_rects"):
+            for rect, idx in self._lfo_shape_rects:
+                if rect.collidepoint(mx, my) and idx < len(lfo._targets):
+                    t = lfo._targets[idx]
+                    shapes = ALL_SHAPES
+                    cur = shapes.index(t.shape) if t.shape in shapes else 0
+                    t.shape = shapes[(cur + 1) % len(shapes)]
+                    return True
+
+        # Rate cycle (tap rate button to adjust speed)
+        if hasattr(self, "_lfo_rate_rects"):
+            for rect, idx in self._lfo_rate_rects:
+                if rect.collidepoint(mx, my) and idx < len(lfo._targets):
+                    t = lfo._targets[idx]
+                    rates = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+                    # Find closest rate and cycle to next
+                    closest = min(range(len(rates)), key=lambda i: abs(rates[i] - t.rate_hz))
+                    t.rate_hz = rates[(closest + 1) % len(rates)]
+                    return True
+
         # Delete target
         if hasattr(self, "_lfo_target_rects"):
             for row_rect, del_rect, idx in self._lfo_target_rects:
@@ -861,15 +919,12 @@ class P6ControlScreen:
                         lfo.start()
                     return True
 
-        # Add target — create a sensible default based on focused device
+        # Add target
         if hasattr(self, "_lfo_add_rect") and self._lfo_add_rect.collidepoint(mx, my):
             dev = self.app.device
-            # Default: Bus 1 Ctrl 1 (CC#16 on Ch1), sine, 0.5Hz
             ch = 0
-            cc = 16
             if dev and dev.midi_channels:
                 ch = dev.midi_channels.get("bus1", 0)
-            # Cycle through different defaults to make each target unique
             num = len(lfo.targets)
             cc_options = [16, 17, 18, 80, 81, 82]
             cc = cc_options[num % len(cc_options)]
@@ -884,7 +939,6 @@ class P6ControlScreen:
             if was_running:
                 lfo.set_midi_out(self.app.p6)
                 lfo.start()
-            print(f"LFO target added: Ch{ch+1} CC#{cc} {shape} {rate}Hz", flush=True)
             return True
 
         return False

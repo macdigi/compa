@@ -274,13 +274,17 @@ class P6PatternScreen:
                     step.bars = 4
                 return
 
-            # Pattern number (tap to set to current P-6 pattern)
+            # Pattern number (tap to set to current device's active pattern)
             pat_rect = pygame.Rect(16, row_y + 4, 100, step_h - 10)
             if pat_rect.collidepoint(mx, my):
                 if self.app.p6:
                     step.pattern = self.app.p6.state.active_pattern
                 self._chain_selected = real_idx
                 return
+
+            # Tap anywhere else on the row — just select it (for SNAP FX)
+            self._chain_selected = real_idx
+            return
 
     def _cell_rect(self, index: int) -> pygame.Rect:
         row = index // self._grid_cols
@@ -306,28 +310,42 @@ class P6PatternScreen:
     def _snap_fx_to_step(self):
         """Capture current FX CC state and store in selected chain step."""
         if self._chain_selected < 0 or self._chain_selected >= len(self._chain.steps):
+            print("SNAP FX: no step selected — tap a chain step first", flush=True)
             return
         if not self.app.p6:
+            print("SNAP FX: no device connected", flush=True)
             return
 
         step = self._chain.steps[self._chain_selected]
-        # Capture all CC values from the focused device's state
         snapshot = {}
         dev = self.app.device
-        if dev and dev.cc_map:
-            from engine.sp404_effects import TAB_FX_LIST
+
+        if dev and dev.cc_map and dev.midi_channels:
+            # Map category keys to MIDI channels
+            ch_map = {
+                "bus1_fx": dev.midi_channels.get("bus1", 0),
+                "bus2_fx": dev.midi_channels.get("bus2", 1),
+                "bus3_fx": dev.midi_channels.get("bus3", 2),
+                "bus4_fx": dev.midi_channels.get("bus4", 3),
+                "input_fx": dev.midi_channels.get("input_fx", 4),
+            }
             for cat_key, params in dev.cc_map.items():
-                # Determine MIDI channel for this category
-                ch = dev.midi_channels.get(cat_key.replace("_fx", ""),
-                       dev.midi_channels.get(cat_key, 0))
+                ch = ch_map.get(cat_key)
+                if ch is None:
+                    continue  # Skip non-FX categories (looper, dj_mode)
                 for mcc in params:
                     cc_num = mcc.cc if hasattr(mcc, "cc") else mcc[0]
-                    val = self.app.p6.state.cc_values.get(cc_num, 0)
-                    if val != 0:  # Only store non-default values
-                        snapshot[(ch, cc_num)] = val
+                    val = self.app.p6.state.cc_values.get(cc_num, 64)
+                    snapshot[(ch, cc_num)] = val
+        else:
+            # P-6 or generic — capture all tracked CCs on auto channel
+            ch = self.app.p6.ch_auto
+            for cc_num, val in self.app.p6.state.cc_values.items():
+                snapshot[(ch, cc_num)] = val
 
         step.fx_snapshot = snapshot
-        print(f"FX snapshot: {len(snapshot)} CCs captured for chain step {self._chain_selected + 1}", flush=True)
+        count = len(snapshot)
+        print(f"SNAP FX: {count} CCs captured for step {self._chain_selected + 1}", flush=True)
 
     def update(self):
         pass
