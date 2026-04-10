@@ -178,8 +178,28 @@ def _make_p6_profile() -> DeviceProfile:
     )
 
 
+def _sp404_bus_fx_ccs(bus_name: str) -> list:
+    """Common FX CCs for an SP-404 bus (same CCs, different channel per bus)."""
+    return [
+        MidiCC(19, f"{bus_name} FX On/Off",  0, 127, 0),
+        MidiCC(83, f"{bus_name} FX Select",  0, 127, 0),
+        MidiCC(16, f"{bus_name} Ctrl 1",     0, 127, 64),
+        MidiCC(17, f"{bus_name} Ctrl 2",     0, 127, 64),
+        MidiCC(18, f"{bus_name} Ctrl 3",     0, 127, 64),
+        MidiCC(80, f"{bus_name} Ctrl 4",     0, 127, 64),
+        MidiCC(81, f"{bus_name} Ctrl 5",     0, 127, 64),
+        MidiCC(82, f"{bus_name} Ctrl 6",     0, 127, 64),
+    ]
+
+
 def _make_sp404mk2_profile() -> DeviceProfile:
-    """Roland SP-404 MK2."""
+    """Roland SP-404 MK2 — full MIDI implementation from Gemini deep research.
+
+    Effect buses live on separate MIDI channels:
+      Ch1=Bus1, Ch2=Bus2, Ch3=Bus3, Ch4=Bus4, Ch5=Input FX
+    Same CC numbers per bus, different channels.
+    Looper on Ch1, DJ mode on Ch1+Ch2, Chromatic on Ch16, Vocoder on Ch11.
+    """
     return DeviceProfile(
         name="Roland SP-404 MK2",
         short_name="SP-404",
@@ -195,52 +215,46 @@ def _make_sp404mk2_profile() -> DeviceProfile:
         # MIDI
         midi_hint="SP-404",
         midi_channels={
-            "bus1": 0,
-            "bus2": 1,
-            "bus3": 2,
-            "bus4": 3,
-            "input": 4,
+            "bus1": 0,       # Ch1 — Bus 1 FX + Looper
+            "bus2": 1,       # Ch2 — Bus 2 FX
+            "bus3": 2,       # Ch3 — Bus 3 FX
+            "bus4": 3,       # Ch4 — Bus 4 FX
+            "input_fx": 4,   # Ch5 — Input FX
+            "vocoder": 10,   # Ch11 — Vocoder pitch
+            "chromatic": 15, # Ch16 — Chromatic mode
         },
-        midi_note_range=(35, 51),  # Mode A pads; chromatic on ch16
+        midi_note_range=(35, 51),  # Mode A pads; chromatic on ch16 (36-60)
 
-        # CC map
+        # CC map — organized by function, each bus on its own channel
         cc_map={
-            "bus_effects": [
-                MidiCC(16, "Param 1",    0, 127, 64),
-                MidiCC(17, "Param 2",    0, 127, 64),
-                MidiCC(18, "Param 3",    0, 127, 64),
-                MidiCC(19, "FX Switch",  0, 127, 0),
-                MidiCC(80, "Param 4",    0, 127, 64),
-                MidiCC(81, "Param 5",    0, 127, 64),
-                MidiCC(82, "Param 6",    0, 127, 64),
-                MidiCC(83, "FX Number",  0, 127, 0),
+            "bus1_fx": _sp404_bus_fx_ccs("B1"),
+            "bus2_fx": _sp404_bus_fx_ccs("B2"),
+            "bus3_fx": _sp404_bus_fx_ccs("B3"),
+            "bus4_fx": _sp404_bus_fx_ccs("B4"),
+            "input_fx": _sp404_bus_fx_ccs("IN"),
+            "looper": [
+                MidiCC(88, "Rec/Stop",       0, 127, 0),   # 127=start, 0=stop
+                MidiCC(89, "Overdub",        0, 127, 0),
+                MidiCC(87, "Delete",         0, 127, 0),
+                MidiCC(85, "Stop Playback",  0, 127, 0),
+                MidiCC(90, "BPM/Play Rate",  0, 127, 64),
+                MidiCC(86, "Reset Tempo",    0, 127, 0),
+                MidiCC(91, "Undo/Redo",      0, 127, 0),   # 127=undo, 0=redo
             ],
             "dj_mode": [
                 MidiCC(7,  "Volume",     0, 127, 100),
                 MidiCC(8,  "Crossfade",  0, 127, 64),
-                MidiCC(20, "Play",       0, 127, 0),
-                MidiCC(21, "Cue",        0, 127, 0),
+                MidiCC(20, "Play/Pause", 0, 127, 0),   # 127=play, 0=pause
                 MidiCC(22, "Sync",       0, 127, 0),
-                MidiCC(23, "Bend-",      0, 127, 0),
-                MidiCC(24, "Bend+",      0, 127, 0),
-                MidiCC(25, "BPM-",       0, 127, 0),
-                MidiCC(26, "BPM+",       0, 127, 0),
-                MidiCC(27, "BPM Tap",    0, 127, 0),
-            ],
-            "looper": [
-                MidiCC(85, "Delete",     0, 127, 0),
-                MidiCC(86, "Record",     0, 127, 0),
-                MidiCC(87, "Resample",   0, 127, 0),
-                MidiCC(88, "Pitch",      0, 127, 64),
-                MidiCC(89, "Speed",      0, 127, 64),
-                MidiCC(90, "Level",      0, 127, 100),
-                MidiCC(91, "FX Send",    0, 127, 0),
+                MidiCC(23, "Cue",        0, 127, 0),
+                MidiCC(24, "Bend+",      0, 127, 0),   # nudge forward
+                MidiCC(25, "Bend-",      0, 127, 0),   # nudge backward
             ],
         },
 
         # Patterns
         pattern_count=16,
-        pattern_pc_channel=0,  # ch1, PC#0-15
+        pattern_pc_channel=0,  # PC on bank's channel; Ch1 for Bank A
 
         # Transport
         sends_clock=True,

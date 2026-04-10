@@ -22,8 +22,21 @@ _DEFAULT_TABS = ["granular", "filter", "envelope", "mixer", "fx"]
 _DEFAULT_LABELS = {
     "granular": "GRANULAR", "filter": "FILTER", "envelope": "ENVELOPE",
     "mixer": "MIXER", "fx": "FX", "clock": "CLOCK",
-    # SP-404 categories
-    "bus_effects": "BUS FX", "dj_mode": "DJ MODE", "looper": "LOOPER",
+    # SP-404 categories — 5 FX buses + looper + DJ
+    "bus1_fx": "BUS 1", "bus2_fx": "BUS 2", "bus3_fx": "BUS 3",
+    "bus4_fx": "BUS 4", "input_fx": "INPUT FX",
+    "looper": "LOOPER", "dj_mode": "DJ",
+}
+
+# Map CC category → MIDI channel for SP-404 multi-bus routing
+_SP404_CATEGORY_CHANNELS = {
+    "bus1_fx": 0,      # Ch1
+    "bus2_fx": 1,      # Ch2
+    "bus3_fx": 2,      # Ch3
+    "bus4_fx": 3,      # Ch4
+    "input_fx": 4,     # Ch5
+    "looper": 0,       # Ch1
+    "dj_mode": 0,      # Ch1 (volume on Ch1, crossfade on Ch1)
 }
 
 # Module-level fallback lookup (for P-6 when no device profile)
@@ -270,6 +283,18 @@ class P6ControlScreen:
                 self._show_load = True
                 return
 
+        # Looper tab — big button clicks
+        if tab_key == "looper" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+            if self._handle_looper_click(mx, my):
+                return
+
+        # DJ Mode tab — crossfader + button clicks
+        if tab_key == "dj_mode" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+            if self._handle_dj_click(mx, my):
+                return
+
         # Clock tab handling
         if tab_key == "clock" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self._ensure_clock()
@@ -296,14 +321,20 @@ class P6ControlScreen:
                     return
             return
 
-        # Knob interaction — sends CC on both auto + granular channels
+        # Knob interaction — sends CC on the appropriate channel(s)
         for knob, cc in self._knobs.get(tab_key, []):
             if knob.handle_event(event):
                 if self.app.p6:
-                    from engine.p6_midi import CH_GRANULAR, CH_AUTO
                     val = int(knob.value)
-                    self.app.p6.send_cc(cc, val, channel=CH_AUTO)
-                    self.app.p6.send_cc(cc, val, channel=CH_GRANULAR)
+                    # SP-404: each bus tab has its own MIDI channel
+                    bus_ch = _SP404_CATEGORY_CHANNELS.get(tab_key)
+                    if bus_ch is not None:
+                        self.app.p6.send_cc(cc, val, channel=bus_ch)
+                    else:
+                        # P-6 or unknown: send on auto + granular channels
+                        from engine.p6_midi import CH_GRANULAR, CH_AUTO
+                        self.app.p6.send_cc(cc, val, channel=CH_AUTO)
+                        self.app.p6.send_cc(cc, val, channel=CH_GRANULAR)
                     self._last_cc = cc
                     self._last_cc_time = time.monotonic()
                 if self.app.router:
@@ -349,6 +380,14 @@ class P6ControlScreen:
 
         if tab_key == "clock":
             self._draw_clock_tab(surface, f_small, f_med)
+            return
+
+        if tab_key == "looper":
+            self._draw_looper_tab(surface, f_small, f_med)
+            return
+
+        if tab_key == "dj_mode":
+            self._draw_dj_tab(surface, f_small, f_med)
             return
 
         # ── Knobs (highlight the last-changed one) ───────────────────
@@ -513,5 +552,172 @@ class P6ControlScreen:
         surface.blit(surf, surf.get_rect(centerx=cx, top=flash_y + 35))
 
         # Hint
-        surf = f_small.render("Set P-6 SYNC = USB to receive clock", True, theme.TEXT_DIM)
+        dev = self.app.device_name
+        surf = f_small.render(f"Set {dev} SYNC = USB to receive clock", True, theme.TEXT_DIM)
         surface.blit(surf, surf.get_rect(centerx=cx, top=flash_y + 55))
+
+    # ── Looper tab (big buttons for SP-404 looper) ───────────────────
+
+    def _draw_looper_tab(self, surface, f_small, f_med):
+        """Draw large performance buttons for the SP-404 looper."""
+        f_large = theme.font("large")
+        y_start = 90
+        btn_w = 180
+        btn_h = 70
+        gap = 16
+        cols = 3
+        x_start = (theme.SCREEN_WIDTH - cols * btn_w - (cols - 1) * gap) // 2
+
+        buttons = [
+            ("REC", theme.RED, 88, 127),
+            ("OVERDUB", theme.YELLOW, 89, 127),
+            ("STOP", theme.BUTTON_BG, 85, 127),
+            ("DELETE", (120, 40, 40), 87, 127),
+            ("UNDO", theme.ACCENT_DIM, 91, 127),
+            ("REDO", theme.ACCENT_DIM, 91, 0),
+        ]
+
+        self._looper_btn_rects = []
+        for i, (label, bg, cc, val) in enumerate(buttons):
+            row = i // cols
+            col = i % cols
+            x = x_start + col * (btn_w + gap)
+            y = y_start + row * (btn_h + gap)
+            rect = pygame.Rect(x, y, btn_w, btn_h)
+
+            pygame.draw.rect(surface, bg, rect, border_radius=10)
+            pygame.draw.rect(surface, theme.BORDER, rect, 2, border_radius=10)
+
+            surf = f_large.render(label, True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+
+            self._looper_btn_rects.append((rect, cc, val))
+
+        # BPM/Rate knob (CC#90) — draw as regular knob below buttons
+        rate_y = y_start + 2 * (btn_h + gap) + 20
+        knobs = self._knobs.get("looper", [])
+        for knob, cc in knobs:
+            if cc == 90:  # BPM/Play Rate
+                knob.center = (theme.SCREEN_WIDTH // 2, rate_y + 40)
+                knob.draw(surface)
+
+        # Hint
+        surf = f_small.render("SP-404 Looper — Ch1 | Tap buttons to trigger",
+                             True, theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2,
+                                          top=rate_y + 90))
+
+    def _handle_looper_click(self, mx, my):
+        """Handle clicks on looper buttons — send momentary CC triggers."""
+        if not hasattr(self, "_looper_btn_rects"):
+            return False
+        for rect, cc, val in self._looper_btn_rects:
+            if rect.collidepoint(mx, my):
+                if self.app.p6:
+                    ch = _SP404_CATEGORY_CHANNELS.get("looper", 0)
+                    self.app.p6.send_cc(cc, val, channel=ch)
+                return True
+        return False
+
+    # ── DJ Mode tab (crossfader + deck controls) ─────────────────────
+
+    def _draw_dj_tab(self, surface, f_small, f_med):
+        """Draw DJ mode controls — crossfader + transport buttons."""
+        f_large = theme.font("large")
+        cx = theme.SCREEN_WIDTH // 2
+
+        # Crossfader — wide horizontal bar
+        fader_y = 100
+        fader_w = theme.SCREEN_WIDTH - 100
+        fader_h = 40
+        fader_rect = pygame.Rect(50, fader_y, fader_w, fader_h)
+        pygame.draw.rect(surface, theme.KNOB_BG, fader_rect, border_radius=6)
+        pygame.draw.rect(surface, theme.BORDER, fader_rect, 1, border_radius=6)
+
+        # Crossfader thumb
+        knobs = self._knobs.get("dj_mode", [])
+        xfade_val = 64
+        for knob, cc in knobs:
+            if cc == 8:  # Crossfade
+                xfade_val = int(knob.value)
+        thumb_x = 50 + int((xfade_val / 127.0) * fader_w)
+        thumb_rect = pygame.Rect(thumb_x - 15, fader_y - 5, 30, fader_h + 10)
+        pygame.draw.rect(surface, theme.ACCENT, thumb_rect, border_radius=4)
+
+        surf = f_small.render("CH1", True, theme.TEXT_DIM)
+        surface.blit(surf, (55, fader_y - 20))
+        surf = f_small.render("CH2", True, theme.TEXT_DIM)
+        surface.blit(surf, (50 + fader_w - 30, fader_y - 20))
+        surf = f_small.render("CROSSFADER", True, theme.ACCENT)
+        surface.blit(surf, surf.get_rect(centerx=cx, top=fader_y + fader_h + 6))
+
+        self._dj_fader_rect = fader_rect
+
+        # Volume knobs (per deck)
+        vol_y = fader_y + fader_h + 50
+        for knob, cc in knobs:
+            if cc == 7:  # Volume
+                knob.center = (150, vol_y + 50)
+                knob.label = "DECK VOL"
+                knob.draw(surface)
+
+        # Transport buttons
+        btn_y = vol_y + 20
+        btn_w = 110
+        btn_h = 50
+        btn_x = 350
+
+        dj_buttons = [
+            ("PLAY", theme.GREEN, 20, 127),
+            ("PAUSE", theme.BUTTON_BG, 20, 0),
+            ("SYNC", theme.BLUE, 22, 127),
+            ("CUE", theme.YELLOW, 23, 127),
+            ("BEND+", theme.BUTTON_BG, 24, 127),
+            ("BEND-", theme.BUTTON_BG, 25, 127),
+        ]
+
+        self._dj_btn_rects = []
+        for i, (label, bg, cc, val) in enumerate(dj_buttons):
+            row = i // 3
+            col = i % 3
+            x = btn_x + col * (btn_w + 8)
+            y = btn_y + row * (btn_h + 8)
+            rect = pygame.Rect(x, y, btn_w, btn_h)
+
+            pygame.draw.rect(surface, bg, rect, border_radius=8)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
+            surf = f_med.render(label, True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+
+            self._dj_btn_rects.append((rect, cc, val))
+
+        # Hint
+        hint_y = btn_y + 2 * (btn_h + 8) + 16
+        surf = f_small.render("SP-404 DJ Mode — decks on Ch1/Ch2",
+                             True, theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(centerx=cx, top=hint_y))
+
+    def _handle_dj_click(self, mx, my):
+        """Handle clicks on DJ mode buttons and crossfader."""
+        # Crossfader drag
+        if hasattr(self, "_dj_fader_rect") and self._dj_fader_rect.collidepoint(mx, my):
+            frac = (mx - self._dj_fader_rect.x) / self._dj_fader_rect.width
+            val = int(max(0, min(127, frac * 127)))
+            if self.app.p6:
+                ch = _SP404_CATEGORY_CHANNELS.get("dj_mode", 0)
+                self.app.p6.send_cc(8, val, channel=ch)
+            # Update knob value
+            for knob, cc in self._knobs.get("dj_mode", []):
+                if cc == 8:
+                    knob.value = float(val)
+            return True
+
+        # Buttons
+        if hasattr(self, "_dj_btn_rects"):
+            for rect, cc, val in self._dj_btn_rects:
+                if rect.collidepoint(mx, my):
+                    if self.app.p6:
+                        ch = _SP404_CATEGORY_CHANNELS.get("dj_mode", 0)
+                        self.app.p6.send_cc(cc, val, channel=ch)
+                    return True
+        return False
