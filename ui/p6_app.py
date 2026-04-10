@@ -22,6 +22,7 @@ from ui.screens.p6_sample_screen import P6SampleScreen
 from ui.screens.p6_help_screen import P6HelpScreen
 from ui.screens.p6_radio_screen import P6RadioScreen
 from ui.screens.p6_settings_screen import P6SettingsScreen
+from ui.screens.kit_builder_screen import KitBuilderScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
@@ -206,6 +207,7 @@ class P6App:
             "radio":   P6RadioScreen(self),
             "help":    P6HelpScreen(self),
             "settings": P6SettingsScreen(self),
+            "kit": KitBuilderScreen(self),
         }
         self.current_screen_name = "session"
 
@@ -823,6 +825,7 @@ class P6App:
                     pygame.K_F3: "pattern", pygame.K_F4: "record",
                     pygame.K_F5: "sample", pygame.K_F6: "radio",
                     pygame.K_F7: "help", pygame.K_F8: "settings",
+                    pygame.K_F9: "kit",
                 }
                 if event.key in NAV_KEYS:
                     self.switch_screen(NAV_KEYS[event.key])

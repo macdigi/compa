@@ -1,19 +1,22 @@
-"""P-6 Sample Screen — file browser + visual waveform slicer.
+"""P-6 Sample Screen — file browser, visual waveform slicer, format converter.
 
-Two modes:
-  BROWSE: File browser for navigating local sample library + recordings
-  SLICER: Visual waveform with slice markers, preview, export, P-6 transfer
+Three modes:
+  BROWSE:  File browser for navigating local sample library + recordings
+  SLICER:  Visual waveform with slice markers, preview, export, P-6 transfer
+  CONVERT: Batch convert recordings to SP-404, P-6, or Akai MPC kit formats
 """
 
 import os
+import threading
 import pygame
 import numpy as np
 from .. import theme
 from engine.sample_slicer import SampleSlicer, P6_MOUNT_PATH
+from engine.format_converter import convert_recordings_to_kit, list_supported_formats
 
 
 class P6SampleScreen:
-    """Dual-mode sample browser and waveform slicer."""
+    """Three-mode sample screen: browser, waveform slicer, format converter."""
 
     def __init__(self, app):
         self.app = app
@@ -50,6 +53,16 @@ class P6SampleScreen:
         self._dragging_marker = None  # "start", "end", or None
         self._place_mode = "slice"    # "slice" (add slice markers) or "trim" (set S/E)
 
+        # Convert mode state
+        self._convert_recordings: list[dict] = []
+        self._convert_selected: set[str] = set()  # set of paths
+        self._convert_scroll = 0
+        self._convert_target = "sp404"  # "sp404", "p6", or "mpc"
+        self._convert_status = ""       # status message
+        self._convert_busy = False
+        self._convert_result_dir = ""
+        self._convert_kit_name = ""
+
     def _refresh_files(self):
         self._file_list = []
         if not os.path.isdir(self._current_dir):
@@ -77,6 +90,11 @@ class P6SampleScreen:
     def on_enter(self):
         self._p6_mounted = os.path.isdir(P6_MOUNT_PATH)
         self._refresh_files()
+        # Auto-detect connected device for convert target default
+        if self._p6_mounted:
+            self._convert_target = "p6"
+        elif os.path.isdir("/media/pi/SP-404MKII") or os.path.isdir("/media/pi/SP404MKII"):
+            self._convert_target = "sp404"
 
     def on_exit(self):
         self._slicer.stop_preview()
@@ -102,19 +120,26 @@ class P6SampleScreen:
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
-            browse_btn = pygame.Rect(16, 6, 100, 30)
-            slicer_btn = pygame.Rect(126, 6, 100, 30)
+            browse_btn = pygame.Rect(theme.SCREEN_WIDTH - 350, 6, 100, 30)
+            slicer_btn = pygame.Rect(theme.SCREEN_WIDTH - 240, 6, 100, 30)
+            convert_btn = pygame.Rect(theme.SCREEN_WIDTH - 130, 6, 100, 30)
             if browse_btn.collidepoint(mx, my):
                 self._mode = "browse"
                 return
             if slicer_btn.collidepoint(mx, my):
                 self._mode = "slicer"
                 return
+            if convert_btn.collidepoint(mx, my):
+                self._mode = "convert"
+                self._refresh_convert_recordings()
+                return
 
             if self._mode == "browse":
                 self._handle_browse(mx, my)
-            else:
+            elif self._mode == "slicer":
                 self._handle_slicer(mx, my)
+            elif self._mode == "convert":
+                self._handle_convert(mx, my)
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
             mx_pos = event.pos[0] if hasattr(event, 'pos') else 0
@@ -125,6 +150,12 @@ class P6SampleScreen:
                     self._file_scroll = max(0, self._file_scroll - 1)
                 else:
                     self._file_scroll = min(max_s, self._file_scroll + 1)
+            elif self._mode == "convert":
+                max_s = max(0, len(self._convert_recordings) - 9)
+                if event.button == 4:
+                    self._convert_scroll = max(0, self._convert_scroll - 1)
+                else:
+                    self._convert_scroll = min(max_s, self._convert_scroll + 1)
             else:
                 # Scroll on waveform = zoom, scroll on list = scroll list
                 wave_rect = pygame.Rect(16, 42, 700, 188)
@@ -343,8 +374,9 @@ class P6SampleScreen:
 
         # Mode toggles (overlay on header)
         for rect, label, active in [
-            (pygame.Rect(theme.SCREEN_WIDTH - 240, 6, 100, 26), "BROWSE", self._mode == "browse"),
-            (pygame.Rect(theme.SCREEN_WIDTH - 130, 6, 100, 26), "SLICER", self._mode == "slicer"),
+            (pygame.Rect(theme.SCREEN_WIDTH - 350, 6, 100, 26), "BROWSE", self._mode == "browse"),
+            (pygame.Rect(theme.SCREEN_WIDTH - 240, 6, 100, 26), "SLICER", self._mode == "slicer"),
+            (pygame.Rect(theme.SCREEN_WIDTH - 130, 6, 100, 26), "CONVERT", self._mode == "convert"),
         ]:
             bg = theme.ACCENT if active else theme.BUTTON_BG
             tc = theme.BG if active else theme.TEXT
@@ -357,12 +389,14 @@ class P6SampleScreen:
         mt = "P-6 USB: READY" if self._p6_mounted else "P-6 USB: --"
         mc = theme.GREEN if self._p6_mounted else theme.TEXT_DIM
         surf = f_small.render(mt, True, mc)
-        surface.blit(surf, (theme.SCREEN_WIDTH - 370, 12))
+        surface.blit(surf, (theme.SCREEN_WIDTH - 480, 12))
 
         if self._mode == "browse":
             self._draw_browse(surface, f_med, f_small)
-        else:
+        elif self._mode == "slicer":
             self._draw_slicer(surface, f_large, f_med, f_small)
+        elif self._mode == "convert":
+            self._draw_convert(surface, f_large, f_med, f_small)
 
     def _draw_browse(self, surface, f_med, f_small):
         back_rect = pygame.Rect(16, 42, 80, 28)
@@ -676,3 +710,315 @@ class P6SampleScreen:
         surf = f_small.render("Tap waveform: markers  |  TRIM: cut to S/E  |  Tap slice: preview",
                              True, theme.TEXT_DIM)
         surface.blit(surf, (16, 400))
+
+    # ── CONVERT mode ──────────────────────────────────────────────────
+
+    def _refresh_convert_recordings(self):
+        """Load recording list from recorder."""
+        try:
+            self._convert_recordings = self.app.recorder.list_recordings()
+        except Exception:
+            self._convert_recordings = []
+        self._convert_scroll = 0
+
+    def _generate_kit_name(self) -> str:
+        """Auto-generate kit name from date + count."""
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        return f"kit_{stamp}"
+
+    def _draw_convert(self, surface, f_large, f_med, f_small):
+        """Draw the CONVERT mode UI."""
+
+        # ── Title label (y=42) ───────────────────────────────────────
+        surf = f_med.render("Select recordings to convert", True, theme.TEXT)
+        surface.blit(surf, (16, 42))
+
+        # ── Recording list (y=60-300, rows 26px, max 9 visible) ─────
+        list_y = 60
+        item_h = 26
+        max_visible = 9
+        visible = self._convert_recordings[self._convert_scroll:
+                                           self._convert_scroll + max_visible]
+
+        for i, rec in enumerate(visible):
+            row_rect = pygame.Rect(16, list_y + i * item_h,
+                                   theme.SCREEN_WIDTH - 32, item_h - 2)
+            path = rec.get("path", "")
+            selected = path in self._convert_selected
+
+            # Background
+            if selected:
+                pygame.draw.rect(surface, theme.ACCENT_DIM, row_rect, border_radius=2)
+            elif i % 2 == 1:
+                pygame.draw.rect(surface, theme.BG_LIGHTER, row_rect, border_radius=2)
+
+            # Checkbox indicator
+            cb_rect = pygame.Rect(row_rect.x + 4, row_rect.y + 4, 16, 16)
+            if selected:
+                pygame.draw.rect(surface, theme.ACCENT, cb_rect, border_radius=3)
+                surf = f_small.render("x", True, theme.BG)
+                surface.blit(surf, surf.get_rect(center=cb_rect.center))
+            else:
+                pygame.draw.rect(surface, theme.BORDER, cb_rect, 1, border_radius=3)
+
+            # Filename
+            fname = rec.get("filename", "???")
+            surf = f_small.render(fname, True, theme.TEXT)
+            surface.blit(surf, (row_rect.x + 26, row_rect.y + 5))
+
+            # Duration + size on right
+            dur = rec.get("duration", 0)
+            size = rec.get("size_mb", 0)
+            info = f"{dur:.1f}s  {size:.1f}MB"
+            surf = f_small.render(info, True, theme.TEXT_DIM)
+            surface.blit(surf, (row_rect.right - surf.get_width() - 8, row_rect.y + 5))
+
+        if not self._convert_recordings:
+            surf = f_med.render("No recordings found", True, theme.TEXT_DIM)
+            sr = surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=list_y + 40)
+            surface.blit(surf, sr)
+            hint = f_small.render("Record some audio first, then come back here",
+                                  True, theme.TEXT_DIM)
+            hr = hint.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=list_y + 68)
+            surface.blit(hint, hr)
+
+        # Scroll indicator
+        total = len(self._convert_recordings)
+        if total > max_visible:
+            shown_end = min(self._convert_scroll + max_visible, total)
+            surf = f_small.render(
+                f"{self._convert_scroll + 1}-{shown_end}/{total}",
+                True, theme.TEXT_DIM)
+            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 20, 42))
+
+        # ── Selection summary (y=302) ────────────────────────────────
+        sel_count = len(self._convert_selected)
+        total_dur = sum(r.get("duration", 0)
+                        for r in self._convert_recordings
+                        if r.get("path", "") in self._convert_selected)
+        summary = f"Selected: {sel_count} files  |  Total: {total_dur:.1f}s"
+        surf = f_small.render(summary, True,
+                              theme.ACCENT if sel_count > 0 else theme.TEXT_DIM)
+        surface.blit(surf, (16, 302))
+
+        # Select all / deselect all buttons
+        sel_all_rect = pygame.Rect(400, 298, 80, 24)
+        desel_rect = pygame.Rect(486, 298, 80, 24)
+        pygame.draw.rect(surface, theme.BUTTON_BG, sel_all_rect, border_radius=4)
+        surf = f_small.render("ALL", True, theme.ACCENT)
+        surface.blit(surf, surf.get_rect(center=sel_all_rect.center))
+        pygame.draw.rect(surface, theme.BUTTON_BG, desel_rect, border_radius=4)
+        surf = f_small.render("NONE", True, theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=desel_rect.center))
+
+        # ── Target format buttons (y=330) ────────────────────────────
+        surf = f_small.render("Target:", True, theme.TEXT_DIM)
+        surface.blit(surf, (16, 336))
+        targets = [
+            (pygame.Rect(80, 330, 100, 28), "sp404", "SP-404"),
+            (pygame.Rect(186, 330, 80, 28), "p6", "P-6"),
+            (pygame.Rect(272, 330, 110, 28), "mpc", "AKAI MPC"),
+        ]
+        for rect, tid, label in targets:
+            active = self._convert_target == tid
+            bg = theme.ACCENT if active else theme.BUTTON_BG
+            tc = theme.BG if active else theme.TEXT
+            pygame.draw.rect(surface, bg, rect, border_radius=4)
+            surf = f_small.render(label, True, tc)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+
+        # ── Kit name (y=366) ─────────────────────────────────────────
+        kit_label = self._convert_kit_name or self._generate_kit_name()
+        surf = f_small.render("Kit:", True, theme.TEXT_DIM)
+        surface.blit(surf, (16, 372))
+        name_rect = pygame.Rect(50, 366, 240, 26)
+        pygame.draw.rect(surface, theme.BG_LIGHTER, name_rect, border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER, name_rect, 1, border_radius=4)
+        surf = f_small.render(kit_label, True, theme.TEXT)
+        surface.blit(surf, (56, 372))
+
+        # ── CONVERT button (y=400) ───────────────────────────────────
+        convert_rect = pygame.Rect(16, 398, 130, 32)
+        if self._convert_busy:
+            c_bg, c_text = theme.BUTTON_BG, "CONVERTING..."
+            c_tc = theme.YELLOW
+        elif sel_count > 0:
+            c_bg, c_text = theme.ACCENT, "CONVERT"
+            c_tc = theme.BG
+        else:
+            c_bg, c_text = theme.BUTTON_BG, "CONVERT"
+            c_tc = theme.TEXT_DIM
+        pygame.draw.rect(surface, c_bg, convert_rect, border_radius=6)
+        surf = f_med.render(c_text, True, c_tc)
+        surface.blit(surf, surf.get_rect(center=convert_rect.center))
+
+        # ── Status (y=436) ───────────────────────────────────────────
+        if self._convert_status:
+            is_err = "error" in self._convert_status.lower()
+            is_done = "done" in self._convert_status.lower()
+            sc = theme.RED if is_err else (theme.GREEN if is_done else theme.YELLOW)
+            surf = f_small.render(self._convert_status, True, sc)
+            surface.blit(surf, (16, 436))
+
+        # ── TRANSFER TO DEVICE button (y=398, right side) ────────────
+        transfer_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 398, 180, 32)
+        has_result = bool(self._convert_result_dir
+                          and os.path.isdir(self._convert_result_dir))
+        if has_result:
+            t_bg = theme.ACCENT
+            t_tc = theme.BG
+        else:
+            t_bg = theme.BUTTON_BG
+            t_tc = theme.TEXT_DIM
+        pygame.draw.rect(surface, t_bg, transfer_rect, border_radius=6)
+        surf = f_small.render("TRANSFER TO DEVICE", True, t_tc)
+        surface.blit(surf, surf.get_rect(center=transfer_rect.center))
+
+        # ── KIT BUILDER button (y=366, right of kit name) ────────────
+        kit_builder_rect = pygame.Rect(310, 366, 120, 26)
+        pygame.draw.rect(surface, theme.ACCENT, kit_builder_rect, border_radius=4)
+        surf = f_small.render("KIT BUILDER", True, theme.BG)
+        surface.blit(surf, surf.get_rect(center=kit_builder_rect.center))
+
+        # ── Hint (y=456) ────────────────────────────────────────────
+        surf = f_small.render(
+            "Tap rows to select  |  Pick target format  |  CONVERT  |  TRANSFER",
+            True, theme.TEXT_DIM)
+        surface.blit(surf, (16, 456))
+
+    def _handle_convert(self, mx, my):
+        """Handle taps in CONVERT mode."""
+
+        # ── Recording list taps (y=60-294, rows 26px, max 9) ─────────
+        list_y = 60
+        item_h = 26
+        max_visible = 9
+        visible = self._convert_recordings[self._convert_scroll:
+                                           self._convert_scroll + max_visible]
+
+        for i, rec in enumerate(visible):
+            row_rect = pygame.Rect(16, list_y + i * item_h,
+                                   theme.SCREEN_WIDTH - 32, item_h - 2)
+            if row_rect.collidepoint(mx, my):
+                path = rec.get("path", "")
+                if path in self._convert_selected:
+                    self._convert_selected.discard(path)
+                else:
+                    self._convert_selected.add(path)
+                return
+
+        # ── Select all / deselect all ────────────────────────────────
+        sel_all_rect = pygame.Rect(400, 298, 80, 24)
+        desel_rect = pygame.Rect(486, 298, 80, 24)
+        if sel_all_rect.collidepoint(mx, my):
+            for rec in self._convert_recordings:
+                self._convert_selected.add(rec.get("path", ""))
+            return
+        if desel_rect.collidepoint(mx, my):
+            self._convert_selected.clear()
+            return
+
+        # ── Target format buttons (y=330) ────────────────────────────
+        targets = [
+            (pygame.Rect(80, 330, 100, 28), "sp404"),
+            (pygame.Rect(186, 330, 80, 28), "p6"),
+            (pygame.Rect(272, 330, 110, 28), "mpc"),
+        ]
+        for rect, tid in targets:
+            if rect.collidepoint(mx, my):
+                self._convert_target = tid
+                return
+
+        # ── KIT BUILDER button (y=366, right of kit name) ────────────
+        kit_builder_rect = pygame.Rect(310, 366, 120, 26)
+        if kit_builder_rect.collidepoint(mx, my):
+            self.app.switch_screen("kit")
+            return
+
+        # ── CONVERT button (y=398) ───────────────────────────────────
+        convert_rect = pygame.Rect(16, 398, 130, 32)
+        if convert_rect.collidepoint(mx, my):
+            if self._convert_busy or not self._convert_selected:
+                return
+            self._run_conversion()
+            return
+
+        # ── TRANSFER TO DEVICE (y=398 right) ─────────────────────────
+        transfer_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 398, 180, 32)
+        if transfer_rect.collidepoint(mx, my):
+            if self._convert_result_dir and os.path.isdir(self._convert_result_dir):
+                self._transfer_converted()
+            return
+
+    def _run_conversion(self):
+        """Start format conversion in a background thread."""
+        kit_name = self._convert_kit_name or self._generate_kit_name()
+        self._convert_kit_name = kit_name
+        sessions_dir = self.app.config.get("P6_SESSIONS_DIR", "sessions")
+        output_dir = os.path.join(sessions_dir, "converted", kit_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        recordings = sorted(self._convert_selected)
+        target = self._convert_target
+        self._convert_busy = True
+        self._convert_status = f"Converting {len(recordings)} files to {target}..."
+
+        def worker():
+            try:
+                result = convert_recordings_to_kit(
+                    recordings, kit_name, output_dir, target)
+                if result:
+                    self._convert_result_dir = output_dir
+                    self._convert_status = (
+                        f"Done! {len(recordings)} files converted to {output_dir}")
+                else:
+                    self._convert_status = "Error: conversion returned no output"
+            except Exception as e:
+                self._convert_status = f"Error: {e}"
+            finally:
+                self._convert_busy = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _transfer_converted(self):
+        """Copy converted output to connected device USB mount."""
+        import shutil
+
+        # Determine device mount path
+        if self._convert_target == "p6" and os.path.isdir(P6_MOUNT_PATH):
+            dest = os.path.join(P6_MOUNT_PATH, "SAMPLE")
+        elif self._convert_target == "sp404":
+            for mount in ["/media/pi/SP-404MKII", "/media/pi/SP404MKII"]:
+                if os.path.isdir(mount):
+                    dest = os.path.join(mount, "IMPORT")
+                    break
+            else:
+                self._convert_status = "Error: SP-404 not connected"
+                return
+        elif self._convert_target == "mpc":
+            # MPC/Force: look for common mount points
+            for mount in ["/media/pi/FORCE", "/media/pi/MPC"]:
+                if os.path.isdir(mount):
+                    dest = mount
+                    break
+            else:
+                self._convert_status = "Error: MPC/Force not connected"
+                return
+        else:
+            self._convert_status = "Error: device not connected"
+            return
+
+        os.makedirs(dest, exist_ok=True)
+        src = self._convert_result_dir
+        count = 0
+        try:
+            for fname in os.listdir(src):
+                s = os.path.join(src, fname)
+                d = os.path.join(dest, fname)
+                if os.path.isfile(s):
+                    shutil.copy2(s, d)
+                    count += 1
+            self._convert_status = f"Transferred {count} files to {dest}"
+        except Exception as e:
+            self._convert_status = f"Transfer error: {e}"
