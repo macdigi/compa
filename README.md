@@ -1,117 +1,123 @@
 # Compa
 
-**Touchscreen companion app for the Roland AIRA Compact P-6 on Raspberry Pi.**
+**Universal companion device for USB music gear on Raspberry Pi.**
 
-Compa turns a Raspberry Pi + touchscreen into a powerful control surface, recorder, sample editor, and performance tool for the P-6 pocket sampler. It addresses the P-6's biggest limitations: tiny screen, no song mode, no tap tempo, tedious backup process, and limited sample management.
+Compa turns a Raspberry Pi + touchscreen into a powerful companion for your hardware samplers and grooveboxes. Auto-detects your device and adapts its features. Record, sample, slice, stream radio, control parameters, chain patterns, and manage backups — all from a touchscreen or mouse.
+
+## Supported Devices
+
+| Device | Audio | MIDI Control | Backup/Restore | Sample Transfer |
+|--------|-------|-------------|----------------|-----------------|
+| **Roland P-6** | 2in/2out 44.1kHz | Granular, Filter, Envelope, Mixer, FX (40 CCs) | Pattern + Sample backup | Slicer → P-6 |
+| **Roland SP-404 MK2** | 2in/4out 48kHz | Bus FX, DJ Mode, Looper (25+ CCs) | SD card backup | Slicer → SP-404 |
+| **Akai MPC / Force** | — | — | — | XPM drum program export |
+| **Any USB audio device** | Record/playback | — | — | — |
 
 ## Features
 
 ### Recording
-- **Auto-record on transport** — hit play on the P-6 and Compa starts recording automatically
-- **60-second recall buffer** — forgot to press record? Recall the last 60 seconds of audio
+- **Auto-record on transport** — hit play and Compa starts recording automatically
+- **60-second recall buffer** — forgot to press record? Recall the last 60 seconds
+- **Threshold recording** — auto-start when signal detected, stop on silence
 - **Take management** — star, rename, delete recordings with BPM/pattern metadata
-- **Normalized playback** — recordings play back at proper volume despite P-6's quiet USB audio
-- **Samba share** — recordings instantly accessible on your Mac via network
+- **Samba share** — recordings accessible on your Mac/PC via network
 
 ### Sample Editing
-- **Visual waveform slicer** — load any WAV, see the full waveform, place slice markers
-- **Start/End trim** — set S and E points, trim with snap-to-zero-crossing (no clicks)
+- **Visual waveform slicer** — load any WAV, see the waveform, place slice markers
+- **Start/End trim** with snap-to-zero-crossing (no clicks)
 - **Auto-slice** — divide into 2, 4, 8, or 16 equal parts
-- **Normalize, Mono, Downsample** — prepare samples for P-6's memory constraints
-- **Zoom** — zoom into waveform for precise marker placement
-- **Export to P-6** — transfer slices directly when P-6 is in USB storage mode
-- **Undo** — revert destructive edits (up to 5 levels)
+- **Normalize, Mono, Downsample** — prepare samples for your device's constraints
+- **Zoom** — zoom into waveform for precise editing
+- **Export + Transfer** — convert and send slices to your device via USB
+
+### Format Conversion
+- **P-6 format** — 44.1kHz 16-bit mono WAV
+- **SP-404 MK2 format** — 48kHz 16-bit stereo WAV in IMPORT folder
+- **Akai MPC/Force** — generates .xpm drum programs with properly formatted samples
+- **Cross-device** — record on one device, convert, load on another
+
+### Internet Radio
+- **137 stations** across 25 genres (Jazz, Soul, Funk, Lo-fi, Hip Hop, Metal, Classical, Electronic, Vintage, Paranormal, and more)
+- **Capture buffer** — save the last 60 seconds of any stream
+- **Record** — manual or threshold-based recording from radio
+- **Track metadata** — shows current artist/song from ICY metadata
+- **Full-width visualizer** — real-time waveform display
 
 ### Performance
-- **Pattern chain / song mode** — program pattern sequences with bar counts (the P-6 doesn't have this!)
-- **Tap tempo / master clock** — Pi sends MIDI clock to P-6 at exact BPM
-- **Pi-side step sequencer** — 6-pad x 16-step grid that triggers P-6 pads via MIDI
-- **Granular presets** — save and recall all 14 granular engine parameters
+- **Pattern chain / song mode** — program pattern sequences with bar counts
+- **Tap tempo / master clock** — Pi sends MIDI clock at exact BPM
+- **Pi-side step sequencer** — 6-pad x 16-step grid
+- **Granular presets** (P-6) — save and recall all 14 granular engine parameters
+- **Device-specific controls** — adapts to connected device's CC map
 
 ### Utility
-- **One-button P-6 backup/restore** — save entire P-6 contents as named snapshots
-- **Session notes** — jot down ideas with the keyboard, auto-saved
-- **Searchable P-6 reference manual** — every CC, shortcut, effect, and menu item
-- **Resample calculator** — shows bar durations vs sample rates at current BPM
-
-### Connectivity
-- **Touchscreen support** — full multitouch via USB HID
-- **Mouse support** — works with any USB mouse
-- **ATOM SQ integration** — optional MIDI controller for navigation and pad triggering
-- **BPM sync** — reads P-6 MIDI clock for accurate tempo display
+- **One-button backup/restore** — save device contents as named snapshots
+- **Session notes** — jot down ideas, auto-saved
+- **Searchable reference manual** — every CC, shortcut, effect, and menu item
+- **Resample calculator** — bar durations vs sample rates at current BPM
+- **Settings screen** — mouse mode, auto-record, threshold, touch calibration
 
 ## Hardware Requirements
 
-- **Raspberry Pi 3B+** or newer (Pi 4 recommended)
-- **5" USB touchscreen** (800x480 or 800x600, HDMI + USB)
-- **Roland AIRA Compact P-6**
-- **USB cable** (P-6 to Pi, must be data-capable)
-- **Official Pi power supply** (2.5A+ required — undervoltage causes USB dropouts)
-- **Optional:** PreSonus ATOM SQ MIDI controller
-
-## Quick Install
-
-```bash
-# Flash Raspberry Pi OS Lite (64-bit) to SD card
-# Connect via SSH, then:
-
-git clone https://github.com/macdigi/compa.git
-cd compa/setup
-chmod +x *.sh
-./01-base-setup.sh
-./02-audio-setup.sh
-./04-autostart.sh
-
-sudo reboot
-```
-
-## P-6 Setup
-
-For best results, configure these P-6 MIDI settings:
-- **SYnC = Auto** (or USB when using tap tempo)
-- **rxPC = On** (receive program changes)
-- **A.CH = 15** (auto MIDI channel, default)
-- **G.CH = 4** (granular MIDI channel, default)
+- **Raspberry Pi 3B+** or newer (Pi 4/5 recommended)
+- **Touchscreen** — 7" HDMI recommended (800x480+), 3.5" SPI supported with mouse
+- **USB music device** — Roland P-6, SP-404 MK2, or any USB audio interface
+- **USB cable** (device to Pi, must be data-capable)
+- **Official Pi power supply** (2.5A+ required)
+- **Optional**: USB mouse for 3.5" screens
 
 ## Screens
 
 | Screen | What it does |
 |--------|-------------|
-| **SESSION** | Dashboard: transport, BPM, pattern, resample calc, notes, P-6 backup |
-| **CONTROL** | Parameter knobs (granular/filter/envelope/mixer/FX), granular presets, tap tempo clock |
-| **PATTERN** | 64-pattern grid, pattern chain editor, Pi-side step sequencer |
-| **RECORD** | Record/recall/stop, level meters, waveform, recording list with metadata |
+| **SESSION** | Dashboard: transport, BPM, pattern, resample calc, notes, backup/restore |
+| **CONTROL** | Parameter knobs — adapts to device (P-6: granular/filter/etc, SP-404: bus FX/DJ/looper) |
+| **PATTERN** | Pattern grid, pattern chain editor, Pi-side step sequencer |
+| **RECORD** | Record/recall/threshold, level meters, waveform, recording list |
 | **SAMPLE** | File browser, visual waveform slicer with editing tools |
-| **? (HELP)** | Searchable P-6 reference manual |
+| **RADIO** | Internet radio with 137 stations, visualizer, capture |
+| **SETTINGS** | Mouse mode, audio config, touch calibration |
 
-## P-6 USB Backup Modes
+## Quick Install
 
-The P-6 requires specific button combos to enter USB storage mode:
+```bash
+# Flash Raspberry Pi OS Lite (64-bit) to SD card using Raspberry Pi Imager
+# Set username: pi, enable SSH, configure WiFi
 
-| Mode | Button combo | What it backs up |
-|------|-------------|-----------------|
-| Pattern backup | Hold **STOP** + power on | .PRM pattern files |
-| Sample export A-D | Hold **bank button** + power on | .WAV + .PRM sample files |
-| Sample export E-H | Hold **bank + SAMPLING** + power on | .WAV + .PRM sample files |
-| Sample import | Hold **SAMPLING** + power on | Load WAV files to pads |
+# SSH in, then:
+git clone https://github.com/macdigi/compa.git
+cd compa
+python3 -m venv venv
+venv/bin/pip install pygame sounddevice soundfile numpy python-rtmidi evdev
+sudo apt install ffmpeg libts-bin samba
+
+# Set up the service
+sudo cp setup/compa.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable compa
+sudo systemctl start compa
+```
+
+## Display Compatibility
+
+| Screen | Resolution | Connection | Touch | Experience |
+|--------|-----------|------------|-------|-----------|
+| 7" HDMI | 800x480+ | HDMI + USB | Capacitive | Best — full touch |
+| 5" HDMI | 800x480 | HDMI + USB | Capacitive | Good |
+| 3.5" SPI | 480x320 | GPIO SPI | Resistive | Functional — mouse recommended |
+| Any HDMI monitor | Varies | HDMI | Mouse | Works great |
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| F1-F5 | Switch screens (Session/Control/Pattern/Record/Sample) |
-| F6 | Help / reference manual |
-| Space | P-6 transport start/stop |
+| F1-F6 | Switch screens |
+| F7 | Help / reference manual |
+| F8 | Settings |
+| Space | Transport start/stop |
 | R | Toggle recording |
 | A | Toggle auto-record |
-| ESC | Exit help screen / quit app |
-
-## Coming Soon
-
-- Roland SP-404 MK2 support
-- Multi-device simultaneous connection
-- Device abstraction for other samplers
-- Performance FX automation
+| M | Toggle mouse mode |
 
 ## License
 
@@ -119,6 +125,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Credits
 
-Created by **macdigi** with Claude Code.
-
-P-6 research informed by the community: sunwarper, SPVIDZ, imLowKey, Ricky Tinez, BoBeats, minutiae, and Nonjuror.
+Created by **RARE DATA** — [raredata.net](https://raredata.net)
