@@ -21,11 +21,14 @@ from ui.screens.p6_record_screen import P6RecordScreen
 from ui.screens.p6_sample_screen import P6SampleScreen
 from ui.screens.p6_help_screen import P6HelpScreen
 from ui.screens.p6_radio_screen import P6RadioScreen
+from ui.screens.p6_settings_screen import P6SettingsScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
 from engine.p6_recorder import P6Recorder
+from engine.device_profiles import DeviceManager
 from ui.splash import run_splash
+from ui.wizard import run_wizard
 
 # Custom pygame events (thread-safe MIDI → UI bridge)
 P6_TRANSPORT_EVENT = pygame.USEREVENT + 1
@@ -127,6 +130,27 @@ class P6App:
 
         print(f"Display: {self._display_w}x{self._display_h}", flush=True)
 
+        # Store fb blit function globally so splash/wizard can use it
+        import builtins
+        if self._fb_mode and self._fb_file:
+            def _fb_blit(surface):
+                try:
+                    import numpy as np
+                    arr = pygame.surfarray.pixels3d(surface)
+                    arr = np.transpose(arr, (1, 0, 2))
+                    r = arr[:, :, 0].astype(np.uint16)
+                    g = arr[:, :, 1].astype(np.uint16)
+                    b = arr[:, :, 2].astype(np.uint16)
+                    rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+                    self._fb_file.seek(0)
+                    self._fb_file.write(rgb565.tobytes())
+                    self._fb_file.flush()
+                except Exception:
+                    pass
+            builtins._compa_fb_blit = _fb_blit
+        else:
+            builtins._compa_fb_blit = None
+
         # FB mode: start evdev touch reader thread
         self._evdev_thread = None
         if self._fb_mode:
@@ -144,6 +168,19 @@ class P6App:
 
         # ── Auto-record setting ─────────────────────────────────────
         self.auto_record = self.config.get("P6_AUTO_RECORD", "1") == "1"
+
+        # ── Device detection ─────────────────────────────────────────
+        self.device_manager = DeviceManager()
+        detected = self.device_manager.detect()
+        if detected:
+            print(f"Device detected: {detected.name}", flush=True)
+        else:
+            print("No USB device detected — running in offline mode", flush=True)
+
+        # ── Mouse mode (show cursor, skip touch-to-mouse conversion) ──
+        self.mouse_mode = self.config.get("MOUSE_MODE", "0") == "1"
+        if self.mouse_mode:
+            pygame.mouse.set_visible(True)
 
         # ── MIDI devices (init before screens so state objects exist) ──
         self.atom_sq: AtomSQ | None = None
@@ -168,6 +205,7 @@ class P6App:
             "sample":  P6SampleScreen(self),
             "radio":   P6RadioScreen(self),
             "help":    P6HelpScreen(self),
+            "settings": P6SettingsScreen(self),
         }
         self.current_screen_name = "session"
 
@@ -220,12 +258,12 @@ class P6App:
 
         # ── Status ───────────────────────────────────────────────────
         print(f"ATOM SQ: {'connected' if self.atom_sq else 'not found'}")
-        print(f"P-6: {'connected' if self.p6 else 'not found'}")
+        print(f"{self.device_name}: {'connected' if self.p6 else 'not found'}")
         print(f"Recorder: {'ready' if self.recorder.available else 'no audio device'}")
         print(f"Auto-record: {'ON' if self.auto_record else 'OFF'}")
 
     def _init_midi(self):
-        """Detect and connect ATOM SQ and P-6."""
+        """Detect and connect ATOM SQ and target device."""
         # ATOM SQ
         try:
             midi_in, midi_out = find_atom_sq_ports()
@@ -235,16 +273,19 @@ class P6App:
         except Exception as e:
             print(f"ATOM SQ init failed: {e}")
 
-        # P-6
+        # Target device — use profile midi_hint if available, fall back to config
+        midi_hint = self.config["P6_MIDI_PORT_HINT"]
+        if self.device and self.device.midi_hint:
+            midi_hint = self.device.midi_hint
         try:
-            midi_in, midi_out = find_p6_ports(self.config["P6_MIDI_PORT_HINT"])
+            midi_in, midi_out = find_p6_ports(midi_hint)
             if midi_in is not None or midi_out is not None:
                 self.p6 = P6Midi(midi_in, midi_out)
-                # Wire P-6 transport for auto-record
+                # Wire transport for auto-record
                 self.p6.on_transport = self._on_p6_transport
-                print("P-6 MIDI connected")
+                print(f"{self.device_name} MIDI connected")
         except Exception as e:
-            print(f"P-6 MIDI init failed: {e}")
+            print(f"{self.device_name} MIDI init failed: {e}")
 
         # Router (needs both ATOM SQ and P-6)
         if self.atom_sq and self.p6:
@@ -259,31 +300,213 @@ class P6App:
     # ── Evdev touch input (for SPI LCD / FB mode) ─────────────────────
 
     def _start_evdev_touch(self):
-        """Start a thread that reads evdev touch events and posts pygame events."""
+        """Start threads for touch, mouse, and keyboard in FB mode."""
         import threading
         self._evdev_thread = threading.Thread(target=self._evdev_loop, daemon=True)
         self._evdev_thread.start()
+        self._mice_thread = threading.Thread(target=self._mice_loop, daemon=True)
+        self._mice_thread.start()
+        self._start_keyboard_reader()
+
+    def _start_keyboard_reader(self):
+        """Start keyboard evdev reader for FB mode."""
+        import threading
+        t = threading.Thread(target=self._keyboard_loop, daemon=True)
+        t.start()
+
+    def _keyboard_loop(self):
+        """Read keyboard via evdev in FB mode."""
+        try:
+            import evdev
+            import select as sel
+        except ImportError:
+            return
+
+        # Find keyboard
+        kbd = None
+        for path in evdev.list_devices():
+            d = evdev.InputDevice(path)
+            if "keyboard" in d.name.lower() or "Keyboard" in d.name:
+                kbd = d
+                print(f"Evdev keyboard: {d.name} at {d.path}", flush=True)
+                break
+
+        if not kbd:
+            print("No keyboard found", flush=True)
+            return
+
+        # Evdev keycode → pygame keycode mapping (common keys)
+        KEYMAP = {
+            1: pygame.K_ESCAPE, 28: pygame.K_RETURN, 14: pygame.K_BACKSPACE,
+            15: pygame.K_TAB, 57: pygame.K_SPACE, 111: pygame.K_DELETE,
+            103: pygame.K_UP, 108: pygame.K_DOWN, 105: pygame.K_LEFT, 106: pygame.K_RIGHT,
+            59: pygame.K_F1, 60: pygame.K_F2, 61: pygame.K_F3, 62: pygame.K_F4,
+            63: pygame.K_F5, 64: pygame.K_F6, 65: pygame.K_F7, 66: pygame.K_F8,
+            67: pygame.K_F9, 68: pygame.K_F10, 87: pygame.K_F11, 88: pygame.K_F12,
+            # Letters
+            30: pygame.K_a, 48: pygame.K_b, 46: pygame.K_c, 32: pygame.K_d,
+            18: pygame.K_e, 33: pygame.K_f, 34: pygame.K_g, 35: pygame.K_h,
+            23: pygame.K_i, 36: pygame.K_j, 37: pygame.K_k, 38: pygame.K_l,
+            50: pygame.K_m, 49: pygame.K_n, 24: pygame.K_o, 25: pygame.K_p,
+            16: pygame.K_q, 19: pygame.K_r, 31: pygame.K_s, 20: pygame.K_t,
+            22: pygame.K_u, 47: pygame.K_v, 17: pygame.K_w, 45: pygame.K_x,
+            21: pygame.K_y, 44: pygame.K_z,
+            # Numbers
+            2: pygame.K_1, 3: pygame.K_2, 4: pygame.K_3, 5: pygame.K_4,
+            6: pygame.K_5, 7: pygame.K_6, 8: pygame.K_7, 9: pygame.K_8,
+            10: pygame.K_9, 11: pygame.K_0,
+            # Punctuation
+            12: pygame.K_MINUS, 13: pygame.K_EQUALS, 26: pygame.K_LEFTBRACKET,
+            27: pygame.K_RIGHTBRACKET, 39: pygame.K_SEMICOLON, 40: pygame.K_QUOTE,
+            41: pygame.K_BACKQUOTE, 43: pygame.K_BACKSLASH, 51: pygame.K_COMMA,
+            52: pygame.K_PERIOD, 53: pygame.K_SLASH,
+        }
+
+        # Evdev keycode → unicode character (lowercase)
+        CHARMAP = {
+            30: 'a', 48: 'b', 46: 'c', 32: 'd', 18: 'e', 33: 'f', 34: 'g',
+            35: 'h', 23: 'i', 36: 'j', 37: 'k', 38: 'l', 50: 'm', 49: 'n',
+            24: 'o', 25: 'p', 16: 'q', 19: 'r', 31: 's', 20: 't', 22: 'u',
+            47: 'v', 17: 'w', 45: 'x', 21: 'y', 44: 'z',
+            2: '1', 3: '2', 4: '3', 5: '4', 6: '5', 7: '6', 8: '7',
+            9: '8', 10: '9', 11: '0', 57: ' ', 12: '-', 13: '=',
+            51: ',', 52: '.', 53: '/', 39: ';', 40: "'", 26: '[', 27: ']',
+            43: '\\', 41: '`',
+        }
+        SHIFT_CHARMAP = {
+            2: '!', 3: '@', 4: '#', 5: '$', 6: '%', 7: '^', 8: '&',
+            9: '*', 10: '(', 11: ')', 12: '_', 13: '+',
+            51: '<', 52: '>', 53: '?', 39: ':', 40: '"', 26: '{', 27: '}',
+            43: '|', 41: '~',
+        }
+
+        shift = False
+
+        while True:
+            try:
+                r, _, _ = sel.select([kbd], [], [], 0.05)
+                if not r:
+                    continue
+                for event in kbd.read():
+                    if event.type != 1:  # EV_KEY only
+                        continue
+                    # Track shift
+                    if event.code in (42, 54):  # LEFT/RIGHT SHIFT
+                        shift = (event.value != 0)
+                        continue
+
+                    pg_key = KEYMAP.get(event.code)
+                    if not pg_key:
+                        continue
+
+                    if event.value == 1:  # Key down
+                        if shift and event.code in SHIFT_CHARMAP:
+                            uni = SHIFT_CHARMAP[event.code]
+                        elif shift and event.code in CHARMAP and CHARMAP[event.code].isalpha():
+                            uni = CHARMAP[event.code].upper()
+                        else:
+                            uni = CHARMAP.get(event.code, '')
+
+                        pygame.event.post(pygame.event.Event(
+                            pygame.KEYDOWN, key=pg_key, unicode=uni, mod=0))
+                    elif event.value == 0:  # Key up
+                        pygame.event.post(pygame.event.Event(
+                            pygame.KEYUP, key=pg_key, mod=0))
+            except Exception:
+                pass
+
+    def _mice_loop(self):
+        """Read USB mouse via /dev/input/mice (3-byte PS/2 protocol)."""
+        import struct, select, builtins
+        sw, sh = self._display_w, self._display_h
+        mx, my = sw // 2, sh // 2
+        btn_down = False
+
+        try:
+            fd = os.open("/dev/input/mice", os.O_RDONLY | os.O_NONBLOCK)
+        except Exception as e:
+            print(f"Cannot open /dev/input/mice: {e}", flush=True)
+            return
+
+        print("Mouse reader started (/dev/input/mice)", flush=True)
+
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], 0.02)
+                if not r:
+                    continue
+                data = os.read(fd, 3)
+                if len(data) != 3:
+                    continue
+
+                btn, dx, dy = struct.unpack("bbb", data)
+                left = bool(btn & 1)
+
+                mx = max(0, min(sw - 1, mx + dx))
+                my = max(0, min(sh - 1, my - dy))  # Y is inverted in PS/2
+
+                builtins._compa_mouse_pos = (mx, my)
+
+                # Post motion
+                pygame.event.post(pygame.event.Event(
+                    pygame.MOUSEMOTION, pos=(mx, my),
+                    rel=(dx, -dy), buttons=(1 if left else 0, 0, 0)))
+
+                # Button state changes
+                if left and not btn_down:
+                    btn_down = True
+                    pygame.event.post(pygame.event.Event(
+                        pygame.MOUSEBUTTONDOWN, pos=(mx, my), button=1))
+                elif not left and btn_down:
+                    btn_down = False
+                    pygame.event.post(pygame.event.Event(
+                        pygame.MOUSEBUTTONUP, pos=(mx, my), button=1))
+
+                # Scroll wheel (bit 3 = wheel data present in 4th byte on some mice)
+                # Basic 3-byte protocol doesn't have scroll, but btn byte bits 4-7 may indicate
+            except Exception:
+                pass
 
     def _evdev_loop(self):
-        """Read ADS7846 touch events and convert to pygame mouse events."""
+        """Read touch AND mouse events via evdev (for FB/dummy SDL mode)."""
         try:
             import evdev
             import select
         except ImportError:
-            print("evdev not available for touch input", flush=True)
+            print("evdev not available for input", flush=True)
             return
 
-        # Find touch device
-        dev = None
+        # Find all input devices
+        devices = []
+        touch_dev = None
+        mouse_dev = None
         for path in evdev.list_devices():
             d = evdev.InputDevice(path)
+            caps = d.capabilities()
             if "touch" in d.name.lower() or "ads" in d.name.lower():
-                dev = d
-                break
+                touch_dev = d
+                devices.append(d)
+                print(f"Evdev touch: {d.name} at {d.path}", flush=True)
+            elif 2 in caps and 1 in caps:  # EV_REL + EV_KEY = real mouse
+                # Check it has BTN_LEFT (code 272)
+                key_caps = caps.get(1, [])
+                key_codes = []
+                for item in key_caps:
+                    if isinstance(item, (list, tuple)):
+                        key_codes.append(item[0])
+                    else:
+                        key_codes.append(item)
+                if 272 in key_codes:  # BTN_LEFT
+                    mouse_dev = d
+                    if d not in devices:
+                        devices.append(d)
+                    print(f"Evdev mouse: {d.name} at {d.path}", flush=True)
 
-        if not dev:
-            print("No touch device found", flush=True)
+        if not devices:
+            print("No input devices found", flush=True)
             return
+
+        dev = touch_dev  # for backward compat below
 
         print(f"Evdev touch: {dev.name} at {dev.path}", flush=True)
 
@@ -305,45 +528,90 @@ class P6App:
             print("No /etc/pointercal — using raw coordinates", flush=True)
 
         touch_x = touch_y = 0
+        mouse_x = mouse_y = 0
         raw_x = raw_y = 0
         touching = False
+        mouse_btn = False
         sw, sh = self._display_w, self._display_h
+        mouse_x, mouse_y = sw // 2, sh // 2  # Start cursor in center
 
         while True:
             try:
-                r, _, _ = select.select([dev], [], [], 0.05)
+                r, _, _ = select.select(devices, [], [], 0.05)
                 if not r:
                     continue
-                for event in dev.read():
-                    if event.type == 3:  # EV_ABS
-                        if event.code == 0:  # ABS_X
-                            raw_x = event.value
-                        elif event.code == 1:  # ABS_Y
-                            raw_y = event.value
+                for ready_dev in r:
+                    for event in ready_dev.read():
+                        # ── Touch events (ABS) ────────────────────
+                        if ready_dev == touch_dev and not self.mouse_mode:
+                            if event.type == 3:  # EV_ABS
+                                if event.code == 0:
+                                    raw_x = event.value
+                                elif event.code == 1:
+                                    raw_y = event.value
 
-                        if cal:
-                            A, B, C, D, E, F, S = cal
-                            touch_x = (A * raw_x + B * raw_y + C) // S
-                            touch_y = (D * raw_x + E * raw_y + F) // S
-                        else:
-                            touch_x = int(raw_x * sw / 4096)
-                            touch_y = int(raw_y * sh / 4096)
+                                if cal:
+                                    A, B, C, D, E, F, S = cal
+                                    touch_x = (A * raw_x + B * raw_y + C) // S
+                                    touch_y = (D * raw_x + E * raw_y + F) // S
+                                else:
+                                    touch_x = int(raw_x * sw / 4096)
+                                    touch_y = int(raw_y * sh / 4096)
 
-                        touch_x = max(0, min(sw - 1, touch_x))
-                        touch_y = max(0, min(sh - 1, touch_y))
-                    elif event.type == 1 and event.code == 330:  # BTN_TOUCH
-                        if event.value == 1 and not touching:
-                            touching = True
-                            pygame.event.post(pygame.event.Event(
-                                pygame.MOUSEBUTTONDOWN, pos=(touch_x, touch_y), button=1))
-                        elif event.value == 0 and touching:
-                            touching = False
-                            pygame.event.post(pygame.event.Event(
-                                pygame.MOUSEBUTTONUP, pos=(touch_x, touch_y), button=1))
-                    elif event.type == 0 and event.code == 0 and touching:  # SYN_REPORT
-                        pygame.event.post(pygame.event.Event(
-                            pygame.MOUSEMOTION, pos=(touch_x, touch_y),
-                            rel=(0, 0), buttons=(1, 0, 0)))
+                                touch_x = max(0, min(sw - 1, touch_x))
+                                touch_y = max(0, min(sh - 1, touch_y))
+                            elif event.type == 1 and event.code == 330:
+                                if event.value == 1 and not touching:
+                                    touching = True
+                                    pygame.event.post(pygame.event.Event(
+                                        pygame.MOUSEBUTTONDOWN,
+                                        pos=(touch_x, touch_y), button=1))
+                                elif event.value == 0 and touching:
+                                    touching = False
+                                    pygame.event.post(pygame.event.Event(
+                                        pygame.MOUSEBUTTONUP,
+                                        pos=(touch_x, touch_y), button=1))
+                            elif event.type == 0 and event.code == 0 and touching:
+                                pygame.event.post(pygame.event.Event(
+                                    pygame.MOUSEMOTION,
+                                    pos=(touch_x, touch_y),
+                                    rel=(0, 0), buttons=(1, 0, 0)))
+
+                        # ── Mouse events (REL) ────────────────────
+                        elif ready_dev == mouse_dev:
+                            if event.type == 2:  # EV_REL
+                                if event.code == 0:  # REL_X
+                                    mouse_x = max(0, min(sw - 1, mouse_x + event.value))
+                                elif event.code == 1:  # REL_Y
+                                    mouse_y = max(0, min(sh - 1, mouse_y + event.value))
+                                elif event.code == 8:  # REL_WHEEL
+                                    btn = 4 if event.value > 0 else 5
+                                    pygame.event.post(pygame.event.Event(
+                                        pygame.MOUSEBUTTONDOWN,
+                                        pos=(mouse_x, mouse_y), button=btn))
+                                pygame.event.post(pygame.event.Event(
+                                    pygame.MOUSEMOTION,
+                                    pos=(mouse_x, mouse_y),
+                                    rel=(0, 0),
+                                    buttons=(1 if mouse_btn else 0, 0, 0)))
+                                builtins._compa_mouse_pos = (mouse_x, mouse_y)
+                            elif event.type == 1:  # EV_KEY (buttons)
+                                if event.code == 272:  # BTN_LEFT
+                                    if event.value == 1:
+                                        mouse_btn = True
+                                        pygame.event.post(pygame.event.Event(
+                                            pygame.MOUSEBUTTONDOWN,
+                                            pos=(mouse_x, mouse_y), button=1))
+                                    elif event.value == 0:
+                                        mouse_btn = False
+                                        pygame.event.post(pygame.event.Event(
+                                            pygame.MOUSEBUTTONUP,
+                                            pos=(mouse_x, mouse_y), button=1))
+                                elif event.code == 273:  # BTN_RIGHT
+                                    if event.value == 1:
+                                        pygame.event.post(pygame.event.Event(
+                                            pygame.MOUSEBUTTONDOWN,
+                                            pos=(mouse_x, mouse_y), button=3))
             except Exception:
                 pass
 
@@ -436,6 +704,17 @@ class P6App:
     def current_screen(self):
         return self.screens[self.current_screen_name]
 
+    @property
+    def device(self):
+        """Active DeviceProfile (or None if no device detected)."""
+        return self.device_manager.active
+
+    @property
+    def device_name(self) -> str:
+        """Short display name for the connected device."""
+        d = self.device_manager.active
+        return d.short_name if d else "---"
+
     def switch_screen(self, name: str):
         if name in self.screens and name != self.current_screen_name:
             old_screen = self.screens.get(self.current_screen_name)
@@ -464,62 +743,66 @@ class P6App:
                 continue
 
             # Convert touch events to mouse events with scroll detection
-            if event.type == pygame.FINGERDOWN:
-                mx = int(event.x * self._display_w)
-                my = int(event.y * self._display_h)
-                self._touch_start_x = mx
-                self._touch_start_y = my
-                self._touch_is_scroll = False
-                event = pygame.event.Event(pygame.MOUSEBUTTONDOWN,
-                                           pos=(mx, my), button=1)
-            elif event.type == pygame.FINGERUP:
-                mx = int(event.x * self._display_w)
-                my = int(event.y * self._display_h)
-                if self._touch_is_scroll:
-                    # Was scrolling — don't send click
+            # Skip in FB mode (evdev handles touch) and when mouse mode is on
+            if not self.mouse_mode and not self._fb_mode:
+                if event.type == pygame.FINGERDOWN:
+                    mx = int(event.x * self._display_w)
+                    my = int(event.y * self._display_h)
+                    self._touch_start_x = mx
+                    self._touch_start_y = my
                     self._touch_is_scroll = False
-                    event = pygame.event.Event(pygame.MOUSEBUTTONUP,
+                    event = pygame.event.Event(pygame.MOUSEBUTTONDOWN,
                                                pos=(mx, my), button=1)
-                else:
-                    event = pygame.event.Event(pygame.MOUSEBUTTONUP,
-                                               pos=(mx, my), button=1)
-            elif event.type == pygame.FINGERMOTION:
-                mx = int(event.x * self._display_w)
-                my = int(event.y * self._display_h)
-                dy = my - self._touch_start_y
+                elif event.type == pygame.FINGERUP:
+                    mx = int(event.x * self._display_w)
+                    my = int(event.y * self._display_h)
+                    if self._touch_is_scroll:
+                        # Was scrolling — don't send click
+                        self._touch_is_scroll = False
+                        event = pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                                   pos=(mx, my), button=1)
+                    else:
+                        event = pygame.event.Event(pygame.MOUSEBUTTONUP,
+                                                   pos=(mx, my), button=1)
+                elif event.type == pygame.FINGERMOTION:
+                    mx = int(event.x * self._display_w)
+                    my = int(event.y * self._display_h)
+                    dy = my - self._touch_start_y
 
-                if not self._touch_is_scroll and abs(dy) > self._touch_scroll_threshold:
-                    self._touch_is_scroll = True
+                    if not self._touch_is_scroll and abs(dy) > self._touch_scroll_threshold:
+                        self._touch_is_scroll = True
 
-                if self._touch_is_scroll:
-                    # Skip global scroll if a screen is handling its own drag
-                    screen = self.current_screen
-                    if hasattr(screen, '_dragging_scrollbar') and screen._dragging_scrollbar:
-                        # Let the screen handle the drag directly as MOUSEMOTION
+                    if self._touch_is_scroll:
+                        # Skip global scroll if a screen is handling its own drag
+                        screen = self.current_screen
+                        if hasattr(screen, '_dragging_scrollbar') and screen._dragging_scrollbar:
+                            # Let the screen handle the drag directly as MOUSEMOTION
+                            event = pygame.event.Event(pygame.MOUSEMOTION,
+                                                       pos=(mx, my),
+                                                       rel=(int(event.dx * self._display_w),
+                                                            int(event.dy * self._display_h)),
+                                                       buttons=(1, 0, 0))
+                            self.current_screen.handle_event(event)
+                            continue
+
+                        # Generate scroll events based on drag direction
+                        scroll_dy = int(event.dy * self._display_h)
+                        if abs(scroll_dy) > 8:
+                            # Scroll up (drag down) or scroll down (drag up)
+                            btn = 4 if scroll_dy > 0 else 5
+                            event = pygame.event.Event(pygame.MOUSEBUTTONDOWN,
+                                                       pos=(mx, my), button=btn)
+                            self._touch_start_y = my  # reset for next increment
+                        else:
+                            continue  # skip small motions
+                    else:
                         event = pygame.event.Event(pygame.MOUSEMOTION,
                                                    pos=(mx, my),
                                                    rel=(int(event.dx * self._display_w),
                                                         int(event.dy * self._display_h)),
                                                    buttons=(1, 0, 0))
-                        self.current_screen.handle_event(event)
-                        continue
-
-                    # Generate scroll events based on drag direction
-                    scroll_dy = int(event.dy * self._display_h)
-                    if abs(scroll_dy) > 8:
-                        # Scroll up (drag down) or scroll down (drag up)
-                        btn = 4 if scroll_dy > 0 else 5
-                        event = pygame.event.Event(pygame.MOUSEBUTTONDOWN,
-                                                   pos=(mx, my), button=btn)
-                        self._touch_start_y = my  # reset for next increment
-                    else:
-                        continue  # skip small motions
-                else:
-                    event = pygame.event.Event(pygame.MOUSEMOTION,
-                                               pos=(mx, my),
-                                               rel=(int(event.dx * self._display_w),
-                                                    int(event.dy * self._display_h)),
-                                               buttons=(1, 0, 0))
+            elif event.type in (pygame.FINGERDOWN, pygame.FINGERUP, pygame.FINGERMOTION):
+                continue  # mouse_mode on: ignore touch events entirely
 
             # P-6 transport event (from MIDI thread via pygame event)
             if event.type == P6_TRANSPORT_EVENT:
@@ -539,7 +822,7 @@ class P6App:
                     pygame.K_F1: "session", pygame.K_F2: "control",
                     pygame.K_F3: "pattern", pygame.K_F4: "record",
                     pygame.K_F5: "sample", pygame.K_F6: "radio",
-                    pygame.K_F7: "help",
+                    pygame.K_F7: "help", pygame.K_F8: "settings",
                 }
                 if event.key in NAV_KEYS:
                     self.switch_screen(NAV_KEYS[event.key])
@@ -573,12 +856,19 @@ class P6App:
                     save_config_key("P6_AUTO_RECORD", "1" if self.auto_record else "0")
                     print(f"Auto-record: {'ON' if self.auto_record else 'OFF'}", flush=True)
                     continue
+                elif event.key == pygame.K_m:
+                    # Toggle mouse mode
+                    self.mouse_mode = not self.mouse_mode
+                    pygame.mouse.set_visible(self.mouse_mode)
+                    save_config_key("MOUSE_MODE", "1" if self.mouse_mode else "0")
+                    print(f"Mouse mode: {'ON' if self.mouse_mode else 'OFF'}", flush=True)
+                    continue
 
-            # Help button
+            # Settings button (replaces help button)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                help_rect = pygame.Rect(4, self._nav_rect.y + 8, 28, 28)
-                if help_rect.collidepoint(event.pos):
-                    self.switch_screen("help")
+                settings_rect = pygame.Rect(4, self._nav_rect.y + 4, 26, 26)
+                if settings_rect.collidepoint(event.pos):
+                    self.switch_screen("settings")
                     continue
 
             # Nav bar
@@ -626,23 +916,28 @@ class P6App:
         self._draw_nav()
         pygame.display.flip()
 
-        # SPI LCD: copy pygame surface to framebuffer as RGB565
-        if self._fb_mode and self._fb_file:
-            try:
-                import numpy as np
-                # Get pixels as 3D array (H, W, 3) uint8
-                arr = pygame.surfarray.pixels3d(self.screen)
-                # Transpose from (W,H,3) to (H,W,3)
-                arr = np.transpose(arr, (1, 0, 2))
-                r = arr[:, :, 0].astype(np.uint16)
-                g = arr[:, :, 1].astype(np.uint16)
-                b = arr[:, :, 2].astype(np.uint16)
-                rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-                self._fb_file.seek(0)
-                self._fb_file.write(rgb565.astype(np.uint16).tobytes())
-                self._fb_file.flush()
-            except Exception:
+        # Draw software cursor in FB + mouse mode
+        if self._fb_mode and self.mouse_mode:
+            # Get cursor position from evdev thread
+            if self._evdev_thread:
+                # Draw a small orange crosshair cursor
+                mx, my = pygame.mouse.get_pos()
+                # Mouse pos won't work in dummy mode, use a shared var
                 pass
+            # Draw cursor at last known mouse position
+            import builtins
+            mp = getattr(builtins, '_compa_mouse_pos', None)
+            if mp:
+                cx, cy = mp
+                pygame.draw.line(self.screen, theme.ACCENT, (cx - 8, cy), (cx + 8, cy), 2)
+                pygame.draw.line(self.screen, theme.ACCENT, (cx, cy - 8), (cx, cy + 8), 2)
+                pygame.draw.circle(self.screen, theme.ACCENT, (cx, cy), 3)
+
+        # SPI LCD: copy pygame surface to framebuffer
+        import builtins
+        fb_blit = getattr(builtins, '_compa_fb_blit', None)
+        if fb_blit:
+            fb_blit(self.screen)
 
     def _draw_nav(self):
         f = theme.font("small")
@@ -678,16 +973,16 @@ class P6App:
 
             self.screen.blit(surf, surf.get_rect(center=rect.center))
 
-        # ── Help button ──────────────────────────────────────────────
-        help_rect = pygame.Rect(4, self._nav_rect.y + 4, 26, 26)
-        help_active = self.current_screen_name == "help"
-        if help_active:
-            pygame.draw.rect(self.screen, theme.ACCENT, help_rect, border_radius=13)
-            surf = f.render("?", True, theme.BG)
+        # ── Settings button (replaces help) ─────────────────────────
+        settings_rect = pygame.Rect(4, self._nav_rect.y + 4, 26, 26)
+        settings_active = self.current_screen_name == "settings"
+        if settings_active:
+            pygame.draw.rect(self.screen, theme.ACCENT, settings_rect, border_radius=13)
+            surf = f_tiny.render("SET", True, theme.BG)
         else:
-            pygame.draw.rect(self.screen, theme.BORDER, help_rect, 1, border_radius=13)
-            surf = f_tiny.render("?", True, theme.TEXT_DIM)
-        self.screen.blit(surf, surf.get_rect(center=help_rect.center))
+            pygame.draw.rect(self.screen, theme.BORDER, settings_rect, 1, border_radius=13)
+            surf = f_tiny.render("SET", True, theme.TEXT_DIM)
+        self.screen.blit(surf, surf.get_rect(center=settings_rect.center))
 
         # ── Status bar (bottom of nav) ───────────────────────────────
         status_y = self._nav_rect.y + 35
@@ -727,16 +1022,25 @@ class P6App:
             self.screen.blit(surf, surf.get_rect(center=badge.center))
             x += 46
 
+        # Mouse mode badge
+        if self.mouse_mode:
+            badge = pygame.Rect(x, status_y - 1, 48, 16)
+            pygame.draw.rect(self.screen, theme.BLUE, badge, border_radius=3)
+            surf = f_tiny.render("MOUSE", True, theme.TEXT_BRIGHT)
+            self.screen.blit(surf, surf.get_rect(center=badge.center))
+            x += 56
+
         # Right side: connection status with dots
         rx = theme.SCREEN_WIDTH - 10
+        dev_label = self.device_name
         if self.p6 and self.p6.connected:
-            surf = f_tiny.render("P-6", True, theme.GREEN)
+            surf = f_tiny.render(dev_label, True, theme.GREEN)
             rx -= surf.get_width()
             self.screen.blit(surf, (rx, status_y))
             pygame.draw.circle(self.screen, theme.GREEN, (rx - 8, status_y + 7), 3)
             rx -= 16
         else:
-            surf = f_tiny.render("P-6", True, theme.RED)
+            surf = f_tiny.render(dev_label, True, theme.RED)
             rx -= surf.get_width()
             self.screen.blit(surf, (rx, status_y))
             pygame.draw.circle(self.screen, theme.RED, (rx - 8, status_y + 7), 3, 1)
@@ -756,6 +1060,9 @@ class P6App:
         pygame.quit()
 
 
+SETUP_FLAG = "/home/pi/compa/.setup_complete"
+
+
 def main():
     app = P6App()
 
@@ -763,8 +1070,13 @@ def main():
         app.running = False
     signal.signal(signal.SIGTERM, _sigterm)
 
-    # Animated splash screen
-    run_splash(app.screen, app.clock)
+    # First-time setup wizard (only if setup hasn't been completed)
+    if not os.path.exists(SETUP_FLAG):
+        run_wizard(app.screen, app.clock, app)
+
+    # Animated splash screen (skip if splash disabled in config)
+    if app.config.get("SKIP_SPLASH", "0") != "1":
+        run_splash(app.screen, app.clock)
 
     app.run()
 

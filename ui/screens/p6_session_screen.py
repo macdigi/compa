@@ -151,7 +151,8 @@ class P6SessionScreen:
         # Version + tagline next to logo
         surf = f_small.render("v1.0", True, theme.TEXT_DIM)
         surface.blit(surf, (240, y + 4))
-        surf = f_small.render("P-6 Companion", True, theme.TEXT_DIM)
+        dev_name = self.app.device_name
+        surf = f_small.render(f"{dev_name} Companion", True, theme.TEXT_DIM)
         surface.blit(surf, (240, y + 20))
 
         # Connection status (right of logo)
@@ -160,10 +161,10 @@ class P6SessionScreen:
         status_y = y + 40
         if p6_connected:
             pygame.draw.circle(surface, theme.GREEN, (status_x + 5, status_y + 7), 4)
-            surf = f_small.render("P-6 connected", True, theme.GREEN)
+            surf = f_small.render(f"{dev_name} connected", True, theme.GREEN)
         else:
             pygame.draw.circle(surface, theme.RED, (status_x + 5, status_y + 7), 4, 1)
-            surf = f_small.render("P-6 not found", True, theme.RED)
+            surf = f_small.render(f"{dev_name} not found", True, theme.RED)
         surface.blit(surf, (status_x + 14, status_y))
 
         y += 62

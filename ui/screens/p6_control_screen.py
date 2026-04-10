@@ -15,33 +15,50 @@ from ..components.modal import Modal
 from engine.p6_midi import P6_CC_MAP, CC_LOOKUP
 from engine.midi_clock import MidiClockSender
 from engine.p6_presets import PresetManager, GranularPreset, GRANULAR_CCS
+from engine.device_profiles import cc_map_to_legacy, build_cc_lookup
 
-# Tab configuration
-TABS = ["granular", "filter", "envelope", "mixer", "fx", "clock"]
-TAB_LABELS = {
-    "granular": "GRANULAR",
-    "filter": "FILTER",
-    "envelope": "ENVELOPE",
-    "mixer": "MIXER",
-    "fx": "FX",
-    "clock": "CLOCK",
+# Default tab config (P-6 fallback)
+_DEFAULT_TABS = ["granular", "filter", "envelope", "mixer", "fx"]
+_DEFAULT_LABELS = {
+    "granular": "GRANULAR", "filter": "FILTER", "envelope": "ENVELOPE",
+    "mixer": "MIXER", "fx": "FX", "clock": "CLOCK",
+    # SP-404 categories
+    "bus_effects": "BUS FX", "dj_mode": "DJ MODE", "looper": "LOOPER",
 }
 
-# Reverse lookup: cc_number -> tab index
+# Module-level fallback lookup (for P-6 when no device profile)
 CC_TO_TAB = {}
-for _i, _tab in enumerate(TABS):
+for _i, _tab in enumerate(_DEFAULT_TABS):
     for _cc, *_ in P6_CC_MAP.get(_tab, []):
         CC_TO_TAB[_cc] = _i
 
 
 class P6ControlScreen:
-    """Full-screen parameter control with live P-6 mirroring."""
+    """Parameter control screen — adapts to connected device."""
 
     def __init__(self, app):
         self.app = app
         self._current_tab = 0
-        self._knobs: dict[str, list[tuple[Knob, int]]] = {}  # tab -> [(Knob, cc_num)]
+        self._knobs: dict[str, list[tuple[Knob, int]]] = {}
         self._tab_buttons: list[tuple[pygame.Rect, str]] = []
+
+        # Resolve CC map from device profile or P-6 fallback
+        dev = getattr(app, "device", None)
+        if dev and dev.cc_map:
+            self._cc_map = cc_map_to_legacy(dev.cc_map)
+            self._cc_lookup = build_cc_lookup(dev.cc_map)
+            # Build tabs from device's CC categories + clock
+            self._tabs = list(dev.cc_map.keys()) + ["clock"]
+        else:
+            self._cc_map = P6_CC_MAP
+            self._cc_lookup = CC_LOOKUP
+            self._tabs = _DEFAULT_TABS + ["clock"]
+
+        # Build per-instance CC-to-tab lookup
+        self._cc_to_tab = {}
+        for i, tab in enumerate(self._tabs):
+            for cc, *_ in self._cc_map.get(tab, []):
+                self._cc_to_tab[cc] = i
 
         # Last changed CC highlight
         self._last_cc = -1
@@ -67,21 +84,22 @@ class P6ControlScreen:
         self._build_knobs()
 
     def _build_tab_buttons(self):
-        """Create tab buttons across the top."""
+        """Create tab buttons across the top — adapts to device categories."""
         self._tab_buttons = []
-        tab_w = 118
-        tab_h = 30
-        tab_gap = 5
-        total = len(TABS) * tab_w + (len(TABS) - 1) * tab_gap
+        n = len(self._tabs)
+        tab_gap = 4
+        tab_w = min(118, (theme.SCREEN_WIDTH - 20 - (n - 1) * tab_gap) // n)
+        tab_h = 26
+        total = n * tab_w + (n - 1) * tab_gap
         start_x = (theme.SCREEN_WIDTH - total) // 2
         y = 44
 
-        for i, tab_key in enumerate(TABS):
+        for i, tab_key in enumerate(self._tabs):
             rect = pygame.Rect(start_x + i * (tab_w + tab_gap), y, tab_w, tab_h)
             self._tab_buttons.append((rect, tab_key))
 
     def _build_knobs(self):
-        """Create knobs for each tab based on P6_CC_MAP."""
+        """Create knobs for each tab based on device CC map."""
         self._knobs = {}
 
         content_y = 80
@@ -92,8 +110,8 @@ class P6ControlScreen:
         cell_w = theme.SCREEN_WIDTH // cols
         cell_h = content_h // rows
 
-        for tab_key in TABS:
-            params = P6_CC_MAP.get(tab_key, [])
+        for tab_key in self._tabs:
+            params = self._cc_map.get(tab_key, [])
             knob_list = []
 
             for idx, (cc, name, lo, hi, default) in enumerate(params):
@@ -132,12 +150,17 @@ class P6ControlScreen:
             self.app.p6.on_cc = None
 
     def _on_p6_cc(self, channel: int, cc: int, value: int):
-        """Called from MIDI thread when P-6 sends a CC."""
+        """Called from MIDI thread when device sends a CC."""
         self._last_cc = cc
         self._last_cc_time = time.monotonic()
 
         # Auto-switch to the tab containing this CC
-        if cc in CC_TO_TAB:
+        # Check instance lookup first, fall back to module-level
+        if cc in self._cc_lookup:
+            cat, _ = self._cc_lookup[cc]
+            if cat in self._tabs:
+                self._current_tab = self._tabs.index(cat)
+        elif cc in CC_TO_TAB:
             self._current_tab = CC_TO_TAB[cc]
 
     def _sync_knobs(self):
@@ -204,7 +227,7 @@ class P6ControlScreen:
                     self._current_tab = i
                     return
 
-        tab_key = TABS[self._current_tab]
+        tab_key = self._tabs[self._current_tab]
 
         # Granular tab — preset buttons
         if tab_key == "granular" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -272,14 +295,15 @@ class P6ControlScreen:
         now = time.monotonic()
 
         # ── Header ──────────────────────────────────────────────────
-        theme.draw_screen_header(surface, "CONTROL", "P-6 parameters")
+        dev_label = self.app.device_name
+        theme.draw_screen_header(surface, "CONTROL", f"{dev_label} parameters")
 
         # ── Tab buttons (highlight if incoming CC is in that tab) ────
         for i, (rect, tab_key) in enumerate(self._tab_buttons):
             active = (i == self._current_tab)
             # Flash tab if it just received a CC
-            flash = (active and self._last_cc in CC_TO_TAB
-                     and CC_TO_TAB[self._last_cc] == i
+            flash = (active and self._last_cc in self._cc_to_tab
+                     and self._cc_to_tab[self._last_cc] == i
                      and now - self._last_cc_time < 0.3)
             if flash:
                 bg = theme.ACCENT_BRIGHT if hasattr(theme, 'ACCENT_BRIGHT') else (255, 220, 50)
@@ -289,13 +313,13 @@ class P6ControlScreen:
                 bg = theme.BUTTON_BG
             text_color = theme.BG if active or flash else theme.TEXT
             pygame.draw.rect(surface, bg, rect, border_radius=4)
-            label = TAB_LABELS[tab_key]
+            label = _DEFAULT_LABELS.get(tab_key, tab_key.upper())
             surf = f_small.render(label, True, text_color)
             lr = surf.get_rect(center=rect.center)
             surface.blit(surf, lr)
 
         # ── Tab content ──────────────────────────────────────────────
-        tab_key = TABS[self._current_tab]
+        tab_key = self._tabs[self._current_tab]
 
         if tab_key == "clock":
             self._draw_clock_tab(surface, f_small, f_med)

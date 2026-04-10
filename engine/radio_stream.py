@@ -62,7 +62,7 @@ class RadioStream:
         self._play_write = 0
         self._play_read = 0
         self._play_buf_size = len(self._play_buf)
-        self._prebuffer_frames = SAMPLE_RATE * 2  # buffer 2s before starting playback
+        self._prebuffer_frames = SAMPLE_RATE * 3  # buffer 3s before starting playback
         self._prebuffered = False
 
         # Capture buffer — 60s rolling
@@ -238,12 +238,15 @@ class RadioStream:
                     "-reconnect", "1",
                     "-reconnect_streamed", "1",
                     "-reconnect_delay_max", "5",
+                    "-probesize", "64000",
+                    "-analyzeduration", "500000",
                     "-i", url,
-                    "-f", "f32le",
-                    "-acodec", "pcm_f32le",
+                    "-af", "aresample=async=1",
+                    "-f", "s16le",
+                    "-acodec", "pcm_s16le",
                     "-ar", str(SAMPLE_RATE),
                     "-ac", str(CHANNELS),
-                    "-bufsize", "256k",
+                    "-bufsize", "512k",
                     "pipe:1",
                 ],
                 stdout=subprocess.PIPE,
@@ -324,7 +327,7 @@ class RadioStream:
 
     def _decode_loop(self):
         """Read decoded PCM from ffmpeg and feed to playback + capture buffers."""
-        bytes_per_frame = CHANNELS * 4  # float32 = 4 bytes
+        bytes_per_frame = CHANNELS * 2  # int16 = 2 bytes
         chunk_frames = BLOCK_SIZE
         chunk_bytes = chunk_frames * bytes_per_frame
 
@@ -334,11 +337,12 @@ class RadioStream:
                 if not raw:
                     break
 
-                # Convert bytes to numpy
+                # Convert bytes to numpy (int16 from ffmpeg, convert to float32)
                 frames = len(raw) // bytes_per_frame
                 if frames == 0:
                     continue
-                audio = np.frombuffer(raw, dtype=np.float32).reshape(frames, CHANNELS)
+                raw_audio = np.frombuffer(raw, dtype=np.int16).reshape(frames, CHANNELS)
+                audio = raw_audio.astype(np.float32) / 32768.0
 
                 # Apply volume
                 audio = audio * self.volume

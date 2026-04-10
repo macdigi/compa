@@ -1,8 +1,17 @@
 """Animated splash screen — COMPA logo then RARE DATA branding."""
 
+import builtins
 import os
 import time
 import pygame
+
+
+def _flip(screen):
+    """Flip display and blit to SPI LCD if in FB mode."""
+    pygame.display.flip()
+    fb_blit = getattr(builtins, '_compa_fb_blit', None)
+    if fb_blit:
+        fb_blit(screen)
 from . import theme
 
 # ASCII art logo
@@ -107,7 +116,7 @@ def run_splash(screen: pygame.Surface, clock: pygame.time.Clock):
         v_surf = f_small.render("v1.0", True, (60, 60, 70))
         screen.blit(v_surf, (sw - v_surf.get_width() - 12, sh - 24))
 
-        pygame.display.flip()
+        _flip(screen)
         clock.tick(fps)
 
     # ── Phase 2: Fade to RARE DATA logo (1.5 seconds) ───────────────
@@ -150,7 +159,7 @@ def run_splash(screen: pygame.Surface, clock: pygame.time.Clock):
             sub.set_alpha(a2)
             screen.blit(sub, (sw // 2 - sub.get_width() // 2, sh // 2 + 140))
 
-        pygame.display.flip()
+        _flip(screen)
         clock.tick(fps)
 
     # ── Phase 3: Quick fade out (0.5 seconds) ───────────────────────
@@ -170,5 +179,5 @@ def run_splash(screen: pygame.Surface, clock: pygame.time.Clock):
             ly = sh // 2 - logo_alpha.get_height() // 2
             screen.blit(logo_alpha, (lx, ly))
 
-        pygame.display.flip()
+        _flip(screen)
         clock.tick(fps)

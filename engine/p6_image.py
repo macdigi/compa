@@ -1,7 +1,8 @@
-"""P-6 image backup and restore manager.
+"""Device image backup and restore manager.
 
-Backs up the entire P-6 USB storage contents to named snapshots on the Pi.
-Restores from saved snapshots. Runs copy operations in background threads.
+Backs up USB storage contents from any connected device (P-6, SP-404, etc.)
+to named snapshots on the Pi. Restores from saved snapshots.
+Runs copy operations in background threads.
 """
 
 import json
@@ -15,15 +16,19 @@ from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
-P6_MOUNT_PATH = "/media/pi/P-6"
+DEFAULT_MOUNT_PATHS = [
+    "/media/pi/P-6",
+    "/media/pi/SP-404MKII",
+    "/media/pi/SP404MKII",
+]
 
 
 class P6ImageManager:
-    """Manages P-6 storage backups (images)."""
+    """Manages device storage backups (images)."""
 
-    def __init__(self, images_dir: str, p6_mount: str = P6_MOUNT_PATH):
+    def __init__(self, images_dir: str, mount_path: str = ""):
         self._images_dir = images_dir
-        self._p6_mount = p6_mount
+        self._mount_path = mount_path
         os.makedirs(images_dir, exist_ok=True)
 
         # Progress tracking
@@ -33,7 +38,18 @@ class P6ImageManager:
 
     @property
     def p6_mounted(self) -> bool:
-        return os.path.isdir(self._p6_mount)
+        """Check if any known device mount path exists."""
+        if self._mount_path and os.path.isdir(self._mount_path):
+            return True
+        for path in DEFAULT_MOUNT_PATHS:
+            if os.path.isdir(path):
+                self._mount_path = path
+                return True
+        return False
+
+    @property
+    def mount_path(self) -> str:
+        return self._mount_path
 
     @property
     def busy(self) -> bool:
@@ -117,15 +133,15 @@ class P6ImageManager:
 
                 # Count total bytes for progress
                 total_bytes = 0
-                for dirpath, dirnames, filenames in os.walk(self._p6_mount):
+                for dirpath, dirnames, filenames in os.walk(self._mount_path):
                     for fname in filenames:
                         total_bytes += os.path.getsize(os.path.join(dirpath, fname))
 
                 # Copy with progress
                 copied_bytes = 0
                 file_count = 0
-                for dirpath, dirnames, filenames in os.walk(self._p6_mount):
-                    rel = os.path.relpath(dirpath, self._p6_mount)
+                for dirpath, dirnames, filenames in os.walk(self._mount_path):
+                    rel = os.path.relpath(dirpath, self._mount_path)
                     dst_dir = os.path.join(dest, rel)
                     os.makedirs(dst_dir, exist_ok=True)
 
@@ -197,8 +213,8 @@ class P6ImageManager:
 
                 # Delete current P-6 contents
                 self._status = "Clearing P-6..."
-                for item in os.listdir(self._p6_mount):
-                    item_path = os.path.join(self._p6_mount, item)
+                for item in os.listdir(self._mount_path):
+                    item_path = os.path.join(self._mount_path, item)
                     if os.path.isdir(item_path):
                         shutil.rmtree(item_path)
                     else:
@@ -208,7 +224,7 @@ class P6ImageManager:
                 copied_bytes = 0
                 for dirpath, dirnames, filenames in os.walk(image_path):
                     rel = os.path.relpath(dirpath, image_path)
-                    dst_dir = os.path.join(self._p6_mount, rel)
+                    dst_dir = os.path.join(self._mount_path, rel)
                     os.makedirs(dst_dir, exist_ok=True)
 
                     for fname in filenames:
