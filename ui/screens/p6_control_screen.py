@@ -16,6 +16,7 @@ from engine.p6_midi import P6_CC_MAP, CC_LOOKUP
 from engine.midi_clock import MidiClockSender
 from engine.p6_presets import PresetManager, GranularPreset, GRANULAR_CCS
 from engine.device_profiles import cc_map_to_legacy, build_cc_lookup
+from engine.sp404_effects import fx_name_for_tab, fx_count_for_tab
 
 # Default tab config (P-6 fallback)
 _DEFAULT_TABS = ["granular", "filter", "envelope", "mixer", "fx"]
@@ -162,16 +163,32 @@ class P6ControlScreen:
                 cx = col * cell_w + cell_w // 2
                 cy = content_y + row * cell_h + cell_h // 2
 
-                knob = Knob(
-                    center=(cx, cy),
-                    radius=knob_r,
-                    min_val=float(lo),
-                    max_val=float(hi),
-                    value=float(default),
-                    label=name,
-                    int_mode=True,
-                    format_func=lambda v: f"{int(v)}",
-                )
+                # FX Select knob (CC#83) — limit range and show effect name
+                if cc == 83 and tab_key in ("bus1_fx", "bus2_fx", "bus3_fx",
+                                             "bus4_fx", "input_fx"):
+                    max_fx = fx_count_for_tab(tab_key) - 1
+                    tab_ref = tab_key  # capture for closure
+                    knob = Knob(
+                        center=(cx, cy),
+                        radius=knob_r,
+                        min_val=0.0,
+                        max_val=float(max_fx),
+                        value=0.0,
+                        label="FX SELECT",
+                        int_mode=True,
+                        format_func=lambda v, t=tab_ref: fx_name_for_tab(t, int(v)),
+                    )
+                else:
+                    knob = Knob(
+                        center=(cx, cy),
+                        radius=knob_r,
+                        min_val=float(lo),
+                        max_val=float(hi),
+                        value=float(default),
+                        label=name,
+                        int_mode=True,
+                        format_func=lambda v: f"{int(v)}",
+                    )
                 knob_list.append((knob, cc))
 
             self._knobs[tab_key] = knob_list
@@ -403,6 +420,19 @@ class P6ControlScreen:
                     int(50 * alpha),
                 )
                 pygame.draw.circle(surface, ring_color, knob.center, knob.radius + 4, 3)
+
+        # ── FX name banner for SP-404 bus tabs ────────────────────────
+        if tab_key in ("bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"):
+            # Find the FX Select knob (CC#83) value
+            for knob, cc in self._knobs.get(tab_key, []):
+                if cc == 83:
+                    fx_val = int(knob.value)
+                    fx_label = fx_name_for_tab(tab_key, fx_val)
+                    if fx_label and fx_label != "(OFF)":
+                        banner_y = 74
+                        surf = f_med.render(f"▶ {fx_label}", True, theme.ACCENT)
+                        surface.blit(surf, (16, banner_y))
+                    break
 
         # ── Active parameter display bar ─────────────────────────────
         bar_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 24
