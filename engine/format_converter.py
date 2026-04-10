@@ -7,10 +7,13 @@ Handles:
 - Akai MPC .xpm drum program generation
 """
 
+import html
 import json
 import logging
 import os
+import re
 import shutil
+import wave
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +25,13 @@ except ImportError:
     sf = None
 
 log = logging.getLogger(__name__)
+
+# Path to the golden Akai Force/MPC drum-program template (26k-line XML).
+# Resolved relative to this module: <repo>/docs/akai_drum_template.xpm
+TEMPLATE_XPM = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "docs", "akai_drum_template.xpm",
+)
 
 
 # ── WAV conversion ───────────────────────────────────────────────────
@@ -137,126 +147,21 @@ class PadAssignment:
     tune: float = 0.0    # Semitones offset
 
 
-def _build_program_pads_json(pad_map: dict[int, dict]) -> str:
-    """Build HTML-entity-encoded JSON for the ProgramPads element.
-
-    The MPC stores pad colour info as a JSON object encoded with HTML entities
-    inside an XML element.  Each pad index (0-127) maps to a colour integer.
-    """
-    DEFAULT_PAD_COLOR = 8323072
-    pads_dict = {}
-    for i in range(128):
-        pads_dict[str(i)] = DEFAULT_PAD_COLOR
-    raw = json.dumps(pads_dict, separators=(",", ":"))
-    # HTML-entity-encode for safe XML embedding
-    encoded = (raw
-               .replace("&", "&amp;")
-               .replace('"', "&quot;")
-               .replace("<", "&lt;")
-               .replace(">", "&gt;"))
-    return encoded
-
-
-def _xml_layer(number: int, active: bool,
-               sample_name: str = "", sample_file: str = "",
-               volume: float = 1.0, pan: float = 0.5) -> str:
-    """Return XML for one <Layer> element inside an Instrument."""
-    active_str = "True" if active else "False"
-    return (
-        f'          <Layer number="{number}">\n'
-        f"            <Active>{active_str}</Active>\n"
-        f"            <Volume>{volume:.6f}</Volume>\n"
-        f"            <Pan>{pan:.6f}</Pan>\n"
-        f"            <Pitch>0.000000</Pitch>\n"
-        f"            <SampleName>{sample_name}</SampleName>\n"
-        f"            <SampleFile>{sample_file}</SampleFile>\n"
-        f"            <SliceStart>0</SliceStart>\n"
-        f"            <SliceEnd>0</SliceEnd>\n"
-        f"            <SliceLoop>0</SliceLoop>\n"
-        f"            <SliceLoopCrossFade>0</SliceLoopCrossFade>\n"
-        f"            <SliceTailPosition>0</SliceTailPosition>\n"
-        f"            <SliceTailLength>0</SliceTailLength>\n"
-        f"            <Direction>Forward</Direction>\n"
-        f"            <Offset>0</Offset>\n"
-        f"            <SliceIndex>0</SliceIndex>\n"
-        f"            <RootNote>60</RootNote>\n"
-        f"            <KeyTrack>False</KeyTrack>\n"
-        f"            <VelocityToStart>0.000000</VelocityToStart>\n"
-        f"            <VelStart>0</VelStart>\n"
-        f"            <VelEnd>127</VelEnd>\n"
-        f"          </Layer>\n"
-    )
-
-
-def _xml_instrument(number: int,
-                    sample_name: str = "", sample_file: str = "",
-                    volume: float = 0.707946, pan: float = 0.5) -> str:
-    """Return XML for one <Instrument> element (pad slot)."""
-    lines = [
-        f'      <Instrument number="{number}">',
-        "        <AudioRoute>",
-        "          <Submix>0</Submix>",
-        "          <Output>0</Output>",
-        "          <Send1>0.000000</Send1>",
-        "          <Send2>0.000000</Send2>",
-        "          <Send3>0.000000</Send3>",
-        "          <Send4>0.000000</Send4>",
-        "        </AudioRoute>",
-        f"        <Volume>{volume:.6f}</Volume>",
-        f"        <Pan>{pan:.6f}</Pan>",
-        "        <Mono>True</Mono>",
-        "        <Polyphony>1</Polyphony>",
-        "        <VelocitySensitivity>75</VelocitySensitivity>",
-        "        <CutoffVelocity>0.000000</CutoffVelocity>",
-        "        <FilterType>2</FilterType>",
-        "        <FilterCutoff>1.000000</FilterCutoff>",
-        "        <FilterResonance>0.000000</FilterResonance>",
-        "        <FilterEnvAmount>0.000000</FilterEnvAmount>",
-        "        <AttackTime>0.000000</AttackTime>",
-        "        <HoldTime>0.000000</HoldTime>",
-        "        <DecayTime>0.047244</DecayTime>",
-        "        <SustainLevel>1.000000</SustainLevel>",
-        "        <ReleaseTime>0.047244</ReleaseTime>",
-        "        <OneShot>True</OneShot>",
-        "        <LFORate>0.000000</LFORate>",
-        "        <LFOAmount>0.000000</LFOAmount>",
-        "        <LFOWaveform>Sine</LFOWaveform>",
-        "        <LFOTarget>Pitch</LFOTarget>",
-        "        <LFOSync>False</LFOSync>",
-        "        <LFOReset>False</LFOReset>",
-        "        <MuteGroup>Off</MuteGroup>",
-        "        <SimultPlay>Off</SimultPlay>",
-        "        <Layers>",
-    ]
-
-    # Layer 1 — the active sample layer
-    has_sample = bool(sample_name and sample_file)
-    lines.append(_xml_layer(
-        number=1, active=True,
-        sample_name=sample_name if has_sample else "",
-        sample_file=sample_file if has_sample else "",
-        volume=1.0, pan=0.5,
-    ))
-    # Layers 2-4 — always empty
-    for layer_num in range(2, 5):
-        lines.append(_xml_layer(
-            number=layer_num, active=False,
-            sample_name="", sample_file="",
-            volume=1.0, pan=0.5,
-        ))
-
-    lines.append("        </Layers>")
-    lines.append("      </Instrument>")
-    return "\n".join(lines) + "\n"
-
-
 def generate_xpm(name: str, pads: list[PadAssignment],
                  output_dir: str) -> Optional[str]:
-    """Generate an Akai MPC .xpm drum program file.
+    """Generate an Akai Force/MPC .Drum.xpm by patching a golden template.
 
-    Produces the real MPCVObject XML format that Akai MPC and Force
-    hardware/software can load.  The .xpm references WAV files by
-    filename only -- they must live in the same directory.
+    Instead of building XML from scratch, we read the known-good 26k-line
+    template (``docs/akai_drum_template.xpm``) and surgically patch:
+
+    1. ``<ProgramName>`` -- kit display name
+    2. ``<ProgramPads>`` JSON -- mark active/inactive pads with colour codes
+    3. Per-instrument Layer 1 ``<SampleName>``, ``<SampleFile>``,
+       ``<SampleEnd>``, and ``<SliceEnd>`` -- so Force resolves audio
+       and draws waveforms correctly
+
+    WAV files are copied into *output_dir* with an uppercase ``.WAV``
+    extension (required by Force).
 
     Args:
         name: Program name (e.g., "My Kit")
@@ -266,101 +171,151 @@ def generate_xpm(name: str, pads: list[PadAssignment],
     Returns:
         Path to the generated .xpm file, or None on failure.
     """
+    if not os.path.isfile(TEMPLATE_XPM):
+        log.error("Template XPM not found: %s", TEMPLATE_XPM)
+        return None
+
     os.makedirs(output_dir, exist_ok=True)
 
-    # Copy/convert samples into output dir and build lookup by pad index
+    # ── Build lookup: pad_index -> info (copy WAVs as uppercase .WAV) ──
+    ACTIVE_COLOR = 8323072
     pad_map: dict[int, dict] = {}
+
     for pad in pads:
         if not os.path.exists(pad.sample_path):
             log.warning("Sample not found, skipping pad %d: %s",
                         pad.pad_index, pad.sample_path)
             continue
 
-        sample_file = os.path.basename(pad.sample_path)
-        dst = os.path.join(output_dir, sample_file)
-        if not os.path.exists(dst):
-            convert_wav(pad.sample_path, dst,
-                        target_rate=44100, target_channels=2, target_bits=16)
+        src_basename = os.path.basename(pad.sample_path)
+        stem = os.path.splitext(src_basename)[0]
+        wav_name = f"{stem}.WAV"  # uppercase extension for Force
 
-        # Display name is filename without extension
-        sample_display = os.path.splitext(sample_file)[0]
+        dst = os.path.join(output_dir, wav_name)
+        if not os.path.exists(dst):
+            shutil.copy2(pad.sample_path, dst)
+
+        # Read frame count so Force can draw waveforms
+        try:
+            with wave.open(pad.sample_path, "rb") as w:
+                nframes = int(w.getnframes())
+        except Exception:
+            nframes = 0
 
         pad_map[pad.pad_index] = {
-            "sample_name": sample_display,
-            "sample_file": sample_file,
-            "volume": pad.volume,
-            "pan": pad.pan,
+            "sample_name": stem,         # filename without extension
+            "sample_file": wav_name,     # filename WITH uppercase .WAV
+            "nframes": nframes,
         }
 
-    # ── Build XML ────────────────────────────────────────────────
-    pads_json = _build_program_pads_json(pad_map)
+    n_active = len(pad_map)
 
-    parts: list[str] = []
-    parts.append('<?xml version="1.0" encoding="UTF-8"?>')
-    parts.append("<MPCVObject>")
+    # ── Read template ────────────────────────────────────────────
+    with open(TEMPLATE_XPM, "r", encoding="utf-8", errors="ignore") as f:
+        tpl = f.read()
 
-    # Version block
-    parts.append("  <Version>")
-    parts.append("    <File_Version>2.1</File_Version>")
-    parts.append("    <Application>MPC-V</Application>")
-    parts.append("    <Application_Version>2.6.0.17</Application_Version>")
-    parts.append("    <Platform>Windows</Platform>")
-    parts.append("  </Version>")
+    # ── 1. Patch ProgramName ─────────────────────────────────────
+    tpl = re.sub(
+        r"<ProgramName>[^<]*</ProgramName>",
+        f"<ProgramName>{name}</ProgramName>",
+        tpl,
+        count=1,
+        flags=re.IGNORECASE,
+    )
 
-    # Program block
-    parts.append('  <Program type="Drum">')
-    parts.append(f"    <ProgramName>{name}</ProgramName>")
-    parts.append(f"    <ProgramPads>{pads_json}</ProgramPads>")
+    # ── 2. Patch ProgramPads JSON ────────────────────────────────
+    mpp = re.search(
+        r"<ProgramPads>([\s\S]*?)</ProgramPads>", tpl, flags=re.IGNORECASE,
+    )
+    if not mpp:
+        log.error("Template missing <ProgramPads> block")
+        return None
 
-    # Global audio route
-    parts.append("    <AudioRoute>")
-    parts.append("      <Submix>0</Submix>")
-    parts.append("      <Output>0</Output>")
-    parts.append("      <Send1>0.000000</Send1>")
-    parts.append("      <Send2>0.000000</Send2>")
-    parts.append("      <Send3>0.000000</Send3>")
-    parts.append("      <Send4>0.000000</Send4>")
-    parts.append("    </AudioRoute>")
+    pp_raw = html.unescape(mpp.group(1)).strip()
+    pp_obj = json.loads(pp_raw)
+    pp_pads = pp_obj["ProgramPads"]["pads"]
 
-    # Global program settings
-    parts.append("    <Volume>0.707946</Volume>")
-    parts.append("    <Pan>0.500000</Pan>")
+    for idx in range(128):
+        pp_pads[f"value{idx}"] = ACTIVE_COLOR if idx in pad_map else 0
 
-    # Instruments — always 128, regardless of how many have samples
-    parts.append("    <Instruments>")
+    pp_obj["ProgramPads"].setdefault("Universal", {"value0": True})
+    pp_obj["ProgramPads"]["Type"] = {"value0": 5}
+    pp_obj["ProgramPads"]["universalPad"] = ACTIVE_COLOR
+    pp_obj["ProgramPads"]["UnusedPads"] = {"value0": 1}
+
+    pp_new = json.dumps(pp_obj, separators=(",", ":"))
+    pp_new_esc = html.escape(pp_new, quote=True)
+    tpl = tpl[: mpp.start(1)] + pp_new_esc + tpl[mpp.end(1) :]
+
+    # ── 3. Patch each instrument (1-128) ─────────────────────────
     for inst_num in range(1, 129):
         pad_idx = inst_num - 1  # instrument 1 = pad index 0
         info = pad_map.get(pad_idx)
         if info:
-            parts.append(_xml_instrument(
-                number=inst_num,
-                sample_name=info["sample_name"],
-                sample_file=info["sample_file"],
-                volume=0.707946,
-                pan=info["pan"],
-            ))
+            sample_name = info["sample_name"]
+            sample_file = info["sample_file"]
+            end_frames = info["nframes"]
         else:
-            parts.append(_xml_instrument(
-                number=inst_num,
-                sample_name="",
-                sample_file="",
-            ))
-    parts.append("    </Instruments>")
-    parts.append("  </Program>")
-    parts.append("</MPCVObject>")
+            sample_name = ""
+            sample_file = ""
+            end_frames = 0
 
-    xpm_content = "\n".join(parts) + "\n"
+        # Find the full <Instrument number="N">...</Instrument> block
+        pat = re.compile(
+            rf'(<Instrument number="{inst_num}">)([\s\S]*?)(</Instrument>)',
+            re.IGNORECASE,
+        )
+        m = pat.search(tpl)
+        if not m:
+            log.warning("Template missing Instrument %d, skipping", inst_num)
+            continue
 
-    # ── Write file ───────────────────────────────────────────────
-    xpm_path = os.path.join(output_dir, f"{name}.xpm")
+        block = m.group(0)
+
+        # Within Layer 1, patch SampleName and SampleFile
+        block = re.sub(
+            r'(<Layer number="1">[\s\S]*?<SampleName>)([^<]*)(</SampleName>)',
+            rf"\g<1>{sample_name}\g<3>",
+            block,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        block = re.sub(
+            r'(<Layer number="1">[\s\S]*?<SampleFile>)([^<]*)(</SampleFile>)',
+            rf"\g<1>{sample_file}\g<3>",
+            block,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        # Patch SampleEnd and SliceEnd so Force draws waveforms
+        block = re.sub(
+            r'(<Layer number="1">[\s\S]*?<SampleEnd>)([^<]*)(</SampleEnd>)',
+            rf"\g<1>{end_frames}\g<3>",
+            block,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        block = re.sub(
+            r'(<Layer number="1">[\s\S]*?<SliceEnd>)([^<]*)(</SliceEnd>)',
+            rf"\g<1>{end_frames}\g<3>",
+            block,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        tpl = tpl[: m.start()] + block + tpl[m.end() :]
+
+    # ── Write patched XPM ────────────────────────────────────────
+    xpm_path = os.path.join(output_dir, f"{name}.Drum.xpm")
     try:
         with open(xpm_path, "w", encoding="utf-8") as f:
-            f.write(xpm_content)
-        log.info("Generated XPM: %s (%d pads with samples, 128 instruments)",
-                 xpm_path, len(pad_map))
+            f.write(tpl)
+        log.info("Generated XPM: %s (%d active pads, template-patched)",
+                 xpm_path, n_active)
         return xpm_path
     except Exception as e:
-        log.error("Failed to generate XPM: %s", e)
+        log.error("Failed to write XPM: %s", e)
         return None
 
 
