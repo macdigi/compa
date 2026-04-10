@@ -1,0 +1,479 @@
+== GETTING STARTED ==
+Roland SP-404 MK2 -- Quick Reference Manual
+Audio: 2 inputs, 4 outputs, 48kHz sample rate, USB class-compliant
+Storage: SD card (FAT32/exFAT), mounts at /media/pi/SP-404MKII
+Power: USB-C bus power or AC adapter
+Connect USB-C to host for audio streaming, MIDI, and SD card access
+Unit has 10 banks (A through J), 16 pads per bank = 160 sample slots total
+Hold SHIFT to access secondary pad functions printed above each pad
+Long-press a pad to preview its sample without triggering it in a sequence
+The display shows waveform, BPM, bank/pad, and effect status
+
+== PADS AND BANKS ==
+Banks A through J, 16 pads per bank (pad 1-16)
+Press BANK then tap a letter pad to switch banks
+Total capacity: 160 samples across all banks
+Each pad stores one sample with independent settings for:
+  Level, Pan, Start/End points, Loop On/Off, Loop Start
+  Output bus assignment (Bus 1, 2, 3, or 4)
+  Playback mode: Single, Loop, Gate, Reverse, One-shot
+Gate mode: sample plays only while pad is held
+One-shot mode: sample plays to completion, ignores retrigs
+Reverse mode: plays the sample backward from the end point
+Velocity sensitivity is adjustable per pad in the pad settings
+Color-coded pad LEDs indicate bank assignment and playback state:
+  Lit = sample loaded, Dim = empty, Flashing = currently playing
+Hold SHIFT + tap pad to mute/unmute individual pads
+
+== PERFORMANCE FX ==
+5 Direct FX slots assignable per bus for quick performance switching
+Press a numbered FX button (1-5) to engage the assigned effect
+Effects are applied per-bus, allowing independent processing
+Twist the large CTRL knob during playback to sweep effect parameters
+SCATTER: press and hold to glitch/rearrange audio in real time
+STOPPER: simulates a turntable stop, pitch drops to zero
+BACK SPIN: reverse turntable spin effect
+HA-DOU: wave-like tremolo/stutter effect
+KO-DA-MA: rapid echo/delay burst
+ZAN-ZOU: residual trails and smear
+TO-GU-RO: spiraling modulation effect
+SBF: Sub Bass Filter, adds deep low-end resonance
+DOWNER: pitch dive with adjustable depth
+Hold SHIFT + FX button to edit effect parameters for that slot
+FX depth is pressure/velocity sensitive when triggered via MIDI
+
+== GRANULAR ENGINE ==
+Access via pad edit menu: select a pad, enter granular settings
+Granular mode slices the sample into tiny grains for resynthesis
+Parameters: Grain Size, Density, Pitch, Position, Randomize
+Position controls which portion of the sample feeds the grains
+Density sets how many grains overlap simultaneously
+Randomize adds variation to grain start points and pitch
+Smaller grain sizes produce smoother, ambient textures
+Larger grain sizes retain more of the original transient character
+Use the CTRL knob to sweep Position in real time
+Combine with reverb or delay for expansive soundscapes
+Granular mode works on any loaded sample regardless of length
+
+== FILTER ==
+Multi-mode filter available per pad and per bus
+Types: Low Pass, High Pass, Band Pass
+Cutoff frequency: adjustable via knob or MIDI CC
+Resonance: adds emphasis at the cutoff frequency
+Filter can self-oscillate at high resonance settings
+Filter envelope: Attack, Decay, Sustain controls filter movement
+Assign filter to CTRL knob for real-time performance sweeps
+Super Filter effect (CC#83 value 16) is a resonant DJ-style filter
+  CTRL 1 sweeps from LP through BP to HP continuously
+  CTRL 2 sets resonance amount
+  CTRL 3 controls drive/saturation into the filter
+
+== ENVELOPE ==
+Each pad has an amplitude envelope: Attack, Decay
+Attack: 0ms to several seconds, controls fade-in time
+Decay: controls how long the sound sustains after release
+Short attack + short decay = percussive hits
+Long attack + long decay = ambient swells
+Envelope settings are saved per pad and recalled with the bank
+The envelope shapes the volume contour independent of loop settings
+Set attack to a few ms to soften clicks on sample start points
+Use longer decay values to let reverb tails ring out naturally
+
+== MIXER ==
+4 output buses with independent level control
+Press MIXER button to access the mixing screen
+Bus 1/2: main stereo output pair (default for all pads)
+Bus 3/4: secondary stereo output pair (for sends, submixes)
+Each bus has its own effect chain (up to 3 simultaneous FX)
+Per-pad routing: assign any pad to any bus in pad settings
+Master level controls the combined output
+Headphone output has independent level control
+Pan: each pad can be panned independently within its bus
+Crossfade between Bus 1 and Bus 2 in DJ Mode using CC#8
+
+== EFFECTS ==
+BUS 1 and BUS 2 Effect List (CC#83 values on Ch1/Ch2):
+  0  = OFF (bypass)
+  1  = Direct FX 1
+  2  = Direct FX 2
+  3  = Direct FX 3
+  4  = Direct FX 4
+  5  = Direct FX 5
+  6  = Scatter
+  7  = Downer
+  8  = Ha-Dou
+  9  = Ko-Da-Ma
+  10 = Zan-Zou
+  11 = To-Gu-Ro
+  12 = SBF (Sub Bass Filter)
+  13 = Stopper
+  14 = Tape Echo
+  15 = TimeCtrlDly (Time Control Delay)
+  16 = Super Filter
+  17 = WrmSaturator (Warm Saturator)
+  18 = 303 VinylSim
+  19 = 404 VinylSim
+  20 = Cassette Sim
+  21 = Lo-fi
+  22 = Reverb
+  23 = Chorus
+  24 = JUNO Chorus
+  25 = Flanger
+  26 = Phaser
+  27 = Wah
+  28 = Slicer
+  29 = Tremolo/Pan
+  30 = Chromatic PS (Pitch Shift)
+  31 = Hyper-Reso
+  32 = Ring Mod (Ring Modulator)
+  33 = Crusher (Bit Crusher)
+  34 = Overdrive
+  35 = Distortion
+  36 = Equalizer
+  37 = Compressor
+  38 = SX Reverb
+  39 = SX Delay
+  40 = Cloud Delay
+  41 = Back Spin
+
+BUS 3 and BUS 4 Effect List (CC#83 values on Ch3/Ch4):
+  Different numbering from Bus 1/2 -- no Direct FX slots
+  Starts with VinylSim at value 0
+  Includes the same processing effects (filters, delays, reverbs)
+  but shifted down since Direct FX 1-5 are not available on Bus 3/4
+  Consult the MIDI implementation chart for exact value mapping
+
+INPUT FX Effect List (CC#83 values on Ch5):
+  18 effects total for processing live input:
+  Auto Pitch -- real-time pitch correction
+  Vocoder -- classic vocoder synthesis (carrier + modulator)
+  Harmony -- adds parallel harmonies to input signal
+  Gt Amp Sim -- guitar amplifier simulation
+  Lo-fi -- bit reduction and sample rate reduction
+  Reverb, Delay, Chorus, Flanger, Phaser
+  Compressor, EQ, and additional processing effects
+  Input FX is ideal for live vocal or instrument processing
+
+== SEQUENCER ==
+Internal step sequencer with 16 patterns per project
+Pattern length: 1 to 64 bars
+Time signatures: 4/4, 3/4, 6/8, 5/4, 7/8
+Quantize values: 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32
+Real-time recording: press REC then PLAY, perform on pads
+Step recording: enter notes one step at a time
+Overdub: layer additional parts onto existing patterns
+Pattern chain: link patterns for song arrangement
+Undo last recording pass with dedicated UNDO function
+Metronome: adjustable level, pre-count option available
+Tempo range: 40 to 300 BPM, tap tempo supported
+Swing: adjustable from 50% (straight) to 75% (heavy swing)
+Each pattern stores: pad triggers, velocity, timing, FX automation
+
+== PATTERN EDITING ==
+Press PATTERN to view/select patterns (1 through 16)
+MIDI Program Change messages select patterns:
+  PC#0 = Pattern 1, PC#1 = Pattern 2, ... PC#15 = Pattern 16
+  Send on the bank's MIDI channel
+  Pattern change queues at the next measure boundary
+  Allows seamless transitions during live performance
+Step editing: press SHIFT + PATTERN to enter step edit mode
+  Navigate steps with the VALUE knob
+  Add/remove triggers on any step
+  Adjust velocity, gate length, and timing per step
+  Copy/paste steps or ranges of steps
+Quantize after recording: select pattern, choose quantize value
+Clear pattern: hold SHIFT + DEL on the pattern screen
+Duplicate pattern: copy to another slot for variation building
+
+== SAMPLING ==
+Press SAMPLING button to enter record-ready mode
+Sources: LINE IN (1/4" or 3.5mm), MIC IN, USB Audio, Internal Resample
+Sample rate: 48kHz (fixed, matches internal engine)
+Bit depth: 16-bit WAV files on SD card
+Auto-start: recording begins when signal exceeds threshold
+Manual start: press REC to begin, press again to stop
+Normalize: automatically scales sample to peak level after recording
+Truncate: removes silence from start and end of recording
+Assign to pad: choose destination bank and pad number after sampling
+Resample: record the mixed output including effects to a new pad
+Maximum sample length varies by available SD card space
+Samples are stored as WAV files in the SD card directory structure
+Import samples by copying WAV files to the SD card via USB
+
+== AUTO-CHOP ==
+After sampling or selecting a sample, press SHIFT + SAMPLING
+Chop modes:
+  LEVEL -- detects transients and creates slices at peaks
+  EQUAL -- divides sample into equal-length segments
+  BPM -- slices based on tempo-derived beat divisions
+Number of slices: 2 to 32
+Each slice is assigned to consecutive pads starting from a chosen pad
+Adjust slice start/end points manually after auto-detection
+Sensitivity control for transient detection in LEVEL mode
+Preview slices by tapping pads before confirming
+Confirm to write slices as individual pads (non-destructive to source)
+Ideal for chopping drum breaks, loops, and melodic phrases
+After chopping, each slice can have independent envelope, FX, bus routing
+
+== MIDI CHANNELS ==
+MODE A (default):
+  Channel 1  = Bank A (pads as notes 35-51)
+  Channel 2  = Bank B (pads as notes 35-51)
+  Channel 3  = Bank C (pads as notes 35-51)
+  Channel 4  = Bank D (pads as notes 35-51)
+  Channel 5  = Bank E (pads as notes 35-51)
+  Channel 6  = Bank F (pads as notes 35-51)
+  Channel 7  = Bank G (pads as notes 35-51)
+  Channel 8  = Bank H (pads as notes 35-51)
+  Channel 9  = Bank I (pads as notes 35-51)
+  Channel 10 = Bank J (pads as notes 35-51)
+  Each bank gets its own channel, note range 35-51 (17 notes, 16 pads)
+
+MODE B:
+  Channel 1 = Banks A through E (wider note range 0-91)
+  Channel 2 = Banks F through J (wider note range 0-91)
+  Five banks mapped across the 0-91 range per channel
+  Useful when MIDI controller has limited channel switching
+
+CHROMATIC MODE:
+  Channel 16 = chromatic playback of selected pad
+  Notes 36-60 (C2 to C4, 25 notes = 2 octaves)
+  Plays the selected pad pitched chromatically across the keyboard
+  Center note plays at original pitch
+
+VOCODER:
+  Channel 11 = vocoder carrier note input
+  Notes 0-127 (full range)
+  Feed audio into LINE IN as modulator, play notes on Ch11
+  Vocoder effect must be active on Input FX bus
+
+== MIDI CCS ==
+Effect Control CCs (same CCs, different channel per bus):
+  CC#16 = Ctrl 1 (primary effect parameter)
+  CC#17 = Ctrl 2 (secondary effect parameter)
+  CC#18 = Ctrl 3 (tertiary effect parameter)
+  CC#80 = Ctrl 4
+  CC#81 = Ctrl 5
+  CC#82 = Ctrl 6
+  CC#19 = FX On/Off (0-63 = OFF, 64-127 = ON)
+  CC#83 = FX Select (see EFFECTS section for value tables)
+
+Channel assignment for effect buses:
+  Channel 1 = Bus 1 effects
+  Channel 2 = Bus 2 effects
+  Channel 3 = Bus 3 effects
+  Channel 4 = Bus 4 effects
+  Channel 5 = Input FX
+
+LOOPER CCs (all on Channel 1):
+  CC#88 = Record/Stop (127 = start recording, 0 = stop)
+  CC#89 = Overdub toggle
+  CC#87 = Delete loop
+  CC#85 = Stop Playback
+  CC#90 = BPM/Rate adjust
+  CC#86 = Reset Tempo
+  CC#91 = Undo/Redo (127 = undo, 0 = redo)
+
+DJ MODE CCs:
+  CC#7  = Volume (standard MIDI volume)
+  CC#8  = Crossfader position (0=left, 64=center, 127=right)
+  CC#20 = Play/Pause toggle
+  CC#22 = Sync enable
+  CC#23 = Cue
+  CC#24 = Pitch Bend + (temporary speed increase)
+  CC#25 = Pitch Bend - (temporary speed decrease)
+
+== MIDI NOTES ==
+MODE A note mapping (per bank channel):
+  Note 35 = Pad 1,  Note 36 = Pad 2,  Note 37 = Pad 3
+  Note 38 = Pad 4,  Note 39 = Pad 5,  Note 40 = Pad 6
+  Note 41 = Pad 7,  Note 42 = Pad 8,  Note 43 = Pad 9
+  Note 44 = Pad 10, Note 45 = Pad 11, Note 46 = Pad 12
+  Note 47 = Pad 13, Note 48 = Pad 14, Note 49 = Pad 15
+  Note 50 = Pad 16, Note 51 = (overflow/unused)
+  This matches General MIDI drum mapping starting at B1
+
+MODE B note mapping:
+  Notes 0-91 span 5 banks per channel
+  Banks A-E on Channel 1, Banks F-J on Channel 2
+  Each bank occupies roughly 18 notes within the range
+  Consult the MIDI implementation for exact note boundaries
+
+CHROMATIC MODE (Channel 16):
+  Note 36 (C2) through Note 60 (C4)
+  Original pitch is mapped to the root note of the loaded sample
+  Notes below root pitch down, notes above pitch up
+  Useful for playing melodic samples as an instrument
+
+VOCODER (Channel 11):
+  Full range Note 0 through Note 127
+  Controls the carrier oscillator pitch
+  Modulator signal comes from the audio input
+
+== MENU NAVIGATION ==
+Press MENU to access system and project settings
+Turn the VALUE knob to scroll through menu items
+Press the VALUE knob (or ENTER) to select/confirm
+Press MENU again or BACK to exit current menu level
+Hold SHIFT + MENU for quick access to system preferences
+Menu is organized in a flat list, scroll to find categories:
+  SYSTEM, PROJECT, PAD, MIDI, SYNC, USB, DISPLAY
+Long-press VALUE knob on numeric fields to type exact values
+Use the BANK buttons A-J as numeric input when editing values
+
+== MENU ITEMS ==
+SYSTEM SETTINGS:
+  LCD Brightness, LED Brightness, Auto Power Off
+  Pad Sensitivity (1-16), Pad Threshold
+  Startup Bank selection, Default Quantize
+PROJECT SETTINGS:
+  BPM (40-300), Time Signature, Swing Amount
+  Master Level, Bus 1-4 Levels
+  Project Name (editable)
+PAD SETTINGS:
+  Level, Pan, Output Bus (1-4)
+  Start Point, End Point, Loop On/Off, Loop Start
+  Playback Mode (Single/Loop/Gate/Reverse)
+  Chromatic Root Note, Mute Group assignment
+MIDI SETTINGS:
+  MIDI Mode (A / B), Chromatic Mode On/Off
+  MIDI Channel assignments, Local Control On/Off
+  Clock Source (Internal/External), Soft Thru On/Off
+DISPLAY SETTINGS:
+  Waveform zoom, Peak meters On/Off, Pad color scheme
+
+== SYNC OPTIONS ==
+Clock Source modes:
+  AUTO -- follows incoming clock if present, else internal
+  INTERNAL -- SP-404 MK2 is the master clock
+  MIDI -- syncs to incoming MIDI clock from DIN MIDI
+  USB -- syncs to incoming MIDI clock from USB
+Soft Through: when ON, passes received clock to MIDI OUT
+  Useful for daisy-chaining multiple devices
+USB-MIDI Thru: forwards USB MIDI data to DIN MIDI OUT
+  Allows the unit to act as a USB-to-DIN MIDI converter
+Tap Tempo: tap the BPM pad 3+ times to set tempo manually
+BPM is stored per project, not globally
+External sync disables internal tempo control
+When slaved, pattern playback and time-based FX lock to incoming clock
+Latency compensation: adjust MIDI sync offset in system menu if needed
+
+== FIRMWARE ==
+Check current firmware version: MENU > SYSTEM > VERSION
+Update procedure:
+  1. Download firmware from Roland support website
+  2. Copy update file to root of SD card
+  3. Power on while holding specific button combo (see Roland docs)
+  4. Unit enters update mode, progress shown on display
+  5. Do not power off during update
+  6. Unit restarts automatically when complete
+Notable firmware additions:
+  FW 3.0: Chromatic mode, pattern chaining, expanded FX
+  FW 4.0: DJ Mode, Skip Back Sampling
+  FW 5.0: Granular engine, side chain compression groundwork
+  FW 5.50: Full side chain compression with MIDI trigger support
+    Source/Target bus routing for compressor
+    Threshold, Ratio, Release, Gain parameters
+    Can be triggered by MIDI ghost notes for rhythmic pumping
+Always back up SD card contents before firmware updates
+Check Roland community forums for known issues before updating
+
+== TIPS AND TRICKS ==
+PERFORMANCE:
+  Assign your most-used FX to Direct FX 1-5 for instant access
+  Use Bus 3/4 as an FX send: route pads there, add reverb/delay
+  Resample a performance with FX to free up FX slots
+  Layer pads on the same trigger for thicker sounds (Mute Group OFF)
+  Use Gate mode for pads you want tight rhythmic control over
+  Set up a "ghost" pad with silence for side chain MIDI triggers
+
+WORKFLOW:
+  Name your projects descriptively for easy recall at gigs
+  Keep Bank A for drums, Bank B for bass, etc. for consistency
+  Use pattern chaining to build full song arrangements
+  Copy patterns to new slots before editing for easy A/B comparison
+  Resample loops with FX baked in to reduce CPU load during performance
+
+SOUND DESIGN:
+  Stack 303 VinylSim + Lo-fi for classic dusty hip-hop sound
+  Tape Echo + Reverb creates deep dub-style effects
+  Use Chromatic Mode to turn any one-shot into a playable instrument
+  Record ambient noise, then use Granular engine for evolving textures
+  Chain Warm Saturator into Compressor for glued, punchy mixes
+  JUNO Chorus on pads and keys gives instant vintage analog warmth
+
+MIDI INTEGRATION:
+  Map your DAW's transport to the Looper CCs for seamless control
+  Use Program Changes to queue pattern switches from a MIDI controller
+  Set up FX automation lanes using CC#16-18 and CC#80-82
+  In Mode A, each bank on its own channel makes DAW routing clean
+  Ghost notes on Ch1 can trigger side chain without audible sound
+
+== USB BACKUP MODES ==
+Connect USB-C while holding POWER to enter USB storage mode
+The SP-404 MK2 appears as a mass storage device
+SD card mounts at /media/pi/SP-404MKII (on Linux/Raspberry Pi)
+On macOS it mounts as a standard removable volume
+On Windows it appears as a drive letter
+
+Backup procedure:
+  1. Enter USB storage mode
+  2. Copy entire SD card contents to your computer
+  3. Include the ROLAND directory and all subdirectories
+  4. Preserve directory structure exactly for restore compatibility
+
+Restore procedure:
+  1. Format SD card (FAT32 for cards up to 32GB, exFAT for larger)
+  2. Copy backed-up ROLAND directory back to card root
+  3. Eject safely before removing
+
+Import samples via USB:
+  Copy WAV files (16-bit or 24-bit, any sample rate) to the import folder
+  Unit auto-converts to internal 48kHz 16-bit format on import
+  Maximum file size limited by SD card capacity
+
+The ROLAND/SP-404MKII directory structure contains:
+  Project folders with pattern data, sample data, and settings
+  Do not manually rename or rearrange files in this structure
+
+== TROUBLESHOOTING ==
+NO SOUND:
+  Check output bus assignment on the pad (default is Bus 1)
+  Verify master volume and bus levels in the mixer
+  Ensure headphone vs line out is selected correctly
+  Check if pad is muted (SHIFT + pad to toggle)
+
+MIDI NOT RESPONDING:
+  Verify MIDI Mode (A or B) matches your controller setup
+  Check channel assignments match between controller and SP
+  Ensure USB-MIDI or DIN MIDI cable is connected properly
+  Try toggling Local Control Off then On in MIDI settings
+  Check that Soft Thru is not creating a MIDI loop
+
+CLICKS OR POPS IN SAMPLES:
+  Adjust sample start point to a zero-crossing
+  Add a small attack value (2-5ms) in the pad envelope
+  Check for DC offset in source material before import
+
+SD CARD ERRORS:
+  Use a Class 10 or UHS-I card minimum for reliable operation
+  Format card in the SP-404 MK2 itself for best compatibility
+  Do not remove card while the unit is powered on
+  If card is not recognized, try reformatting (backup first)
+
+SYNC DRIFT:
+  Set clock source explicitly (do not rely on AUTO in complex setups)
+  Adjust MIDI sync offset in system menu to compensate for latency
+  Use USB sync for tighter timing than DIN MIDI
+  Restart both devices if drift accumulates over long sessions
+
+FX NOT ENGAGING:
+  Send CC#19 with value 64-127 to enable FX on the correct channel
+  Then send CC#83 to select the desired effect number
+  Verify you are sending on the correct channel for the target bus
+  Check that FX is not bypassed in the mixer view
+
+UNIT FREEZES:
+  Hold POWER for 10+ seconds to force restart
+  If persistent, try reflashing firmware from SD card
+  Back up SD card and reformat if filesystem corruption suspected

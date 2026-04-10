@@ -39,7 +39,18 @@ SIDEBAR_WIDTH = 180
 
 
 class P6HelpScreen:
-    """Split-pane reference manual: sidebar TOC + scrollable content with search."""
+    """Split-pane reference manual: sidebar TOC + scrollable content with search.
+
+    Supports multiple manuals — device-specific (P-6, SP-404) and Compa.
+    Switch between manuals with tabs at the top.
+    """
+
+    # Manual files: (tab_label, filename, device_short_name or None for universal)
+    MANUALS = [
+        ("COMPA", "compa_reference.txt", None),
+        ("P-6", "p6_reference.txt", "P-6"),
+        ("SP-404", "sp404_reference.txt", "SP-404"),
+    ]
 
     def __init__(self, app):
         self.app = app
@@ -49,18 +60,45 @@ class P6HelpScreen:
         self._sidebar_scroll = 0
         self._active_section = 0  # index into _sections
 
-        # Load reference text
-        docs_path = os.path.join(
+        self._docs_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__)))), "docs", "p6_reference.txt")
+                os.path.abspath(__file__)))), "docs")
+
+        # Current manual index
+        self._current_manual = 0
+        self._load_manual(0)
+
+    def _load_manual(self, index: int):
+        """Load a manual by index into MANUALS."""
+        self._current_manual = index
+        _, filename, _ = self.MANUALS[index]
+        path = os.path.join(self._docs_dir, filename)
         try:
-            with open(docs_path) as f:
+            with open(path) as f:
                 self._full_text = f.read()
         except Exception:
-            self._full_text = "Reference file not found."
+            self._full_text = f"Reference file not found: {filename}"
 
         self._sections = self._parse_sections()
-        self._filtered: list[tuple[str, list[str]]] = list(self._sections)
+        self._filtered = list(self._sections)
+        self._scroll_y = 0
+        self._sidebar_scroll = 0
+        self._active_section = 0
+        self._search_text = ""
+
+    def on_enter(self):
+        """Auto-select the focused device's manual if available."""
+        dev_name = self.app.device_name
+        for i, (label, filename, dev_key) in enumerate(self.MANUALS):
+            if dev_key and dev_key == dev_name:
+                self._load_manual(i)
+                return
+        # Default to Compa manual
+        self._load_manual(0)
+
+    def on_focus_changed(self):
+        """Reload manual when device focus changes."""
+        self.on_enter()
 
     @property
     def wants_keyboard(self) -> bool:
@@ -136,6 +174,13 @@ class P6HelpScreen:
         if event.type == pygame.MOUSEBUTTONDOWN:
             mx, my = event.pos if hasattr(event, 'pos') else (0, 0)
 
+            # Manual tab clicks
+            if event.button == 1 and hasattr(self, "_manual_tab_rects"):
+                for i, rect in enumerate(self._manual_tab_rects):
+                    if rect.collidepoint(mx, my):
+                        self._load_manual(i)
+                        return
+
             # Sidebar click — jump to section
             if event.button == 1 and mx < SIDEBAR_WIDTH:
                 sidebar_y = 42
@@ -192,8 +237,25 @@ class P6HelpScreen:
         f_small = theme.font("small")
         f_mono = theme.font("mono")
 
-        # ── Search bar (full width top) ──────────────────────────────
-        search_rect = pygame.Rect(SIDEBAR_WIDTH + 8, 6, 460, 30)
+        # ── Manual selector tabs (top-right) ─────────────────────────
+        tab_w = 80
+        tab_h = 24
+        tab_gap = 4
+        tab_start_x = theme.SCREEN_WIDTH - len(self.MANUALS) * (tab_w + tab_gap)
+        self._manual_tab_rects = []
+        for i, (label, _, dev_key) in enumerate(self.MANUALS):
+            rect = pygame.Rect(tab_start_x + i * (tab_w + tab_gap), 6, tab_w, tab_h)
+            active = (i == self._current_manual)
+            bg = theme.ACCENT if active else theme.BUTTON_BG
+            tc = theme.BG if active else theme.TEXT_DIM
+            pygame.draw.rect(surface, bg, rect, border_radius=4)
+            surf = f_small.render(label, True, tc)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+            self._manual_tab_rects.append(rect)
+
+        # ── Search bar ───────────────────────────────────────────────
+        search_w = tab_start_x - SIDEBAR_WIDTH - 20
+        search_rect = pygame.Rect(SIDEBAR_WIDTH + 8, 6, search_w, 30)
         pygame.draw.rect(surface, theme.BG_PANEL, search_rect, border_radius=6)
         pygame.draw.rect(surface, theme.ACCENT if self._search_text else theme.BORDER,
                         search_rect, 1, border_radius=6)

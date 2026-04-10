@@ -1,0 +1,593 @@
+== ROLAND P-6 (AIRA COMPACT) GRANULAR SAMPLER -- TECHNICAL REFERENCE ==
+
+This document is a comprehensive reference for interfacing with the
+Roland P-6 AIRA Compact granular sampler via MIDI and USB audio.
+It covers the complete CC map, MIDI channel assignments, transport
+behavior, audio routing, storage, and practical usage tips.
+
+Last updated: 2026-04-10
+
+
+== MIDI CHANNEL ASSIGNMENTS ==
+
+The P-6 uses four MIDI channels, each serving a distinct purpose:
+
+  Channel  4 (index  3) : Granular sampler parameters
+                           All granular CCs target this channel.
+                           Use this when addressing a specific pad
+                           or when building parameter automation.
+
+  Channel 11 (index 10) : Sample pads -- note triggering
+                           Notes 48 through 95 (C2 to B5).
+                           Velocity-sensitive. Each note triggers
+                           the corresponding pad slot.
+
+  Channel 15 (index 14) : Auto -- currently selected pad
+                           CCs sent here affect whichever pad is
+                           currently selected on the P-6 front panel.
+                           Useful for live tweaking without needing
+                           to know which pad is active.
+
+  Channel 16 (index 15) : Program Change
+                           Patterns 0 through 63 (64 total).
+                           Program changes on this channel switch
+                           the active pattern on the P-6.
+
+Note: Channel numbers above use 1-based numbering (standard MIDI).
+The index values in parentheses are 0-based for programmatic use.
+
+
+== CC MAP -- GRANULAR ENGINE (Ch4 / Ch15) ==
+
+These CCs control the core granular synthesis parameters.
+They respond on Channel 4 (specific pad) or Channel 15 (auto/current pad).
+
+  CC   3  Grain Rev Prob    Range: 0-127   Default: 0
+           Probability of each grain playing in reverse.
+           0 = all forward, 127 = all reversed.
+
+  CC  13  Detune            Range: 0-127   Default: 0
+           Random pitch deviation applied per grain.
+           Higher values produce a wider detuned chorus effect.
+
+  CC  15  Grain Shape       Range: 0-127   Default: 0
+           Window shape applied to each grain envelope.
+           Affects the timbral character of grain crossfades.
+
+  CC  16  Grain Time KF     Range: 0-127   Default: 64
+           Key follow for grain timing parameters.
+           64 = neutral. Below 64, higher notes shorten grain time;
+           above 64, the relationship inverts.
+
+  CC  18  Fine Tune         Range: 0-127   Default: 64
+           Fine pitch adjustment. 64 = center (no shift).
+           Each increment is approximately 1 cent.
+
+  CC  19  Head Position     Range: 0-127   Default: 0
+           Playback start position within the sample.
+           0 = beginning, 127 = end of sample.
+
+  CC  20  Head Speed        Range: 0-127   Default: 64
+           Speed at which the playback head moves through
+           the sample. 64 = normal speed. Below 64 = slower,
+           above 64 = faster. 0 = frozen head.
+
+  CC  21  Grains            Range: 0-127   Default: 0
+           Number of simultaneous grains. 0 = minimum grain
+           density, 127 = maximum density. Higher values
+           create thicker, more complex textures.
+
+  CC  23  Grain Size        Range: 0-127   Default: 64
+           Duration of each individual grain.
+           Lower values = shorter, more percussive grains.
+           Higher values = longer, smoother grains.
+
+  CC  25  Spread            Range: 0-127   Default: 0
+           Stereo spread of the grain cloud.
+           0 = mono center, 127 = full stereo spread.
+
+  CC  68  Grain Jitter      Range: 0-127   Default: 0
+           Random variation in grain timing and position.
+           Adds organic, unpredictable movement to the texture.
+
+  CC  76  Coarse Tune       Range: 0-127   Default: 64
+           Coarse pitch adjustment in semitones.
+           64 = no transposition. Each step = 1 semitone.
+           Range covers roughly +/- 5 octaves.
+
+  CC  79  Start Mode        Range: 0-127   Default: 0
+           Determines how the grain engine begins playback
+           when a note is triggered. Affects whether grains
+           restart from head position or continue from the
+           current engine state.
+
+  CC  88  Sample Select     Range: 0-127   Default: 0
+           Selects which sample slot is active for the pad.
+           Maps to the available samples loaded on the device.
+
+
+== CC MAP -- FILTER (Ch4 / Ch15) ==
+
+Filter parameters shape the spectral character of the output.
+
+  CC  74  Cutoff            Range: 0-127   Default: 127
+           Filter cutoff frequency. 127 = fully open.
+           Default is wide open so the filter is transparent
+           until you explicitly close it.
+
+  CC  71  Resonance         Range: 0-127   Default: 0
+           Filter resonance / Q factor.
+           Higher values emphasize the cutoff frequency.
+           Extreme values can cause self-oscillation.
+
+  CC  12  Filter Type       Range: 0-127   Default: 0
+           Selects the filter model. The range maps across
+           available types (LP, BP, HP, and variants).
+
+  CC  24  Env Depth         Range: 0-127   Default: 64
+           How much the envelope modulates the filter cutoff.
+           64 = neutral. Below 64 = negative modulation,
+           above 64 = positive modulation.
+
+  CC  26  Cutoff KF         Range: 0-127   Default: 64
+           Key follow amount for the filter cutoff.
+           64 = neutral. Higher values track the keyboard
+           pitch more closely.
+
+  CC  78  Vel Sens          Range: 0-127   Default: 64
+           Velocity sensitivity for the filter.
+           Controls how much note velocity opens the filter.
+           64 = moderate sensitivity.
+
+
+== CC MAP -- ENVELOPE (Ch4 / Ch15) ==
+
+Amplitude and envelope shaping parameters.
+
+  CC  73  Attack            Range: 0-127   Default: 0
+           Envelope attack time. 0 = instant attack.
+           Higher values produce a slower fade-in.
+
+  CC  75  Decay             Range: 0-127   Default: 64
+           Envelope decay time after the attack peak.
+
+  CC  30  Sustain           Range: 0-127   Default: 127
+           Sustain level. 127 = full sustain (no drop
+           after decay). 0 = sound dies after decay phase.
+
+  CC  72  Release           Range: 0-127   Default: 32
+           Release time after note-off.
+           32 gives a short but smooth release tail.
+
+  CC  28  Amp Switch        Range: 0-127   Default: 0
+           Amplitude envelope on/off or mode selector.
+           0 = default behavior.
+
+  CC  29  Env Mode          Range: 0-127   Default: 0
+           Envelope mode. Selects between different
+           envelope behaviors (one-shot, gate, loop, etc.).
+
+  CC  77  Time KF           Range: 0-127   Default: 64
+           Key follow for envelope times.
+           64 = neutral. Higher notes can shorten or
+           lengthen envelope times depending on setting.
+
+
+== CC MAP -- MIXER (Ch4 / Ch15) ==
+
+Level, panning, and output routing.
+
+  CC   7  Level             Range: 0-127   Default: 100
+           Output volume for the pad.
+           100 is the factory default -- not maximum.
+           Use the full 0-127 range as needed.
+
+  CC  10  Pan               Range: 0-127   Default: 64
+           Stereo pan position. 64 = center.
+           0 = hard left, 127 = hard right.
+
+  CC   9  Auto Pan          Range: 0-127   Default: 0
+           Automatic panning speed/depth.
+           0 = no auto-pan. Higher values increase
+           the rate and width of automatic panning.
+
+  CC  14  Level Jitter      Range: 0-127   Default: 0
+           Random variation applied to grain levels.
+           Adds dynamic, organic fluctuations to volume.
+
+  CC  84  Output Bus        Range: 0-127   Default: 0
+           Selects the output bus routing for the pad.
+           0 = main stereo output. Other values select
+           alternate buses when available.
+
+  CC  85  Send Delay        Range: 0-127   Default: 0
+           Send level to the delay effect bus.
+           0 = no delay send.
+
+  CC  86  Send Reverb       Range: 0-127   Default: 0
+           Send level to the reverb effect bus.
+           0 = no reverb send.
+
+
+== CC MAP -- EFFECTS (Ch4 / Ch15) ==
+
+Global effect parameters. These affect the master effect processors.
+
+  CC  90  Delay Time        Range: 0-127   Default: 64
+           Delay time setting. 64 = medium delay.
+
+  CC  92  Delay Level       Range: 0-127   Default: 0
+           Master delay effect level.
+           0 = delay off by default.
+
+  CC  89  Reverb Time       Range: 0-127   Default: 64
+           Reverb decay time. 64 = medium tail.
+
+  CC  91  Reverb Level      Range: 0-127   Default: 0
+           Master reverb effect level.
+           0 = reverb off by default.
+
+  CC  17  Lo-fi Intensity   Range: 0-127   Default: 0
+           Amount of lo-fi degradation applied.
+           Includes bit-crushing and sample-rate reduction.
+
+  CC  87  Lo-fi Switch      Range: 0-127   Default: 0
+           Enables or disables the lo-fi effect.
+           0 = off. Values above threshold = on.
+
+
+== PATTERN MANAGEMENT ==
+
+The P-6 stores 64 patterns, indexed 0 through 63.
+
+  Selection:   Send Program Change on Channel 16 (index 15).
+               PC 0 = Pattern 1, PC 63 = Pattern 64.
+
+  Behavior:    Pattern change takes effect immediately.
+               The sequencer jumps to the new pattern on
+               the next beat boundary if transport is running.
+
+  Storage:     Patterns are saved to internal memory.
+               Backup via USB using the Compa companion app.
+
+  Program changes always work on Channel 16 regardless of
+  the current operating mode of the P-6.
+
+
+== TRANSPORT AND SYNC ==
+
+MIDI Clock:
+  The P-6 transmits MIDI clock at 24 pulses per quarter note
+  (standard MIDI timing). BPM can be derived by measuring the
+  interval between clock ticks:
+
+    BPM = 60,000,000 / (tick_interval_us * 24)
+
+  where tick_interval_us is the average microsecond interval
+  between consecutive 0xF8 clock messages.
+
+Sync Mode:
+  CRITICAL: The P-6 SYNC parameter must be set to USB for
+  external clock or transport commands to work over USB MIDI.
+
+  With SYNC=USB:
+    - The P-6 receives external MIDI clock
+    - Start (0xFA) and Stop (0xFC) messages are recognized
+    - Continue (0xFB) behavior may vary
+
+  With SYNC=INT (internal):
+    - The P-6 ignores incoming clock and transport
+    - It generates its own clock at the internal BPM setting
+
+Transport Reliability:
+  Start/Stop transport control via external MIDI is not fully
+  reliable on the P-6. The device may not respond to transport
+  commands consistently. Workarounds:
+
+    1. Use the P-6 as the clock master and read its clock output
+    2. Send Start followed by a short delay before sending notes
+    3. Monitor the P-6 clock output to confirm sync state
+
+
+== USB AUDIO ==
+
+The P-6 operates as a USB class-compliant audio device.
+
+  Channels:     2 in / 2 out (stereo)
+  Sample Rate:  44.1 kHz (fixed on Raspberry Pi ALSA)
+  Bit Depth:    16-bit or 24-bit depending on host configuration
+  Recording:    Stereo capture from the P-6 main output
+
+ALSA Configuration (Raspberry Pi):
+  The P-6 appears as a standard USB audio device under ALSA.
+  Use arecord/aplay or an ALSA-compatible application.
+
+  To list available devices:
+    arecord -l
+    aplay -l
+
+  Typical device name: hw:P6,0 or similar (may vary).
+
+  For recording:
+    arecord -D hw:P6,0 -f S16_LE -r 44100 -c 2 output.wav
+
+  Note: The P-6 only supports 44.1 kHz on Pi ALSA. Attempting
+  48 kHz will fail or produce garbled audio.
+
+
+== SAMPLE PADS ==
+
+The P-6 has sample pads mapped to MIDI notes on Channel 11.
+
+  Note Range:   48 (C2) through 95 (B5)
+  Total Pads:   48 pad slots
+  Velocity:     Velocity-sensitive (0-127)
+
+  Note-on triggers the sample associated with that pad slot.
+  Note-off behavior depends on the envelope mode setting:
+    - Gate mode: sound stops on note-off (after release)
+    - One-shot mode: sound plays to completion regardless
+
+  Each pad can have its own granular parameters, filter settings,
+  envelope, and mixer configuration. Parameters are set per-pad
+  when using Channel 4, or affect the currently selected pad
+  when using Channel 15.
+
+
+== USB STORAGE AND BACKUP ==
+
+Mount Point:
+  When connected via USB to a Raspberry Pi or computer, the P-6
+  internal storage mounts at:
+
+    /media/pi/P-6
+
+  This provides access to the sample library and configuration.
+
+Backup and Restore:
+  Use the Roland Compa companion application for full backup
+  and restore operations. This preserves:
+    - All 64 patterns
+    - Sample assignments
+    - Per-pad parameter settings
+    - Global settings
+
+  Manual file copy from the USB mount point is possible for
+  individual samples but may not capture all configuration data.
+
+
+== PRACTICAL TIPS ==
+
+Grain Cloud Design:
+  Start with Head Position (CC 19) and Head Speed (CC 20) to
+  define which part of the sample the grains are reading from.
+  Then adjust Grain Size (CC 23) and Grains (CC 21) to set
+  the density and texture. Use Spread (CC 25) and Grain Jitter
+  (CC 68) to add spatial width and organic variation.
+
+  A good starting point for ambient textures:
+    Head Speed = 32 (slow movement)
+    Grain Size = 90 (long grains)
+    Grains = 60 (moderate density)
+    Spread = 80 (wide stereo)
+    Grain Jitter = 40 (some variation)
+    Grain Rev Prob = 30 (occasional reverse grains)
+
+Percussive Granular Sounds:
+  For rhythmic or percussive granular patches:
+    Head Speed = 0 (frozen)
+    Grain Size = 20 (short grains)
+    Grains = 10 (sparse)
+    Attack = 0 (instant)
+    Decay = 40 (short)
+    Sustain = 0 (no sustain)
+    Release = 10 (tight)
+
+Filter Sweeps via CC:
+  Automate CC 74 (Cutoff) for classic filter sweeps.
+  Start with Cutoff at 0 and Resonance (CC 71) around 60-80
+  for a resonant sweep. Combine with Env Depth (CC 24) for
+  envelope-driven filter motion.
+
+Using Channel 15 for Live Performance:
+  Channel 15 (Auto) targets the currently selected pad on the
+  P-6 front panel. This is ideal for live use where you select
+  pads manually on the device and tweak parameters from an
+  external controller. No need to track which pad is selected
+  in your software -- the P-6 routes CCs automatically.
+
+Pattern Chaining:
+  Send sequential Program Changes on Ch16 to chain patterns.
+  Allow time for the pattern to load before sending the next.
+  A 50ms delay between program changes is generally safe.
+
+Effects as Sound Design Tools:
+  The Lo-fi effect (CC 17 / CC 87) is particularly useful for
+  granular work. It adds sample-rate reduction and bit-crushing
+  that pairs well with textural grain clouds. Start with Lo-fi
+  Switch on (CC 87 = 127) and Lo-fi Intensity around 40-60.
+
+Level Jitter for Organic Textures:
+  CC 14 (Level Jitter) randomizes the amplitude of individual
+  grains. Even small values (10-30) add significant life to
+  sustained grain clouds. Combine with Grain Jitter (CC 68)
+  for maximum organic movement.
+
+
+== COMMON WORKFLOWS ==
+
+1. Loading and Playing a Sample:
+   a. Load samples to the P-6 via USB or Compa
+   b. Select a pad on the P-6 front panel
+   c. Assign a sample using Sample Select (CC 88) or the panel
+   d. Trigger the pad via Note-On on Ch11 (notes 48-95)
+   e. Adjust granular parameters via CCs on Ch4 or Ch15
+
+2. Recording the P-6 Output:
+   a. Connect P-6 via USB to the host
+   b. Set SYNC=USB on the P-6 if clock sync is needed
+   c. Verify the audio device is recognized (arecord -l)
+   d. Record at 44.1 kHz stereo (mandatory sample rate on Pi)
+   e. Monitor via headphones on the P-6 or via the host DAW
+
+3. Automating Parameters from a DAW or Script:
+   a. Determine the target pad note number (48-95)
+   b. Send parameter CCs on Ch4 for that specific pad
+   c. Or use Ch15 to affect whichever pad is currently selected
+   d. Send note-on on Ch11 to trigger playback
+   e. Automate CC curves for evolving textures
+
+4. Switching Patterns Programmatically:
+   a. Send Program Change 0-63 on Ch16
+   b. Wait at least 50ms for pattern load
+   c. Verify by monitoring the P-6 display or output
+   d. Pattern changes work regardless of current mode
+
+5. Building a Grain Cloud from Scratch:
+   a. Set Head Position (CC 19) to the desired sample region
+   b. Set Grains (CC 21) to 0 initially
+   c. Set Grain Size (CC 23) to 64 (medium)
+   d. Trigger a note on Ch11
+   e. Slowly increase Grains (CC 21) to build density
+   f. Adjust Head Speed (CC 20) for movement
+   g. Add Spread (CC 25) for stereo width
+   h. Apply Grain Jitter (CC 68) for randomness
+   i. Shape with filter and envelope as desired
+
+
+== TROUBLESHOOTING ==
+
+Problem: CCs have no effect
+  - Verify the P-6 is in Granular mode. CCs only work in
+    Granular mode, not in other operating modes.
+  - Check the MIDI channel. Granular CCs respond on Ch4 and Ch15.
+  - Confirm the CC number matches the parameter you intend to
+    control (refer to the CC maps above).
+
+Problem: No sound when sending notes
+  - Notes must be on Channel 11, in the range 48-95.
+  - Ensure a sample is loaded on the target pad.
+  - Check the Level (CC 7) -- default is 100 but may have been
+    set to 0 by a previous automation pass.
+  - Verify the Cutoff (CC 74) is not closed. Default is 127
+    (fully open) but may have been changed.
+
+Problem: Transport Start/Stop not working
+  - SYNC must be set to USB on the P-6.
+  - Even with SYNC=USB, transport response is unreliable.
+  - Use the P-6 as clock master instead and read its output.
+  - Try sending Start (0xFA) followed by a 100ms delay.
+
+Problem: Audio not working via USB
+  - The P-6 requires 44.1 kHz on Pi ALSA. Check your sample
+    rate configuration.
+  - Verify the device is listed with arecord -l / aplay -l.
+  - Check ALSA mixer settings -- the P-6 may have its own
+    volume control in alsamixer.
+  - Try unplugging and reconnecting the USB cable.
+
+Problem: Program changes not switching patterns
+  - Program changes must be on Channel 16 (index 15).
+  - Valid range is 0-63. Values 64+ are ignored.
+  - Allow time between successive program changes (50ms+).
+
+Problem: Pads not velocity-sensitive
+  - Velocity is received on Ch11 note messages.
+  - Check the Vel Sens (CC 78) setting -- it controls how
+    much velocity affects the filter. For amplitude velocity
+    response, check the envelope and amp settings.
+
+Problem: Grain cloud sounds static or lifeless
+  - Increase Grain Jitter (CC 68) for timing randomness.
+  - Add Level Jitter (CC 14) for amplitude variation.
+  - Set Head Speed (CC 20) above 0 so the head moves.
+  - Increase Grain Rev Prob (CC 3) for reverse grain mix.
+  - Try Detune (CC 13) for pitch spreading across grains.
+
+Problem: USB storage not mounting
+  - Check that the P-6 is powered on and connected via USB.
+  - The mount point is /media/pi/P-6 on Raspberry Pi.
+  - Try manually mounting: mount /dev/sdX1 /media/pi/P-6
+  - Verify with lsusb that the device is recognized.
+
+
+== CC QUICK REFERENCE TABLE ==
+
+All CCs respond on Ch4 (specific pad) and Ch15 (auto/current pad).
+
+  CC  | Parameter         | Default | Category
+  ----|-------------------|---------|----------
+   3  | Grain Rev Prob    |    0    | Granular
+   7  | Level             |  100    | Mixer
+   9  | Auto Pan          |    0    | Mixer
+  10  | Pan               |   64    | Mixer
+  12  | Filter Type       |    0    | Filter
+  13  | Detune            |    0    | Granular
+  14  | Level Jitter      |    0    | Mixer
+  15  | Grain Shape       |    0    | Granular
+  16  | Grain Time KF     |   64    | Granular
+  17  | Lo-fi Intensity   |    0    | Effects
+  18  | Fine Tune         |   64    | Granular
+  19  | Head Position     |    0    | Granular
+  20  | Head Speed        |   64    | Granular
+  21  | Grains            |    0    | Granular
+  23  | Grain Size        |   64    | Granular
+  24  | Env Depth         |   64    | Filter
+  25  | Spread            |    0    | Granular
+  26  | Cutoff KF         |   64    | Filter
+  28  | Amp Switch        |    0    | Envelope
+  29  | Env Mode          |    0    | Envelope
+  30  | Sustain           |  127    | Envelope
+  68  | Grain Jitter      |    0    | Granular
+  71  | Resonance         |    0    | Filter
+  72  | Release           |   32    | Envelope
+  73  | Attack            |    0    | Envelope
+  74  | Cutoff            |  127    | Filter
+  75  | Decay             |   64    | Envelope
+  76  | Coarse Tune       |   64    | Granular
+  77  | Time KF           |   64    | Envelope
+  78  | Vel Sens          |   64    | Filter
+  79  | Start Mode        |    0    | Granular
+  84  | Output Bus        |    0    | Mixer
+  85  | Send Delay        |    0    | Mixer
+  86  | Send Reverb       |    0    | Mixer
+  87  | Lo-fi Switch      |    0    | Effects
+  88  | Sample Select     |    0    | Granular
+  89  | Reverb Time       |   64    | Effects
+  90  | Delay Time        |   64    | Effects
+  91  | Reverb Level      |    0    | Effects
+  92  | Delay Level       |    0    | Effects
+
+
+== IMPORTANT NOTES AND CAVEATS ==
+
+1. SYNC must be set to USB on the P-6 for it to receive
+   external MIDI clock or transport commands over USB.
+
+2. All granular CCs only function when the P-6 is in Granular
+   mode. In other modes, these CCs are ignored.
+
+3. Program changes on Channel 16 always work regardless of
+   the current operating mode.
+
+4. The P-6 sends MIDI clock but does not reliably respond to
+   external transport Start/Stop commands. Plan your sync
+   architecture accordingly -- use the P-6 as clock source.
+
+5. USB audio is fixed at 44.1 kHz when used with Raspberry Pi
+   ALSA drivers. Do not attempt 48 kHz.
+
+6. The default Cutoff (CC 74) is 127 (fully open). If you
+   automate it down and forget to reset, subsequent sounds
+   will be muffled.
+
+7. The default Level (CC 7) is 100, not 127. You have
+   headroom above the factory default.
+
+8. When using Ch15 (auto), parameter changes affect only the
+   pad currently selected on the P-6 hardware. If the user
+   changes the selected pad on the device, your CCs will
+   automatically target the new selection.
+
+
+== END OF REFERENCE ==

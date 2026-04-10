@@ -1,0 +1,641 @@
+== COMPA USER MANUAL ==
+
+Compa is a universal companion device for USB music gear running on
+Raspberry Pi. It turns a Pi with a touchscreen into a central hub for
+hardware samplers, grooveboxes, and any USB audio device. This manual
+covers every feature, screen, and workflow in detail.
+
+
+== SUPPORTED DEVICES ==
+
+Compa recognizes the following devices by their USB descriptor and
+automatically configures audio routing, MIDI mapping, and format
+conversion for each one.
+
+Roland P-6
+  Audio: 2 inputs / 2 outputs at 44.1 kHz
+  MIDI: Full CC control over granular engine, filter, envelope,
+        mixer levels, and effects parameters
+  Patterns: 64 pattern slots
+  Features: Backup and restore of all pattern data
+
+Roland SP-404 MK2
+  Audio: 2 inputs / 4 outputs at 48 kHz
+  MIDI: 5-bus FX control, looper parameters, DJ mode toggles
+  Patterns: 16 pattern slots
+  Features: Direct sample import to IMPORT folder on SD card
+
+Akai MPC / Force
+  Connection: Network (same LAN) or USB
+  Export: XPM drum program files with formatted samples
+  Features: Pad mapping, velocity layers, sample assignment
+
+Any USB Audio Device
+  Audio: Basic record and playback at the device native sample rate
+  MIDI: Not available for generic devices
+  Features: Record screen and sample tools still fully functional
+
+
+== MULTI-DEVICE HUB ==
+
+The Raspberry Pi has four USB ports. Compa can manage multiple devices
+connected at the same time. Each device receives its own independent
+MIDI connection and audio stream.
+
+Switching Focus
+  The navigation bar at the top of every screen shows the names of all
+  connected devices. Tap a device name to switch focus to it. The
+  focused device determines which parameters appear on the Control
+  screen, which pattern grid layout is used, and which format is
+  selected for sample export.
+
+Audio Routing Between Devices
+  Open Settings > Audio Routing > START to route audio from one device
+  to another. Compa handles sample rate conversion automatically. For
+  example, you can route the output of an SP-404 MK2 at 48 kHz into
+  a P-6 recording at 44.1 kHz without any manual configuration.
+
+MIDI Clock Relay
+  When enabled in Settings, Compa relays MIDI clock from a designated
+  master device to all other connected devices. This keeps every unit
+  locked to the same tempo without external sync hardware.
+
+
+== SCREEN 1: SESSION ==
+
+The Session screen is the main dashboard. It appears when Compa starts
+and provides an overview of everything happening in your setup.
+
+Transport Bar
+  Shows the current BPM, play/stop state, and active pattern number
+  for every connected device. Tap BPM to edit it. Tap play/stop to
+  toggle transport for the focused device.
+
+Resample Calculator
+  Enter a source BPM and a target BPM. Compa calculates the exact
+  playback speed ratio and the resulting sample length. Useful when
+  resampling loops between different tempos.
+
+Session Notes
+  A free-text area for jotting down ideas, patch names, or anything
+  you want to remember about the current session. Notes are saved
+  automatically with the session file.
+
+Backup and Restore
+  For supported devices (P-6, SP-404 MK2), you can back up all
+  pattern data and device settings to the Pi SD card. Restore loads
+  a previous backup onto the device. Backups are timestamped and
+  stored in ~/compa/backups/.
+
+
+== SCREEN 2: CONTROL ==
+
+The Control screen presents a grid of parameter knobs that adapt to
+the focused device. Turning a knob sends the corresponding MIDI CC
+message in real time.
+
+Roland P-6 Parameters
+  Granular: grain size, grain density, grain position, scatter
+  Filter: cutoff, resonance, filter type, envelope amount
+  Envelope: attack, decay, sustain, release
+  Mixer: track volume, pan, mute, solo
+  FX: reverb send, delay send, delay time, delay feedback
+
+Roland SP-404 MK2 Parameters
+  FX Bus 1-5: effect type, depth, rate, mix level
+  Looper: loop length, overdub level, playback speed
+  DJ Mode: crossfader position, EQ low/mid/high, filter sweep
+
+Generic USB Devices
+  No parameter knobs are available for unrecognized devices. The
+  Control screen displays a message indicating that MIDI CC mapping
+  is not supported for the connected device.
+
+
+== SCREEN 3: PATTERN ==
+
+The Pattern screen shows a grid of pattern slots. The grid layout
+adapts to the focused device.
+
+Roland P-6 Layout
+  8 columns by 8 rows = 64 pattern slots. Tap a slot to select it
+  as the active pattern. Long-press to copy, paste, or clear a
+  pattern.
+
+Roland SP-404 MK2 Layout
+  4 columns by 4 rows = 16 pattern slots. Same tap and long-press
+  behavior as the P-6 layout.
+
+Chain / Song Mode
+  Tap the Chain button to enter chain mode. Select multiple patterns
+  in order to build a chain. Compa sends pattern-change messages at
+  the correct bar boundaries so transitions are seamless.
+
+Step Sequencer
+  Tap the SEQ button to open the step sequencer overlay. The
+  sequencer displays 16 steps per bar. Tap a step to toggle it on
+  or off. Hold a step and turn a knob on the Control screen to set
+  per-step parameter locks.
+
+
+== SCREEN 4: RECORD ==
+
+The Record screen captures audio from any connected device.
+
+IN Source Selector
+  Tap the IN button to choose which device to record from. The list
+  shows all connected USB audio devices plus the radio stream.
+
+Recall Buffer
+  Compa continuously captures the last 60 seconds of audio from the
+  selected source into a circular buffer. If you missed pressing
+  record, tap Recall to save the buffer contents as a new take. This
+  means you never lose a good moment.
+
+Threshold Recording
+  Enable threshold recording with the T button. Set the threshold
+  level in Settings. When enabled, recording starts automatically
+  the moment the input signal exceeds the threshold and stops after
+  a configurable silence duration.
+
+Auto-Record
+  Press A or tap the Auto button to enable auto-record mode. In this
+  mode, Compa starts recording whenever transport is started on the
+  focused device and stops when transport stops.
+
+Take Management
+  Each recording is saved as a numbered take. The take list appears
+  on the right side of the Record screen. Tap a take to preview it.
+  Swipe left to delete. Tap the export icon to send a take to the
+  Sample screen for editing.
+
+
+== SCREEN 5: SAMPLE ==
+
+The Sample screen provides tools for editing and exporting audio files.
+
+File Browser
+  Navigate the Pi filesystem to find recordings, imported samples,
+  or any WAV file. The browser defaults to ~/compa/recordings/ but
+  you can navigate anywhere.
+
+Visual Waveform Slicer
+  Load a file to see its waveform. Drag the start and end markers
+  to define a region. Pinch to zoom on the touchscreen. The selected
+  region is highlighted in color.
+
+Auto-Slice
+  Tap Auto-Slice to automatically detect transients and place slice
+  markers at each hit. Adjust the sensitivity slider to capture more
+  or fewer slices. Each slice becomes an individual sample.
+
+Normalize
+  Tap Normalize to bring the peak level of the selected region to
+  0 dBFS. This ensures consistent volume across all your samples.
+
+Trim
+  Tap Trim to remove everything outside the selected region. The
+  trimmed file replaces the original unless you choose Save As.
+
+Export Formats
+  Tap Export and choose a target format:
+    P-6:     44.1 kHz, 16-bit, mono WAV
+    SP-404:  48 kHz, 16-bit, stereo WAV (placed in IMPORT folder)
+    MPC:     .xpm drum program with formatted sample files
+    Ableton: .adg Drum Rack preset with referenced samples
+
+  When exporting to a connected device, Compa transfers the file
+  directly over USB. For Ableton export, files are saved to the
+  Samba share for pickup from your Mac or PC.
+
+
+== SCREEN 6: RADIO ==
+
+The Radio screen provides access to internet radio stations for
+discovering and capturing new music and sounds.
+
+Station Library
+  137 stations organized across 25 genres. Scroll through the genre
+  tabs at the top and tap a station to start playback. The station
+  name and current track info (when available) appear at the top.
+
+Audio Routing for Radio
+  Radio audio plays through the HDMI output. Recording from USB
+  devices is independent, so you can listen to radio while
+  recording from your sampler without any signal conflict.
+
+Capture Buffer
+  Like the Record screen, the Radio screen maintains a circular
+  capture buffer. Tap Capture to save the last 60 seconds of radio
+  audio as a WAV file.
+
+Threshold Recording from Radio
+  Enable threshold recording on the Radio screen to automatically
+  capture segments that exceed the configured threshold level. This
+  is useful for grabbing individual songs or segments from a
+  continuous radio stream.
+
+
+== SCREEN 7: KIT BUILDER ==
+
+The Kit Builder screen lets you assemble multi-sample drum kits from
+your recordings and export them to hardware or software.
+
+Pad Grid
+  A 4x4 grid of pads, with 8 banks available, giving you 128 pad
+  slots total. Tap a pad to select it. The selected pad is
+  highlighted.
+
+Assigning Samples
+  With a pad selected, tap Load to open the file browser and choose
+  a sample. The sample waveform appears above the pad grid. You can
+  trim the start and end points directly in Kit Builder.
+
+Banks
+  Tap the bank selector (A through H) to switch between banks. Each
+  bank holds 16 pads. Use multiple banks to organize your kit by
+  category: kicks on bank A, snares on bank B, and so on.
+
+Export XPM (Akai MPC / Force)
+  Tap Export > XPM to generate an Akai-compatible drum program. Compa
+  creates the .xpm file and formats all assigned samples to the
+  correct specifications. Transfer to your MPC or Force over the
+  network or via USB.
+
+Export ADG (Ableton)
+  Tap Export > ADG to generate an Ableton Live Drum Rack preset. The
+  .adg file and its referenced samples are saved to the Samba share.
+  Drag the .adg file into an Ableton Live session to load the kit.
+
+
+== SCREEN 8: SETTINGS ==
+
+The Settings screen contains global configuration options.
+
+Mouse Mode
+  Toggle mouse mode on or off. When enabled, a visible cursor appears
+  on screen and touch input behaves like a mouse with click events.
+  Useful for debugging or when using a mouse instead of touch.
+
+Auto-Record
+  Enable or disable the auto-record feature globally. When on,
+  recording begins and ends with the focused device transport.
+
+Threshold Level
+  Set the audio level (in dBFS) at which threshold recording is
+  triggered. Lower values mean quieter sounds will trigger recording.
+  A typical starting point is -30 dBFS.
+
+Silence Duration
+  Set how many seconds of silence must elapse before threshold
+  recording automatically stops. Default is 3 seconds.
+
+Connected Devices
+  A list of all currently connected USB devices with their audio
+  configuration (sample rate, channels) and MIDI status.
+
+Audio Routing
+  Configure routing between devices. Select a source device and a
+  destination device, then tap START. Compa inserts sample rate
+  conversion automatically when the source and destination operate
+  at different rates.
+
+MIDI Clock Relay
+  Select which device is the clock master. All other devices receive
+  clock from the master through Compa. Disable relay to let each
+  device run independently.
+
+Touch Calibration
+  Run the touch calibration wizard if the touchscreen is not
+  registering taps accurately. Follow the on-screen prompts to tap
+  the four corners and center of the display.
+
+
+== SCREEN 9: HELP ==
+
+The Help screen contains a searchable reference manual. Type a keyword
+into the search bar to find relevant sections. The help content mirrors
+this document and is generated from the same source.
+
+
+== KEYBOARD SHORTCUTS ==
+
+Compa supports keyboard shortcuts for quick navigation and control.
+A USB or Bluetooth keyboard can be connected to the Pi.
+
+  F1          Switch to Session screen
+  F2          Switch to Control screen
+  F3          Switch to Pattern screen
+  F4          Switch to Record screen
+  F5          Switch to Sample screen
+  F6          Switch to Radio screen
+  F7          Switch to Help screen
+  F8          Switch to Settings screen
+  Space       Toggle transport (play/stop) on focused device
+  R           Toggle recording on/off
+  A           Toggle auto-record mode
+  M           Toggle mouse mode
+  F12         Take a screenshot (saved to ~/compa/screenshots/)
+
+
+== AUDIO ROUTING IN DETAIL ==
+
+Source Selection
+  On the Record screen, tap the IN selector to choose which device
+  to record from. The options include every connected USB audio
+  device and the radio stream.
+
+Device-to-Device Routing
+  In Settings > Audio Routing, you can route audio between any two
+  connected devices. This is useful for resampling: play a pattern
+  on one device and record its output directly into another.
+
+Sample Rate Conversion
+  Compa automatically converts between sample rates when routing
+  audio between devices. The conversion is transparent:
+    48 kHz to 44.1 kHz (e.g., SP-404 to P-6)
+    44.1 kHz to 48 kHz (e.g., P-6 to SP-404)
+  No manual configuration is needed.
+
+Radio Audio Path
+  Radio streams play through the HDMI audio output on the Pi. USB
+  audio recording is handled on a separate path. This means you can
+  monitor radio on your speakers while simultaneously recording from
+  a USB device without crosstalk or routing conflicts.
+
+
+== FORMAT CONVERSION REFERENCE ==
+
+When exporting samples, Compa converts audio to the format required
+by the target device or software.
+
+Roland P-6
+  Format:      WAV
+  Sample Rate: 44100 Hz
+  Bit Depth:   16-bit
+  Channels:    Mono (left channel used if source is stereo)
+
+Roland SP-404 MK2
+  Format:      WAV
+  Sample Rate: 48000 Hz
+  Bit Depth:   16-bit
+  Channels:    Stereo
+  Destination: IMPORT folder on the SP-404 SD card
+
+Akai MPC / Force
+  Format:      XPM drum program
+  Samples:     WAV files formatted per MPC specifications
+  Transfer:    Network share or USB file transfer
+
+Ableton Live
+  Format:      ADG Drum Rack preset
+  Samples:     WAV files referenced by the .adg file
+  Location:    Samba share on the Pi (accessible from Mac or PC)
+
+
+== HARDWARE REQUIREMENTS ==
+
+Raspberry Pi
+  Minimum: Pi 3B+ (quad-core 1.4 GHz, 1 GB RAM)
+  Recommended: Pi 4 or Pi 5 for best performance
+  The Pi must have at least one free USB port per device
+
+Display
+  Recommended: 7-inch HDMI touchscreen at 800x480 or higher
+  Any HDMI display works, but touch input requires a compatible
+  touchscreen. Without touch, use a mouse and keyboard.
+
+USB Cables
+  Each device needs a USB cable from the Pi to the device. The cable
+  must be data-capable. Charge-only cables will not work. If a device
+  is not detected, try a different cable.
+
+Power Supply
+  Use the official Raspberry Pi power supply rated at 2.5A or higher.
+  Underpowered supplies cause USB device dropouts and audio glitches.
+  If connecting multiple power-hungry devices, consider a powered USB
+  hub.
+
+
+== INSTALLATION AND SETUP ==
+
+Step 1: Flash the Operating System
+  Download Raspberry Pi OS Lite (64-bit) from the official Raspberry
+  Pi website. Use the Raspberry Pi Imager to flash it onto a microSD
+  card. Boot the Pi and complete initial configuration (Wi-Fi,
+  locale, SSH if desired).
+
+Step 2: Clone the Repository
+  Connect the Pi to the internet and clone the Compa repository:
+    git clone <repo-url> ~/compa
+
+Step 3: Create Virtual Environment and Install Dependencies
+  Navigate to the Compa directory and set up a Python virtual
+  environment:
+    cd ~/compa
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+
+Step 4: Enable the Systemd Service
+  Compa includes a systemd service file for automatic startup:
+    sudo cp compa.service /etc/systemd/system/
+    sudo systemctl enable compa
+    sudo systemctl start compa
+  After this, Compa launches automatically every time the Pi boots.
+
+Step 5: Configure Samba Share
+  To access recordings and exports from a Mac or PC on the same
+  network, install and configure Samba:
+    sudo apt install samba
+  Edit /etc/samba/smb.conf to share the ~/compa directory. Restart
+  the Samba service. The share appears in your network browser as
+  a shared folder.
+
+
+== HOT-PLUG BEHAVIOR ==
+
+Compa scans for USB device changes every 5 seconds. You can plug in
+or unplug devices at any time without restarting the application.
+
+Device Connection
+  When a new device is plugged in, Compa detects it within 5 seconds,
+  identifies it by USB descriptor, configures the appropriate audio
+  and MIDI settings, and adds it to the navigation bar.
+
+Device Disconnection
+  When a device is unplugged, Compa removes it from the navigation
+  bar and releases its audio and MIDI resources. If the removed
+  device was the focused device, focus automatically switches to
+  another connected device (if any).
+
+No Restart Required
+  Hot-plug is fully supported. You never need to restart Compa or
+  reboot the Pi to add or remove devices.
+
+
+== RECORDING WORKFLOWS ==
+
+Basic Manual Recording
+  1. Go to the Record screen (F4)
+  2. Tap IN to select the device you want to record from
+  3. Press R or tap the Record button to start recording
+  4. Press R again to stop
+  5. The take appears in the take list on the right
+
+Threshold Recording
+  1. Go to Settings (F8) and set the threshold level
+  2. Go to the Record screen (F4)
+  3. Tap the T button to enable threshold mode
+  4. Recording starts automatically when signal exceeds threshold
+  5. Recording stops after the configured silence duration
+
+Auto-Record with Transport
+  1. Press A to enable auto-record
+  2. Start playback on your device
+  3. Compa begins recording automatically
+  4. Stop playback on your device
+  5. Compa stops recording and saves the take
+
+Recall Buffer Capture
+  1. Realize you just heard something great but were not recording
+  2. Go to the Record screen (F4)
+  3. Tap Recall to save the last 60 seconds of audio
+  4. The captured audio appears as a new take
+
+Radio Capture
+  1. Go to the Radio screen (F6)
+  2. Browse genres and select a station
+  3. When you hear something interesting, tap Capture
+  4. The last 60 seconds of radio audio are saved as a WAV file
+
+
+== SAMPLE EDITING WORKFLOWS ==
+
+Trimming a Recording
+  1. Go to the Sample screen (F5)
+  2. Open the file browser and select a recording
+  3. Drag the start and end markers on the waveform
+  4. Tap Trim to remove everything outside the selection
+
+Auto-Slicing a Loop
+  1. Load a loop on the Sample screen
+  2. Tap Auto-Slice
+  3. Adjust sensitivity until slices land on the transients
+  4. Each slice is saved as a separate file
+  5. Export individual slices or the entire set
+
+Normalizing for Consistent Levels
+  1. Load a sample on the Sample screen
+  2. Select the region you want to normalize (or select all)
+  3. Tap Normalize
+  4. The peak level is brought to 0 dBFS
+
+Exporting to a Device
+  1. Edit and prepare your sample on the Sample screen
+  2. Tap Export
+  3. Choose the target: P-6, SP-404, MPC, or Ableton
+  4. Compa converts the format and transfers the file
+
+
+== KIT BUILDING WORKFLOWS ==
+
+Building a Drum Kit
+  1. Go to Kit Builder (tap the Kit Builder tab in the nav bar)
+  2. Tap pad A1 to select it
+  3. Tap Load and browse to your kick drum sample
+  4. Repeat for each pad: snare on A2, hi-hat on A3, etc.
+  5. Use banks B through H for additional sounds
+
+Exporting to Akai MPC or Force
+  1. Build your kit as described above
+  2. Tap Export > XPM
+  3. Compa generates the .xpm drum program file
+  4. Transfer to your MPC or Force via network or USB
+
+Exporting to Ableton Live
+  1. Build your kit as described above
+  2. Tap Export > ADG
+  3. The .adg file and samples are saved to the Samba share
+  4. On your Mac or PC, open the network share
+  5. Drag the .adg file into an Ableton Live session
+
+
+== TROUBLESHOOTING ==
+
+Device Not Detected
+  - Verify the USB cable is data-capable (not charge-only)
+  - Try a different USB port on the Pi
+  - Check that the power supply is rated at 2.5A or higher
+  - Wait at least 5 seconds for the scan cycle to detect the device
+
+Audio Glitches or Dropouts
+  - Use the official Raspberry Pi power supply
+  - Close unnecessary background processes on the Pi
+  - If routing between devices, ensure both are stable
+  - Consider a powered USB hub for multiple devices
+
+Touchscreen Not Responding Accurately
+  - Go to Settings (F8) and run Touch Calibration
+  - Follow the on-screen prompts to recalibrate
+
+Radio Not Playing
+  - Verify the Pi has an active internet connection
+  - Check that the HDMI audio output is enabled in Pi settings
+  - Try a different radio station
+
+Samba Share Not Visible
+  - Verify Samba is installed and running on the Pi
+  - Check that your Mac or PC is on the same network
+  - Review /etc/samba/smb.conf for correct share configuration
+
+MIDI Clock Not Syncing
+  - Go to Settings > MIDI Clock Relay
+  - Verify a master device is selected
+  - Ensure all devices are set to receive external clock
+
+
+== FILE LOCATIONS ==
+
+Compa stores its data in the following directories on the Pi:
+
+  ~/compa/recordings/    Audio recordings and takes
+  ~/compa/backups/       Device backup archives
+  ~/compa/exports/       Exported samples and kits
+  ~/compa/screenshots/   Screenshots taken with F12
+  ~/compa/sessions/      Session files with notes and state
+  ~/compa/radio/         Captured radio audio files
+
+
+== TIPS AND BEST PRACTICES ==
+
+- Always use data-capable USB cables. Charge-only cables are the most
+  common source of connection problems.
+
+- Keep the recall buffer in mind. Even if you forget to press record,
+  the last 60 seconds are always available.
+
+- Use threshold recording for hands-free capture. Set it up before a
+  jam session and let Compa handle the recording automatically.
+
+- Export directly to your device when possible. Compa handles format
+  conversion so you do not need to worry about sample rates or bit
+  depths.
+
+- Back up your device data regularly using the Session screen. Backups
+  are small and fast, and they protect against accidental data loss.
+
+- Use the Kit Builder to prepare drum kits before a session. Having
+  kits ready to load on your MPC or in Ableton saves time during
+  creative work.
+
+- The MIDI clock relay eliminates the need for a separate sync box.
+  Designate one device as master and let Compa distribute clock to
+  the rest.
+
+- Take advantage of the multi-device hub. With four USB ports, you
+  can have a P-6, SP-404, and MPC all connected and switching between
+  them with a single tap.
+
+
+== END OF MANUAL ==
