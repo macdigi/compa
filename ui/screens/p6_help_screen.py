@@ -237,11 +237,13 @@ class P6HelpScreen:
         f_small = theme.font("small")
         f_mono = theme.font("mono")
 
-        # ── Manual selector tabs (top-right) ─────────────────────────
-        tab_w = 80
+        # ── Manual selector tabs (top, after search, before ESC) ─────
+        tab_w = 72
         tab_h = 24
         tab_gap = 4
-        tab_start_x = theme.SCREEN_WIDTH - len(self.MANUALS) * (tab_w + tab_gap)
+        # Position: right-aligned but leaving room for ESC button (70px from right)
+        esc_space = 76
+        tab_start_x = theme.SCREEN_WIDTH - esc_space - len(self.MANUALS) * (tab_w + tab_gap)
         self._manual_tab_rects = []
         for i, (label, _, dev_key) in enumerate(self.MANUALS):
             rect = pygame.Rect(tab_start_x + i * (tab_w + tab_gap), 6, tab_w, tab_h)
@@ -254,7 +256,7 @@ class P6HelpScreen:
             self._manual_tab_rects.append(rect)
 
         # ── Search bar ───────────────────────────────────────────────
-        search_w = tab_start_x - SIDEBAR_WIDTH - 20
+        search_w = max(200, tab_start_x - SIDEBAR_WIDTH - 20)
         search_rect = pygame.Rect(SIDEBAR_WIDTH + 8, 6, search_w, 30)
         pygame.draw.rect(surface, theme.BG_PANEL, search_rect, border_radius=6)
         pygame.draw.rect(surface, theme.ACCENT if self._search_text else theme.BORDER,
@@ -291,8 +293,9 @@ class P6HelpScreen:
         pygame.draw.line(surface, theme.BORDER,
                         (SIDEBAR_WIDTH, 0), (SIDEBAR_WIDTH, sidebar_rect.bottom))
 
-        # Sidebar title
-        surf = f_med.render("P-6 MANUAL", True, theme.ACCENT)
+        # Sidebar title — reflects current manual
+        manual_label = self.MANUALS[self._current_manual][0]
+        surf = f_med.render(f"{manual_label} MANUAL", True, theme.ACCENT)
         surface.blit(surf, (10, 10))
 
         sidebar_y = 42
