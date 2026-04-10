@@ -40,6 +40,7 @@ class P6PatternScreen:
         # Wire chain player
         if self.app.p6:
             self.chain_player.on_pattern_change = self.app.p6.send_program_change
+            self.chain_player._midi_out = self.app.p6
 
         # Pi-side step sequencer
         self.sequencer = PiSequencer(num_steps=16)
@@ -79,7 +80,10 @@ class P6PatternScreen:
         # Re-wire chain player and sequencer to new focused device
         if self.app.p6:
             self.chain_player.on_pattern_change = self.app.p6.send_program_change
+            self.chain_player._midi_out = self.app.p6
             self.sequencer.set_midi_out(self.app.p6)
+        # Reconfigure sequencer rows for device
+        self.sequencer.configure_for_device(self.app.device_name)
 
     def _load_pattern_names(self):
         path = os.path.join(
@@ -371,14 +375,18 @@ class P6PatternScreen:
         num_steps = seq.num_steps
         num_pads = seq.num_pads
         cell_w = (theme.SCREEN_WIDTH - grid_x - 20) // num_steps
-        cell_h = 50
-        pad_gap = 6
-        pad_labels = [f"PAD {i+1}" for i in range(num_pads)]
-
-        # Pad labels on left
+        avail_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - grid_y - 60
+        cell_h = max(24, min(50, (avail_h - (num_pads - 1) * 4) // num_pads))
+        pad_gap = 4 if num_pads > 6 else 6
+        # Pad labels from row configs (shows special row types)
         for pad in range(num_pads):
             cy = grid_y + pad * (cell_h + pad_gap) + cell_h // 2
-            surf = f_small.render(pad_labels[pad], True, theme.TEXT_DIM)
+            cfg = seq.row_configs[pad] if pad < len(seq.row_configs) else None
+            label = cfg.label if cfg else f"PAD {pad+1}"
+            label_color = theme.TEXT_DIM
+            if cfg and cfg.color != (0, 0, 0):
+                label_color = cfg.color
+            surf = f_small.render(label, True, label_color)
             surface.blit(surf, (16, cy - 7))
 
         # Step number labels on top
@@ -400,11 +408,13 @@ class P6PatternScreen:
 
                 cell = seq.grid[pad][step]
                 is_current = (seq.playing and step == seq.current_step)
+                cfg = seq.row_configs[pad] if pad < len(seq.row_configs) else None
+                row_color = cfg.color if (cfg and cfg.color != (0, 0, 0)) else theme.ACCENT
 
                 if cell.active and is_current:
                     bg = theme.GREEN
                 elif cell.active:
-                    bg = theme.ACCENT
+                    bg = row_color
                 elif is_current:
                     bg = (50, 60, 50)
                 elif step % 4 == 0:

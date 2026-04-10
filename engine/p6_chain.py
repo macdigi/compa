@@ -15,9 +15,15 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ChainStep:
-    """One step in a pattern chain."""
-    pattern: int = 0   # 0-63
+    """One step in a pattern chain.
+
+    fx_snapshot: optional dict of CC messages to send when this step starts.
+    Format: {(channel, cc_number): value, ...}
+    Example: {(0, 83): 18, (0, 19): 127}  → Bus1 FX=303VinylSim, FX ON
+    """
+    pattern: int = 0    # 0-63
     bars: int = 4       # 1-64
+    fx_snapshot: dict = field(default_factory=dict)  # {(ch, cc): val}
 
 
 @dataclass
@@ -36,7 +42,16 @@ class Chain:
             "name": self.name,
             "time_sig_beats": self.time_sig_beats,
             "loop": self.loop,
-            "steps": [{"pattern": s.pattern, "bars": s.bars} for s in self.steps],
+            "steps": [
+                {
+                    "pattern": s.pattern,
+                    "bars": s.bars,
+                    "fx_snapshot": {f"{ch},{cc}": val
+                                    for (ch, cc), val in s.fx_snapshot.items()}
+                    if s.fx_snapshot else {},
+                }
+                for s in self.steps
+            ],
         }
 
     @classmethod
@@ -47,9 +62,17 @@ class Chain:
             loop=data.get("loop", True),
         )
         for s in data.get("steps", []):
+            # Deserialize fx_snapshot: "ch,cc" string keys → (ch, cc) tuples
+            raw_fx = s.get("fx_snapshot", {})
+            fx = {}
+            for key, val in raw_fx.items():
+                parts = key.split(",")
+                if len(parts) == 2:
+                    fx[(int(parts[0]), int(parts[1]))] = val
             chain.steps.append(ChainStep(
                 pattern=s.get("pattern", 0),
                 bars=s.get("bars", 4),
+                fx_snapshot=fx,
             ))
         return chain
 
@@ -71,6 +94,9 @@ class ChainPlayer:
         self.bar_in_step = 0
         self.beat_in_bar = 0
         self.tick_count = 0
+
+        # MIDI output (for FX snapshots)
+        self._midi_out = None
 
         # Callbacks
         self.on_pattern_change: Optional[Callable[[int], None]] = None
@@ -167,6 +193,14 @@ class ChainPlayer:
         step = self.chain.steps[self.step_index]
         if self.on_pattern_change:
             self.on_pattern_change(step.pattern)
+
+        # Send FX snapshot CCs if present
+        if step.fx_snapshot and self._midi_out:
+            for (ch, cc), val in step.fx_snapshot.items():
+                self._midi_out.send_cc(cc, val, channel=ch)
+            log.info("Chain step %d: sent %d FX CCs",
+                     self.step_index + 1, len(step.fx_snapshot))
+
         log.info("Chain step %d: pattern %d (%d bars)",
                  self.step_index + 1, step.pattern + 1, step.bars)
 
