@@ -7,6 +7,7 @@ Handles:
 - Akai MPC .xpm drum program generation
 """
 
+import gzip
 import html
 import json
 import logging
@@ -31,6 +32,13 @@ log = logging.getLogger(__name__)
 TEMPLATE_XPM = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "docs", "akai_drum_template.xpm",
+)
+
+# Path to the golden Ableton Live Drum Rack template (gzipped XML).
+# Resolved relative to this module: <repo>/docs/ableton_drumrack_template.adg
+TEMPLATE_ADG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "docs", "ableton_drumrack_template.adg",
 )
 
 
@@ -319,6 +327,198 @@ def generate_xpm(name: str, pads: list[PadAssignment],
         return None
 
 
+# ── Ableton Live Drum Rack (.adg) ────────────────────────────────────
+
+
+def _xml_escape_attr(val: str) -> str:
+    """Escape a string for use inside an XML attribute value."""
+    return (
+        (val or "")
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def generate_adg(name: str, pads: list[PadAssignment],
+                 output_dir: str) -> Optional[str]:
+    """Generate an Ableton Live Drum Rack .adg preset by patching a template.
+
+    The template is a gzipped XML file with 128 pads, each referencing
+    placeholder samples ``slot001.wav`` through ``slot128.wav``.  We patch
+    the XML to point at the real WAV files and write the result as a
+    gzipped .adg.
+
+    WAV files are copied into *output_dir* as ``slot001.wav``, ``slot002.wav``,
+    etc. (matching the relative paths baked into the Drum Rack).
+
+    Args:
+        name: Kit / preset display name.
+        pads: List of pad assignments (up to 128).
+        output_dir: Directory to write the .adg and copy samples into.
+
+    Returns:
+        Path to the generated .adg file, or None on failure.
+    """
+    if not os.path.isfile(TEMPLATE_ADG):
+        log.error("Template ADG not found: %s", TEMPLATE_ADG)
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ── Build lookup: slot number (1-based) -> pad info ──────────
+    pad_map: dict[int, dict] = {}
+    for pad in pads:
+        slot = pad.pad_index + 1  # pad_index 0 = slot 1
+        if slot < 1 or slot > 128:
+            continue
+        if not os.path.exists(pad.sample_path):
+            log.warning("Sample not found, skipping slot %d: %s",
+                        slot, pad.sample_path)
+            continue
+
+        src_basename = os.path.basename(pad.sample_path)
+        display_name = os.path.splitext(src_basename)[0]
+        slot_fn = f"slot{slot:03d}.wav"
+
+        # Copy WAV into output dir
+        dst = os.path.join(output_dir, slot_fn)
+        if not os.path.exists(dst) or not os.path.samefile(pad.sample_path, dst):
+            shutil.copy2(pad.sample_path, dst)
+
+        pad_map[slot] = {
+            "display_name": display_name,
+            "slot_fn": slot_fn,
+        }
+
+    kit_size = max(pad_map.keys()) if pad_map else 0
+    n_active = len(pad_map)
+
+    if n_active == 0:
+        log.error("No valid pads to export")
+        return None
+
+    # ── Read and decompress template ─────────────────────────────
+    with gzip.open(TEMPLATE_ADG, "rb") as gz:
+        tpl_xml = gz.read().decode("utf-8", errors="ignore")
+
+    # ── Reset crop / loop markers baked into the template ────────
+    tpl_xml = re.sub(
+        r'<SampleStart Value="\d+"\s*/>', '<SampleStart Value="0" />', tpl_xml)
+    tpl_xml = re.sub(
+        r'<SampleEnd Value="\d+"\s*/>', '<SampleEnd Value="0" />', tpl_xml)
+    tpl_xml = re.sub(
+        r'(<SustainLoop>[\s\S]*?<Start Value=")\d+("\s*/>)', r'\g<1>0\2', tpl_xml)
+    tpl_xml = re.sub(
+        r'(<SustainLoop>[\s\S]*?<End Value=")\d+("\s*/>)', r'\g<1>0\2', tpl_xml)
+    tpl_xml = re.sub(
+        r'(<ReleaseLoop>[\s\S]*?<Start Value=")\d+("\s*/>)', r'\g<1>0\2', tpl_xml)
+    tpl_xml = re.sub(
+        r'(<ReleaseLoop>[\s\S]*?<End Value=")\d+("\s*/>)', r'\g<1>0\2', tpl_xml)
+
+    # ── Patch per-slot FileRefs, names, and clear empty slots ────
+    for slot in range(1, 129):
+        old_rel = f"Samples/Imported/slot{slot:03d}.wav"
+        info = pad_map.get(slot)
+
+        if info:
+            slot_name = info["display_name"]
+            slot_fn = info["slot_fn"]
+            new_rel = f"Samples/Imported/{slot_fn}"
+
+            # Sample display name inside the Simpler
+            tpl_xml = tpl_xml.replace(
+                f'<Name Value="slot{slot:03d}" />',
+                f'<Name Value="{_xml_escape_attr(slot_name)}" />',
+            )
+
+            # Relative path to sample file
+            tpl_xml = tpl_xml.replace(
+                f'<RelativePath Value="{old_rel}" />',
+                f'<RelativePath Value="{new_rel}" />',
+            )
+        else:
+            # Empty slot: clear references so Live doesn't show offline markers
+            tpl_xml = tpl_xml.replace(
+                f'<Name Value="slot{slot:03d}" />',
+                '<Name Value="" />',
+            )
+            tpl_xml = tpl_xml.replace(
+                f'<RelativePath Value="{old_rel}" />',
+                '<RelativePath Value="" />',
+            )
+            tpl_xml = re.sub(
+                rf'<Path Value="[^"]*{re.escape(old_rel)}" />',
+                '<Path Value="" />',
+                tpl_xml,
+            )
+
+    # ── Rename the DrumGroupDevice to the kit name ───────────────
+    kit_label = _xml_escape_attr(name)
+
+    def _set_root_username(m2: re.Match) -> str:
+        return f"{m2.group(1)}{kit_label}{m2.group(2)}"
+
+    tpl_xml = re.sub(
+        r'(<DrumGroupDevice Id="0">[\s\S]*?<UserName Value=")[^"]*("\s*/>)',
+        _set_root_username,
+        tpl_xml,
+        count=1,
+    )
+
+    # ── Patch DrumBranchPreset names for active pads ─────────────
+    branch_pat = re.compile(
+        r'<DrumBranchPreset Id="(\d+)">[\s\S]*?</DrumBranchPreset>')
+
+    def _patch_branch(m: re.Match) -> str:
+        bid = int(m.group(1))
+        slot = bid + 1
+        block = m.group(0)
+        info = pad_map.get(slot)
+
+        if info:
+            nm = _xml_escape_attr(info["display_name"])
+
+            def _set_branch_name(m2: re.Match) -> str:
+                return f"{m2.group(1)}{nm}{m2.group(2)}"
+
+            block = re.sub(
+                r'(<DrumBranchPreset Id="\d+">\s*<Name Value=")[^"]*("\s*/>)',
+                _set_branch_name,
+                block,
+                count=1,
+            )
+        return block
+
+    tpl_xml = branch_pat.sub(_patch_branch, tpl_xml)
+
+    # ── Trim BranchPresets to only active pads ───────────────────
+    m_bp = re.search(r'<BranchPresets>([\s\S]*?)</BranchPresets>', tpl_xml)
+    if m_bp:
+        inner = m_bp.group(1)
+        kept = []
+        for mm in branch_pat.finditer(inner):
+            bid = int(mm.group(1))
+            slot = bid + 1
+            if slot in pad_map:
+                kept.append(mm.group(0))
+        new_inner = "".join(kept)
+        tpl_xml = tpl_xml[: m_bp.start(1)] + new_inner + tpl_xml[m_bp.end(1):]
+
+    # ── Write gzipped .adg ───────────────────────────────────────
+    adg_path = os.path.join(output_dir, f"{name}.adg")
+    try:
+        with gzip.open(adg_path, "wb") as gz:
+            gz.write(tpl_xml.encode("utf-8"))
+        log.info("Generated ADG: %s (%d active pads, template-patched)",
+                 adg_path, n_active)
+        return adg_path
+    except Exception as e:
+        log.error("Failed to write ADG: %s", e)
+        return None
+
+
 # ── Batch converter ──────────────────────────────────────────────────
 
 def convert_recordings_to_kit(recordings: list[str], kit_name: str,
@@ -354,6 +554,17 @@ def convert_recordings_to_kit(recordings: list[str], kit_name: str,
         converted = prepare_for_p6(recordings, output_dir)
         return output_dir if converted else None
 
+    elif target == "ableton":
+        pads = []
+        for i, rec in enumerate(recordings[:128]):
+            pads.append(PadAssignment(
+                pad_index=i,
+                sample_path=rec,
+                volume=1.0,
+                pan=0.5,
+            ))
+        return generate_adg(kit_name, pads, output_dir)
+
     else:
         log.error("Unknown target: %s", target)
         return None
@@ -379,5 +590,11 @@ def list_supported_formats() -> list[dict]:
             "name": "Akai MPC / Force",
             "desc": "44.1kHz 16-bit stereo WAV + .xpm drum program",
             "ext": "xpm",
+        },
+        {
+            "id": "ableton",
+            "name": "Ableton Live",
+            "desc": "Drum Rack preset (.adg) with WAV samples",
+            "ext": "adg",
         },
     ]

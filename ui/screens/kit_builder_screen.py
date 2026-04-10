@@ -4,7 +4,7 @@ Layout (800x600, nav=52px, content=548px):
   y=0-38:    Header with kit name + RENAME button
   y=42-350:  Split view: LEFT pad grid (4x4), RIGHT sample browser
   y=354-390: Bank selector (A-H) + pad count
-  y=394-430: Action buttons: CLEAR PAD, CLEAR ALL, EXPORT XPM, EXPORT & UPLOAD
+  y=394-430: Action buttons: CLEAR PAD, CLEAR ALL, EXPORT ADG, EXPORT XPM, EXPORT & UPLOAD
   y=434-450: Status line
 """
 
@@ -17,7 +17,7 @@ import pygame
 
 from .. import theme
 from ..components.modal import Modal
-from engine.format_converter import generate_xpm, PadAssignment
+from engine.format_converter import generate_xpm, generate_adg, PadAssignment
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +205,9 @@ class KitBuilderScreen:
     def _clear_all_btn_rect(self) -> pygame.Rect:
         return pygame.Rect(118, self._ACTION_Y, 100, self._ACTION_H)
 
+    def _export_adg_btn_rect(self) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 440, self._ACTION_Y, 124, self._ACTION_H)
+
     def _export_btn_rect(self) -> pygame.Rect:
         return pygame.Rect(theme.SCREEN_WIDTH - 310, self._ACTION_Y, 140, self._ACTION_H)
 
@@ -305,6 +308,10 @@ class KitBuilderScreen:
         if self._clear_all_btn_rect().collidepoint(mx, my):
             self._pads = [None] * 128
             self._set_status("All pads cleared")
+            return
+
+        if self._export_adg_btn_rect().collidepoint(mx, my):
+            self._export_adg()
             return
 
         if self._export_btn_rect().collidepoint(mx, my):
@@ -409,6 +416,49 @@ class KitBuilderScreen:
                     self._set_status("Export failed -- check logs")
             except Exception as e:
                 self._set_status(f"Export error: {e}")
+            finally:
+                self._exporting = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_adg(self):
+        """Export all assigned pads as an Ableton Live Drum Rack .adg preset."""
+        if self._exporting:
+            return
+
+        assigned = [(i, p) for i, p in enumerate(self._pads) if p is not None]
+        if not assigned:
+            self._set_status("No pads assigned -- nothing to export")
+            return
+
+        self._exporting = True
+        self._set_status(f"Exporting ADG with {len(assigned)} pads...")
+
+        def worker():
+            try:
+                sessions_dir = self.app.config.get("P6_SESSIONS_DIR", "sessions")
+                output_dir = os.path.join(sessions_dir, "converted", self._kit_name)
+                os.makedirs(output_dir, exist_ok=True)
+
+                pad_assignments = []
+                for idx, pad_info in assigned:
+                    pad_assignments.append(PadAssignment(
+                        pad_index=idx,
+                        sample_path=pad_info["path"],
+                        volume=1.0,
+                        pan=0.5,
+                        tune=0.0,
+                    ))
+
+                result = generate_adg(self._kit_name, pad_assignments, output_dir)
+                if result:
+                    self._set_status(
+                        f"Exported! {len(assigned)} pads -> "
+                        f"{self._kit_name}.adg")
+                else:
+                    self._set_status("ADG export failed -- check logs")
+            except Exception as e:
+                self._set_status(f"ADG export error: {e}")
             finally:
                 self._exporting = False
 
@@ -616,9 +666,22 @@ class KitBuilderScreen:
         name_surf = f_med.render(self._kit_name, True, theme.ACCENT)
         surface.blit(name_surf, (name_x, self._ACTION_Y + 6))
 
+        # Export buttons share has_pads state
+        has_pads = self._assigned_count() > 0
+
+        # Export ADG (Ableton)
+        export_adg_rect = self._export_adg_btn_rect()
+        if self._exporting:
+            theme.draw_button(surface, export_adg_rect, "EXPORTING...", f_small,
+                              color=theme.YELLOW)
+        elif has_pads:
+            theme.draw_button(surface, export_adg_rect, "EXPORT ADG", f_small,
+                              active=True)
+        else:
+            theme.draw_button(surface, export_adg_rect, "EXPORT ADG", f_small)
+
         # Export XPM
         export_rect = self._export_btn_rect()
-        has_pads = self._assigned_count() > 0
         if self._exporting:
             theme.draw_button(surface, export_rect, "EXPORTING...", f_small,
                               color=theme.YELLOW)
