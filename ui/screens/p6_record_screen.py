@@ -52,6 +52,33 @@ class P6RecordScreen:
         if not self.app.recorder.is_recording:
             self.app.recorder.stop_monitoring()
 
+    def _cycle_audio_source(self):
+        """Cycle the recorder's audio input through connected devices."""
+        connected = self.app.device_manager.connected
+        if len(connected) < 2:
+            return  # Only one device, nothing to cycle
+
+        # Build list of devices that have audio inputs
+        audio_devs = [(sn, p) for sn, p in connected.items()
+                      if p.audio_in_channels > 0 and p.audio_hint]
+        if len(audio_devs) < 2:
+            return
+
+        # Find current source by matching recorder's device hint
+        current_hint = self.app.recorder._device_hint
+        current_idx = 0
+        for i, (sn, p) in enumerate(audio_devs):
+            if p.audio_hint in current_hint or current_hint in p.audio_hint:
+                current_idx = i
+                break
+
+        # Cycle to next
+        next_idx = (current_idx + 1) % len(audio_devs)
+        next_sn, next_profile = audio_devs[next_idx]
+        rate = next_profile.supported_sample_rates[0] if next_profile.supported_sample_rates else 44100
+        self.app.recorder.switch_device(next_profile.audio_hint, rate)
+        print(f"Recording source → {next_sn}", flush=True)
+
     def _any_modal_visible(self):
         return (self._detail_modal.visible or
                 self._rename_modal.visible or
@@ -131,6 +158,12 @@ class P6RecordScreen:
                 self.app.auto_record = not self.app.auto_record
                 from ui.p6_app import save_config_key
                 save_config_key("P6_AUTO_RECORD", "1" if self.app.auto_record else "0")
+                return
+
+            # Input source selector (cycle through connected audio devices)
+            src_rect = pygame.Rect(372, 4, 120, 18)
+            if src_rect.collidepoint(mx, my):
+                self._cycle_audio_source()
                 return
 
             # Row 2 buttons (y=24, h=14)
@@ -236,6 +269,18 @@ class P6RecordScreen:
         pygame.draw.rect(surface, auto_bg, auto_rect, border_radius=4)
         surf = f_small.render("AUTO", True, auto_text_color)
         surface.blit(surf, surf.get_rect(center=auto_rect.center))
+
+        # Audio source selector — shows which device we're recording from
+        src_rect = pygame.Rect(372, 4, 120, 18)
+        src_name = self.app.recorder.device_name
+        multi_device = len(self.app.device_manager.connected) > 1
+        src_bg = theme.ACCENT_DIM if multi_device else theme.BG_PANEL
+        pygame.draw.rect(surface, src_bg, src_rect, border_radius=4)
+        if multi_device:
+            pygame.draw.rect(surface, theme.ACCENT, src_rect, 1, border_radius=4)
+        src_label = f"IN: {src_name}"
+        surf = f_small.render(src_label, True, theme.TEXT if multi_device else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=src_rect.center))
 
         # Duration / status on far right of row 1
         if recording:

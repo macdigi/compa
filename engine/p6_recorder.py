@@ -136,6 +136,65 @@ class P6Recorder:
         return self._device_index is not None and sd is not None
 
     @property
+    def device_name(self) -> str:
+        """Friendly name of the current audio input device."""
+        if self._device_index is not None and sd is not None:
+            try:
+                dev = sd.query_devices(self._device_index)
+                return dev.get("name", "?").split(":")[0].strip()
+            except Exception:
+                pass
+        return "---"
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    def switch_device(self, hint: str, preferred_rate: int = 0) -> bool:
+        """Switch to a different audio input device.
+
+        Stops monitoring, re-detects with the new hint, resizes the
+        recall buffer for the new sample rate, then restarts monitoring.
+
+        Returns True if a device was found and switched to.
+        """
+        was_monitoring = self._monitoring
+        if self._recording:
+            self.stop_recording()
+        self.stop_monitoring()
+
+        old_hint = self._device_hint
+        old_rate = self._sample_rate
+
+        self._device_hint = hint
+        self._device_index = None
+        self._find_device()
+
+        if self._device_index is None:
+            # Revert on failure
+            log.warning("switch_device failed for hint '%s', reverting", hint)
+            self._device_hint = old_hint
+            self._find_device()
+            if was_monitoring:
+                self.start_monitoring()
+            return False
+
+        # Resize recall buffer if sample rate changed
+        if self._sample_rate != old_rate:
+            self._recall_buf_frames = RECALL_BUFFER_SECONDS * self._sample_rate
+            self._recall_buf = np.zeros((self._recall_buf_frames, P6_CHANNELS), dtype=np.float32)
+            self._recall_write_pos = 0
+            self._recall_total_written = 0
+            log.info("Recall buffer resized for %dHz (%d frames)",
+                     self._sample_rate, self._recall_buf_frames)
+
+        if was_monitoring:
+            self.start_monitoring()
+
+        log.info("Switched audio input to '%s' @ %dHz", hint, self._sample_rate)
+        return True
+
+    @property
     def is_recording(self) -> bool:
         return self._recording
 

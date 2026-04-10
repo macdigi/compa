@@ -65,6 +65,16 @@ class P6SettingsScreen:
         self.app.config["SKIP_SPLASH"] = new_val
         save_config_key("SKIP_SPLASH", new_val)
 
+    def _start_audio_route(self, source_key: str, dest_key: str):
+        if self.app.start_audio_route(source_key, dest_key):
+            print(f"Audio route started: {source_key} → {dest_key}", flush=True)
+        else:
+            print(f"Failed to start audio route: {source_key} → {dest_key}", flush=True)
+
+    def _stop_audio_route(self):
+        self.app.stop_audio_route()
+        print("Audio route stopped", flush=True)
+
     def _run_calibrate(self):
         """Launch ts_calibrate with TSLIB environment variables."""
         env = os.environ.copy()
@@ -124,10 +134,43 @@ class P6SettingsScreen:
         if not connected:
             self._rows.append({"label": "  No devices", "type": "info", "value": "—"})
 
+        # Audio routing (only when multiple devices connected)
+        if len(connected) >= 2:
+            self._rows.append({"label": "", "type": "section", "value": "AUDIO ROUTING"})
+
+            route = self.app.audio_route
+            if route and route.is_active:
+                src = route.source_name
+                dst = route.dest_name
+                src_r = f"{route._src_rate // 1000}k"
+                dst_r = f"{route._dst_rate // 1000}k"
+                src_text = f"{src} → {dst}"
+                if route._needs_src:
+                    src_text += f" ({src_r}→{dst_r} SRC)"
+                self._rows.append({
+                    "label": f"  Route: {src_text}", "type": "button",
+                    "btn_label": "STOP",
+                    "action": self._stop_audio_route,
+                })
+            else:
+                # Build route options from connected devices
+                keys = list(connected.keys())
+                for i, src_key in enumerate(keys):
+                    for dst_key in keys:
+                        if src_key == dst_key:
+                            continue
+                        label = f"  {src_key} → {dst_key}"
+                        self._rows.append({
+                            "label": label, "type": "button",
+                            "btn_label": "START",
+                            "action": lambda s=src_key, d=dst_key: self._start_audio_route(s, d),
+                        })
+
         # Audio and display info
         self._rows.extend([
             {"label": "", "type": "section", "value": "AUDIO & DISPLAY"},
-            {"label": "Audio Input", "type": "info", "value": self._get_audio_device()},
+            {"label": "Audio Input", "type": "info",
+             "value": self.app.recorder.device_name},
             {"label": "Display", "type": "info", "value": self._get_resolution()},
             {"label": "Touch Calibration", "type": "button", "btn_label": "CALIBRATE",
              "action": self._run_calibrate},

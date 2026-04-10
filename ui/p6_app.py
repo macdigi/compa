@@ -28,6 +28,7 @@ from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
 from engine.p6_recorder import P6Recorder
 from engine.device_profiles import DeviceManager
+from engine.audio_router import AudioRoute, find_device_index
 from ui.splash import run_splash
 from ui.wizard import run_wizard
 
@@ -192,6 +193,9 @@ class P6App:
         self.atom_sq: AtomSQ | None = None
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
+
+        # ── Audio routing (device-to-device bridge) ──────────────────
+        self.audio_route: AudioRoute | None = None
 
         # ── Recorder ─────────────────────────────────────────────────
         self.recorder = P6Recorder(
@@ -776,6 +780,43 @@ class P6App:
             if hasattr(screen, "on_focus_changed"):
                 screen.on_focus_changed()
 
+    # ── Audio routing ────────────────────────────────────────────────
+
+    def start_audio_route(self, source_key: str, dest_key: str) -> bool:
+        """Start audio routing from one device to another.
+
+        Args:
+            source_key: short_name of source device (e.g. "SP-404")
+            dest_key: short_name of destination device (e.g. "P-6")
+
+        Returns True if route started successfully.
+        """
+        if self.audio_route and self.audio_route.is_active:
+            self.audio_route.stop()
+
+        connected = self.device_manager.connected
+        src_profile = connected.get(source_key)
+        dst_profile = connected.get(dest_key)
+        if not src_profile or not dst_profile:
+            return False
+
+        src_idx = find_device_index(src_profile.audio_hint)
+        dst_idx = find_device_index(dst_profile.audio_hint)
+        if src_idx is None or dst_idx is None:
+            return False
+
+        src_rate = src_profile.supported_sample_rates[0] if src_profile.supported_sample_rates else 44100
+        dst_rate = dst_profile.supported_sample_rates[0] if dst_profile.supported_sample_rates else 44100
+
+        self.audio_route = AudioRoute(src_idx, src_rate, dst_idx, dst_rate)
+        return self.audio_route.start()
+
+    def stop_audio_route(self):
+        """Stop any active audio route."""
+        if self.audio_route:
+            self.audio_route.stop()
+            self.audio_route = None
+
     def switch_screen(self, name: str):
         if name in self.screens and name != self.current_screen_name:
             old_screen = self.screens.get(self.current_screen_name)
@@ -1145,6 +1186,8 @@ class P6App:
 
     def _shutdown(self):
         print("Shutting down Compa...")
+        if self.audio_route and self.audio_route.is_active:
+            self.audio_route.stop()
         if hasattr(self.screens.get("radio", None), '_radio'):
             self.screens["radio"]._radio.shutdown()
         self.recorder.shutdown()
