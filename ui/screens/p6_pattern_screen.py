@@ -23,14 +23,8 @@ class P6PatternScreen:
         # Mode: "grid", "chain", or "seq"
         self._mode = "grid"
 
-        # Grid layout
-        self._grid_cols = 8
-        self._grid_rows = 8
-        self._grid_x = 16
-        self._grid_y = 46
-        self._cell_w = 88
-        self._cell_h = 46
-        self._cell_gap = 4
+        # Grid layout — adapts to device pattern count
+        self._recalc_grid()
 
         # Chain player
         self.chain_player = ChainPlayer()
@@ -50,6 +44,41 @@ class P6PatternScreen:
         # Pi-side step sequencer
         self.sequencer = PiSequencer(num_steps=16)
         if self.app.p6:
+            self.sequencer.set_midi_out(self.app.p6)
+
+    def _recalc_grid(self):
+        """Recalculate grid dimensions based on focused device's pattern count."""
+        dev = getattr(self.app, "device", None)
+        self._pattern_count = getattr(dev, "pattern_count", 64) if dev else 64
+        if self._pattern_count <= 0:
+            self._pattern_count = 64
+
+        if self._pattern_count <= 16:
+            self._grid_cols = 4
+            self._grid_rows = 4
+            self._cell_w = 170
+            self._cell_h = 80
+        elif self._pattern_count <= 32:
+            self._grid_cols = 8
+            self._grid_rows = 4
+            self._cell_w = 88
+            self._cell_h = 80
+        else:
+            self._grid_cols = 8
+            self._grid_rows = 8
+            self._cell_w = 88
+            self._cell_h = 46
+
+        self._grid_x = 16
+        self._grid_y = 46
+        self._cell_gap = 4
+
+    def on_focus_changed(self):
+        """Called when the focused device changes — rebuild grid + re-wire MIDI."""
+        self._recalc_grid()
+        # Re-wire chain player and sequencer to new focused device
+        if self.app.p6:
+            self.chain_player.on_pattern_change = self.app.p6.send_program_change
             self.sequencer.set_midi_out(self.app.p6)
 
     def _load_pattern_names(self):
@@ -123,7 +152,7 @@ class P6PatternScreen:
                 self._chain_scroll = min(max_scroll, self._chain_scroll + 1)
 
     def _handle_grid_click(self, mx, my):
-        for i in range(64):
+        for i in range(self._pattern_count):
             rect = self._cell_rect(i)
             if rect.collidepoint(mx, my):
                 self._select_pattern(i)
@@ -258,7 +287,7 @@ class P6PatternScreen:
     def on_down(self):
         if self.app.p6:
             current = self.app.p6.state.active_pattern
-            self._select_pattern(min(63, current + self._grid_cols))
+            self._select_pattern(min(self._pattern_count - 1, current + self._grid_cols))
 
     def update(self):
         pass
@@ -307,7 +336,7 @@ class P6PatternScreen:
             self._grid_rows * (self._cell_h + self._cell_gap) + 8)
         theme.draw_panel(surface, grid_panel, border=True)
 
-        for i in range(64):
+        for i in range(self._pattern_count):
             rect = self._cell_rect(i)
             is_active = (i == active)
 
@@ -416,8 +445,9 @@ class P6PatternScreen:
             surface.blit(surf, (300, btn_y + 8))
 
         # Hint
+        dev_name = self.app.device_name
         surf = f_small.render(
-            "Tap grid to toggle notes | Triggers P-6 pads via MIDI (SYNC=USB)",
+            f"Tap grid to toggle notes | Triggers {dev_name} pads via MIDI",
             True, theme.TEXT_DIM)
         surface.blit(surf, (16, btn_y + 40))
 

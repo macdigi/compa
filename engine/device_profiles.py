@@ -325,11 +325,18 @@ def build_cc_lookup(cc_map: dict[str, list[MidiCC]]) -> dict[int, tuple[str, str
 # ── Device Manager ───────────────────────────────────────────────────────
 
 class DeviceManager:
-    """Registry of device profiles + USB auto-detection."""
+    """Registry of device profiles + multi-device USB auto-detection.
+
+    Detects ALL connected devices simultaneously and provides a focus
+    mechanism to select which device the UI is currently controlling.
+    """
 
     def __init__(self):
         self._profiles: dict[str, DeviceProfile] = {}
         self._active_device: DeviceProfile | None = None
+        # Multi-device state
+        self._connected: dict[str, DeviceProfile] = {}  # short_name -> profile
+        self._focus_key: str | None = None
         self._register_builtin_profiles()
 
     # ── Built-in profiles ────────────────────────────────────────────
@@ -346,41 +353,102 @@ class DeviceManager:
         self._profiles[profile.short_name] = profile
 
     def detect(self) -> DeviceProfile | None:
-        """Scan USB bus, match against registered profiles, activate best match.
+        """Scan USB bus, match ALL registered profiles, activate first.
 
+        Populates `connected` dict with every matched device.
         Falls back to generic USB audio if no known device is found but
-        *some* USB audio interface is present.  Returns None if nothing at
-        all is connected.
+        *some* USB audio interface is present.  Returns the focused
+        device profile (first match) or None.
         """
         from engine.device_detect import scan_usb_devices, find_audio_device
 
         usb_devices = scan_usb_devices()
         log.info("USB scan found %d device(s)", len(usb_devices))
 
-        # Try each profile against the bus
+        self._connected.clear()
+
+        # Try each profile against the bus — match ALL, not just first
         for profile in self._profiles.values():
             for dev in usb_devices:
                 if (dev["vendor"] == profile.usb_vendor
                         and dev["product"] in profile.usb_products):
                     log.info("Matched device: %s (vendor=%04x product=%04x)",
                              profile.name, dev["vendor"], dev["product"])
-                    self._active_device = profile
-                    return profile
+                    self._connected[profile.short_name] = profile
+                    break  # Don't double-match same profile
+
+        if self._connected:
+            # Focus on first matched device
+            first_key = next(iter(self._connected))
+            self._focus_key = first_key
+            self._active_device = self._connected[first_key]
+            if len(self._connected) > 1:
+                names = ", ".join(self._connected.keys())
+                log.info("Multi-device hub: %s (focus: %s)", names, first_key)
+            return self._active_device
 
         # No known device — look for any USB audio interface
         audio = find_audio_device("")
         if audio is not None:
             log.info("No known device matched; using generic USB audio fallback")
             generic = _make_generic_usb_audio_profile()
+            self._connected[generic.short_name] = generic
+            self._focus_key = generic.short_name
             self._active_device = generic
             return generic
 
         log.warning("No USB audio device detected")
         return None
 
+    # ── Multi-device focus ──────────────────────────────────────────
+
+    @property
+    def connected(self) -> dict[str, DeviceProfile]:
+        """All currently connected device profiles (keyed by short_name)."""
+        return dict(self._connected)
+
+    @property
+    def focus(self) -> DeviceProfile | None:
+        """The currently focused device profile."""
+        if self._focus_key:
+            return self._connected.get(self._focus_key)
+        return None
+
+    @property
+    def focus_key(self) -> str | None:
+        """Short name of the focused device (e.g. 'P-6', 'SP-404')."""
+        return self._focus_key
+
+    def set_focus(self, short_name: str) -> bool:
+        """Switch focus to a connected device by short_name.
+
+        Returns True if focus changed, False if device not connected.
+        """
+        if short_name not in self._connected:
+            log.warning("Cannot focus '%s' — not connected", short_name)
+            return False
+        if short_name == self._focus_key:
+            return False  # Already focused
+        self._focus_key = short_name
+        self._active_device = self._connected[short_name]
+        log.info("Focus switched to: %s", short_name)
+        return True
+
+    def cycle_focus(self) -> str | None:
+        """Cycle focus to the next connected device. Returns new focus key."""
+        if len(self._connected) < 2:
+            return self._focus_key
+        keys = list(self._connected.keys())
+        idx = keys.index(self._focus_key) if self._focus_key in keys else -1
+        next_idx = (idx + 1) % len(keys)
+        self.set_focus(keys[next_idx])
+        return self._focus_key
+
+    # ── Backward-compatible single-device API ────────────────────────
+
     @property
     def active(self) -> DeviceProfile | None:
-        """Currently active device profile (None if nothing detected)."""
+        """Currently active (focused) device profile."""
         return self._active_device
 
     @active.setter

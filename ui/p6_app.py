@@ -170,11 +170,16 @@ class P6App:
         # ── Auto-record setting ─────────────────────────────────────
         self.auto_record = self.config.get("P6_AUTO_RECORD", "1") == "1"
 
-        # ── Device detection ─────────────────────────────────────────
+        # ── Device detection (multi-device) ──────────────────────────
         self.device_manager = DeviceManager()
         detected = self.device_manager.detect()
         if detected:
-            print(f"Device detected: {detected.name}", flush=True)
+            connected = self.device_manager.connected
+            if len(connected) > 1:
+                names = ", ".join(connected.keys())
+                print(f"Multi-device hub: {names} (focus: {self.device_manager.focus_key})", flush=True)
+            else:
+                print(f"Device detected: {detected.name}", flush=True)
         else:
             print("No USB device detected — running in offline mode", flush=True)
 
@@ -185,7 +190,7 @@ class P6App:
 
         # ── MIDI devices (init before screens so state objects exist) ──
         self.atom_sq: AtomSQ | None = None
-        self.p6: P6Midi | None = None
+        self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
         # ── Recorder ─────────────────────────────────────────────────
@@ -260,12 +265,16 @@ class P6App:
 
         # ── Status ───────────────────────────────────────────────────
         print(f"ATOM SQ: {'connected' if self.atom_sq else 'not found'}")
-        print(f"{self.device_name}: {'connected' if self.p6 else 'not found'}")
+        for sn, conn in self._midi_connections.items():
+            focused = " [FOCUS]" if sn == self.device_manager.focus_key else ""
+            print(f"  {sn}: MIDI {'connected' if conn.connected else 'failed'}{focused}")
+        if not self._midi_connections:
+            print("  No MIDI devices found")
         print(f"Recorder: {'ready' if self.recorder.available else 'no audio device'}")
         print(f"Auto-record: {'ON' if self.auto_record else 'OFF'}")
 
     def _init_midi(self):
-        """Detect and connect ATOM SQ and target device."""
+        """Detect and connect ATOM SQ and ALL target devices."""
         # ATOM SQ
         try:
             midi_in, midi_out = find_atom_sq_ports()
@@ -275,29 +284,31 @@ class P6App:
         except Exception as e:
             print(f"ATOM SQ init failed: {e}")
 
-        # Target device — use profile midi_hint if available, fall back to config
-        midi_hint = self.config["P6_MIDI_PORT_HINT"]
-        if self.device and self.device.midi_hint:
-            midi_hint = self.device.midi_hint
-        try:
-            midi_in, midi_out = find_p6_ports(midi_hint)
-            if midi_in is not None or midi_out is not None:
-                self.p6 = P6Midi(midi_in, midi_out)
-                # Wire transport for auto-record
-                self.p6.on_transport = self._on_p6_transport
-                print(f"{self.device_name} MIDI connected")
-        except Exception as e:
-            print(f"{self.device_name} MIDI init failed: {e}")
+        # Connect MIDI for ALL detected devices
+        for short_name, profile in self.device_manager.connected.items():
+            hint = profile.midi_hint
+            if not hint:
+                continue  # No MIDI for this device (e.g. generic USB audio)
+            try:
+                midi_in, midi_out = find_p6_ports(hint)
+                if midi_in is not None or midi_out is not None:
+                    conn = P6Midi(midi_in, midi_out, profile=profile)
+                    # Wire transport for auto-record on ALL devices
+                    conn.on_transport = self._on_p6_transport
+                    self._midi_connections[short_name] = conn
+                    print(f"{profile.name} MIDI connected")
+            except Exception as e:
+                print(f"{profile.name} MIDI init failed: {e}")
 
-        # Router (needs both ATOM SQ and P-6)
+        # Router (needs both ATOM SQ and focused device)
         if self.atom_sq and self.p6:
             self.router = MidiRouter(self.atom_sq, self.p6)
             self.router.set_ui_button_callback(self._on_ui_button)
             self.router.on_transport = self._on_atomsq_transport
-            print("MIDI router active: ATOM SQ → P-6")
+            print(f"MIDI router active: ATOM SQ → {self.device_name}")
         elif self.atom_sq:
             self.atom_sq.on_button = self._on_atomsq_button_fallback
-            print("ATOM SQ connected but P-6 not found — navigation only")
+            print("ATOM SQ connected but no device found — navigation only")
 
     # ── Evdev touch input (for SPI LCD / FB mode) ─────────────────────
 
@@ -707,15 +718,63 @@ class P6App:
         return self.screens[self.current_screen_name]
 
     @property
+    def p6(self) -> "P6Midi | None":
+        """MIDI connection to the focused device.
+
+        This property replaces the old ``self.p6`` attribute.  All 49+
+        references across screens continue to work because they read
+        ``self.app.p6`` which now resolves to the focused device.
+        """
+        key = self.device_manager.focus_key
+        return self._midi_connections.get(key) if key else None
+
+    @property
     def device(self):
-        """Active DeviceProfile (or None if no device detected)."""
+        """Active (focused) DeviceProfile (or None)."""
         return self.device_manager.active
 
     @property
     def device_name(self) -> str:
-        """Short display name for the connected device."""
+        """Short display name for the focused device."""
         d = self.device_manager.active
         return d.short_name if d else "---"
+
+    def switch_focus(self, short_name: str) -> bool:
+        """Switch which device the UI controls.
+
+        Updates DeviceManager focus, rebuilds MIDI router, and notifies
+        the current screen via ``on_focus_changed()`` if it supports it.
+        """
+        if not self.device_manager.set_focus(short_name):
+            return False
+
+        print(f"Focus → {short_name}", flush=True)
+
+        # Rewire MIDI router to focused device
+        if self.atom_sq and self.p6:
+            self.router = MidiRouter(self.atom_sq, self.p6)
+            self.router.set_ui_button_callback(self._on_ui_button)
+            self.router.on_transport = self._on_atomsq_transport
+
+        # Notify current screen
+        screen = self.current_screen
+        if hasattr(screen, "on_focus_changed"):
+            screen.on_focus_changed()
+
+        return True
+
+    def cycle_focus(self):
+        """Cycle to the next connected device (for nav bar tap)."""
+        new_key = self.device_manager.cycle_focus()
+        if new_key:
+            print(f"Focus → {new_key}", flush=True)
+            if self.atom_sq and self.p6:
+                self.router = MidiRouter(self.atom_sq, self.p6)
+                self.router.set_ui_button_callback(self._on_ui_button)
+                self.router.on_transport = self._on_atomsq_transport
+            screen = self.current_screen
+            if hasattr(screen, "on_focus_changed"):
+                screen.on_focus_changed()
 
     def switch_screen(self, name: str):
         if name in self.screens and name != self.current_screen_name:
@@ -873,6 +932,13 @@ class P6App:
                 if settings_rect.collidepoint(event.pos):
                     self.switch_screen("settings")
                     continue
+
+                # Device tap-to-switch (multi-device nav bar indicator)
+                if hasattr(self, "_device_tap_rects"):
+                    for tap_rect, short_name in self._device_tap_rects:
+                        if tap_rect.collidepoint(event.pos):
+                            self.switch_focus(short_name)
+                            break
 
             # Nav bar
             nav_handled = False
@@ -1033,21 +1099,49 @@ class P6App:
             self.screen.blit(surf, surf.get_rect(center=badge.center))
             x += 56
 
-        # Right side: connection status with dots
+        # Right side: multi-device connection status
+        # Show ALL connected devices; focused one is bright, others dim.
+        # Store rects for tap-to-switch handling.
         rx = theme.SCREEN_WIDTH - 10
-        dev_label = self.device_name
-        if self.p6 and self.p6.connected:
-            surf = f_tiny.render(dev_label, True, theme.GREEN)
+        self._device_tap_rects: list[tuple[pygame.Rect, str]] = []
+        connected = self.device_manager.connected
+        focus_key = self.device_manager.focus_key
+
+        for short_name in reversed(list(connected.keys())):
+            midi_conn = self._midi_connections.get(short_name)
+            is_focused = (short_name == focus_key)
+            is_connected = midi_conn and midi_conn.connected
+
+            if is_focused and is_connected:
+                color = theme.GREEN
+            elif is_focused:
+                color = theme.RED
+            elif is_connected:
+                color = theme.TEXT_DIM
+            else:
+                color = (80, 40, 40)
+
+            surf = f_tiny.render(short_name, True, color)
             rx -= surf.get_width()
             self.screen.blit(surf, (rx, status_y))
-            pygame.draw.circle(self.screen, theme.GREEN, (rx - 8, status_y + 7), 3)
-            rx -= 16
-        else:
-            surf = f_tiny.render(dev_label, True, theme.RED)
-            rx -= surf.get_width()
-            self.screen.blit(surf, (rx, status_y))
-            pygame.draw.circle(self.screen, theme.RED, (rx - 8, status_y + 7), 3, 1)
-            rx -= 16
+
+            # Connection dot
+            dot_x = rx - 8
+            if is_connected:
+                pygame.draw.circle(self.screen, color, (dot_x, status_y + 7), 3)
+            else:
+                pygame.draw.circle(self.screen, color, (dot_x, status_y + 7), 3, 1)
+
+            # Focus bracket
+            if is_focused and len(connected) > 1:
+                bracket_rect = pygame.Rect(rx - 13, status_y - 2, surf.get_width() + 16, 16)
+                pygame.draw.rect(self.screen, color, bracket_rect, 1, border_radius=3)
+
+            # Store tap rect for event handling
+            tap_rect = pygame.Rect(dot_x - 4, status_y - 4, surf.get_width() + 20, 20)
+            self._device_tap_rects.append((tap_rect, short_name))
+
+            rx = dot_x - 14  # gap between devices
 
     def _shutdown(self):
         print("Shutting down Compa...")
@@ -1058,8 +1152,13 @@ class P6App:
             pass  # Router doesn't need shutdown
         if self.atom_sq:
             self.atom_sq.shutdown()
-        if self.p6:
-            self.p6.shutdown()
+        # Shut down ALL MIDI connections
+        for sn, conn in self._midi_connections.items():
+            try:
+                conn.shutdown()
+            except Exception:
+                pass
+        self._midi_connections.clear()
         pygame.quit()
 
 

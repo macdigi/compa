@@ -94,14 +94,47 @@ class P6SettingsScreen:
              "action_inc": lambda: self._set_threshold(self._get_threshold() + 5)},
             {"label": "Splash Screen", "type": "toggle", "value": not splash_off,
              "action": self._toggle_splash},
-            {"label": "Audio Device", "type": "info", "value": self._get_audio_device()},
+            {"label": "", "type": "section", "value": "CONNECTED DEVICES"},
+        ]
+
+        # Dynamic device rows
+        connected = self.app.device_manager.connected
+        focus_key = self.app.device_manager.focus_key
+        for short_name, profile in connected.items():
+            midi_conn = self.app._midi_connections.get(short_name)
+            is_focused = (short_name == focus_key)
+            midi_status = "MIDI OK" if (midi_conn and midi_conn.connected) else "No MIDI"
+            audio_info = f"{profile.audio_in_channels}in/{profile.audio_out_channels}out"
+            rates = "/".join(str(r // 1000) + "k" for r in profile.supported_sample_rates)
+            status = f"{midi_status} | {audio_info} {rates}"
+
+            if is_focused:
+                self._rows.append({
+                    "label": f"► {profile.name}", "type": "info",
+                    "value": f"FOCUSED  {status}",
+                })
+            else:
+                self._rows.append({
+                    "label": f"  {profile.name}", "type": "button",
+                    "btn_label": "FOCUS",
+                    "action": lambda sn=short_name: self.app.switch_focus(sn),
+                    "value": status,
+                })
+
+        if not connected:
+            self._rows.append({"label": "  No devices", "type": "info", "value": "—"})
+
+        # Audio and display info
+        self._rows.extend([
+            {"label": "", "type": "section", "value": "AUDIO & DISPLAY"},
+            {"label": "Audio Input", "type": "info", "value": self._get_audio_device()},
             {"label": "Display", "type": "info", "value": self._get_resolution()},
             {"label": "Touch Calibration", "type": "button", "btn_label": "CALIBRATE",
              "action": self._run_calibrate},
-            {"label": "P-6 Status", "type": "info", "value": self._get_p6_status()},
-            {"label": "About", "type": "info",
+            {"label": "", "type": "section", "value": "ABOUT"},
+            {"label": "Version", "type": "info",
              "value": "Compa v1.0 by RARE DATA / raredata.net"},
-        ]
+        ])
         self._content_height = len(self._rows) * self._row_height + 80
 
     # ── Event handling ──────────────────────────────────────────────
@@ -226,11 +259,22 @@ class P6SettingsScreen:
                 pygame.draw.rect(surface, theme.BG,
                                  (8, ry, theme.SCREEN_WIDTH - 16, row_h))
 
+            rtype = row["type"]
+
+            # Section headers
+            if rtype == "section":
+                pygame.draw.line(surface, theme.BORDER, (20, ry + row_h // 2),
+                                (theme.SCREEN_WIDTH - 20, ry + row_h // 2))
+                sect_surf = f_tiny.render(row["value"], True, theme.ACCENT)
+                bg_rect = sect_surf.get_rect(left=30, centery=ry + row_h // 2)
+                bg_rect.inflate_ip(12, 4)
+                pygame.draw.rect(surface, theme.BG, bg_rect)
+                surface.blit(sect_surf, (30, ry + (row_h - sect_surf.get_height()) // 2))
+                continue
+
             # Label
             label_surf = f_med.render(row["label"], True, theme.TEXT)
             surface.blit(label_surf, (20, ry + (row_h - label_surf.get_height()) // 2))
-
-            rtype = row["type"]
 
             if rtype == "toggle":
                 # ON/OFF toggle button

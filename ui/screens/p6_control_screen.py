@@ -83,6 +83,32 @@ class P6ControlScreen:
         self._build_tab_buttons()
         self._build_knobs()
 
+    def on_focus_changed(self):
+        """Called when the focused device changes — rebuild everything."""
+        self.rebuild_for_device()
+
+    def rebuild_for_device(self):
+        """Re-resolve CC map, tabs, and knobs for the focused device."""
+        dev = getattr(self.app, "device", None)
+        if dev and dev.cc_map:
+            self._cc_map = cc_map_to_legacy(dev.cc_map)
+            self._cc_lookup = build_cc_lookup(dev.cc_map)
+            self._tabs = list(dev.cc_map.keys()) + ["clock"]
+        else:
+            self._cc_map = P6_CC_MAP
+            self._cc_lookup = CC_LOOKUP
+            self._tabs = _DEFAULT_TABS + ["clock"]
+
+        self._cc_to_tab = {}
+        for i, tab in enumerate(self._tabs):
+            for cc, *_ in self._cc_map.get(tab, []):
+                self._cc_to_tab[cc] = i
+
+        self._current_tab = 0
+        self._last_cc = -1
+        self._build_tab_buttons()
+        self._build_knobs()
+
     def _build_tab_buttons(self):
         """Create tab buttons across the top — adapts to device categories."""
         self._tab_buttons = []
