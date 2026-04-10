@@ -301,8 +301,10 @@ class P6Recorder:
         name = f"p6_{session_name + '_' if session_name else ''}{ts}.wav"
         filepath = os.path.join(self._recording_dir, name)
 
-        # Store metadata for writing on stop
+        # Store metadata for writing on stop — auto-tag source device
         self._record_metadata = metadata or {}
+        self._record_metadata["source_device"] = self.device_name
+        self._record_metadata["sample_rate"] = self._sample_rate
 
         try:
             writer = sf.SoundFile(
@@ -537,6 +539,14 @@ class P6Recorder:
                               channels=P6_CHANNELS, subtype="PCM_24", format="WAV") as f:
                 f.write(ordered)
             duration = len(ordered) / self._sample_rate
+            # Write metadata sidecar for recall captures
+            meta = {
+                "source_device": self.device_name,
+                "sample_rate": self._sample_rate,
+                "type": "recall",
+                "duration": round(duration, 2),
+            }
+            self.save_metadata(filepath, meta)
             log.info("Recall saved: %s (%.1fs)", filepath, duration)
             return filepath
         except Exception as e:

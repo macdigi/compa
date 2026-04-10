@@ -7,6 +7,7 @@ sample manager, and recorder for the Roland AIRA Compact P-6.
 import os
 import signal
 import sys
+import time
 import pygame
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -56,6 +57,21 @@ def load_config() -> dict:
                     config[key.strip()] = val.strip()
     config["P6_SAMPLE_RATE"] = int(config["P6_SAMPLE_RATE"])
     return config
+
+
+def get_device_config(config: dict, key: str, device_short_name: str = "") -> str:
+    """Get a config value with device-specific override support.
+
+    Checks ``{DEVICE}_{KEY}`` first (e.g. ``SP404_REC_THRESHOLD``),
+    then falls back to the global ``{KEY}``.
+    """
+    if device_short_name:
+        # Normalize: "SP-404" → "SP404", "P-6" → "P6"
+        prefix = device_short_name.replace("-", "").replace(" ", "")
+        device_key = f"{prefix}_{key}"
+        if device_key in config:
+            return config[device_key]
+    return config.get(key, "")
 
 
 def save_config_key(key: str, value: str) -> None:
@@ -817,6 +833,141 @@ class P6App:
             self.audio_route.stop()
             self.audio_route = None
 
+    # ── MIDI clock relay ─────────────────────────────────────────────
+
+    def start_clock_relay(self, source_key: str, dest_key: str) -> bool:
+        """Relay MIDI clock from one device to another.
+
+        The source device's clock ticks (0xF8) and transport messages
+        (start/stop/continue) are forwarded to the destination device.
+        """
+        src = self._midi_connections.get(source_key)
+        dst = self._midi_connections.get(dest_key)
+        if not src or not dst:
+            return False
+
+        # Wire the source's clock tick to forward to destination
+        def _relay_tick():
+            if dst._out:
+                dst._out.send_message([0xF8])
+
+        def _relay_transport(state):
+            if state == "start" and dst._out:
+                dst._out.send_message([0xFA])
+            elif state == "stop" and dst._out:
+                dst._out.send_message([0xFC])
+            elif state == "continue" and dst._out:
+                dst._out.send_message([0xFB])
+
+        # Store original callbacks
+        self._clock_relay_source = source_key
+        self._clock_relay_dest = dest_key
+        self._clock_relay_orig_tick = src.on_clock_tick
+        self._clock_relay_orig_transport = src.on_transport
+
+        # Chain callbacks: relay + original
+        orig_tick = src.on_clock_tick
+        orig_transport = src.on_transport
+
+        def _combined_tick():
+            _relay_tick()
+            if orig_tick:
+                orig_tick()
+
+        def _combined_transport(state):
+            _relay_transport(state)
+            if orig_transport:
+                orig_transport(state)
+
+        src.on_clock_tick = _combined_tick
+        src.on_transport = _combined_transport
+        self._clock_relay_active = True
+        print(f"Clock relay: {source_key} → {dest_key}", flush=True)
+        return True
+
+    def stop_clock_relay(self):
+        """Stop the MIDI clock relay and restore original callbacks."""
+        if not getattr(self, "_clock_relay_active", False):
+            return
+        src = self._midi_connections.get(getattr(self, "_clock_relay_source", ""))
+        if src:
+            src.on_clock_tick = getattr(self, "_clock_relay_orig_tick", None)
+            src.on_transport = getattr(self, "_clock_relay_orig_transport", None)
+        self._clock_relay_active = False
+        print("Clock relay stopped", flush=True)
+
+    @property
+    def clock_relay_active(self) -> bool:
+        return getattr(self, "_clock_relay_active", False)
+
+    # ── Hot-plug detection ───────────────────────────────────────────
+
+    def _check_hotplug(self):
+        """Periodic USB rescan to detect newly connected/disconnected devices."""
+        from engine.device_detect import scan_usb_devices
+
+        try:
+            usb_devices = scan_usb_devices()
+        except Exception:
+            return
+
+        current_keys = set(self.device_manager.connected.keys())
+        found_keys = set()
+
+        # Check which registered profiles match current USB bus
+        for profile in self.device_manager.profiles.values():
+            for dev in usb_devices:
+                if (dev["vendor"] == profile.usb_vendor
+                        and dev["product"] in profile.usb_products):
+                    found_keys.add(profile.short_name)
+                    break
+
+        # Detect new devices
+        new_devices = found_keys - current_keys
+        for short_name in new_devices:
+            profile = self.device_manager.get_profile(short_name)
+            if not profile:
+                continue
+            self.device_manager._connected[short_name] = profile
+            if self.device_manager._focus_key is None:
+                self.device_manager.set_focus(short_name)
+            # Try to open MIDI
+            if profile.midi_hint:
+                try:
+                    midi_in, midi_out = find_p6_ports(profile.midi_hint)
+                    if midi_in is not None or midi_out is not None:
+                        conn = P6Midi(midi_in, midi_out, profile=profile)
+                        conn.on_transport = self._on_p6_transport
+                        self._midi_connections[short_name] = conn
+                        print(f"Hot-plug: {profile.name} connected", flush=True)
+                except Exception as e:
+                    print(f"Hot-plug MIDI failed for {short_name}: {e}", flush=True)
+
+        # Detect removed devices
+        removed_devices = current_keys - found_keys
+        for short_name in removed_devices:
+            conn = self._midi_connections.pop(short_name, None)
+            if conn:
+                try:
+                    conn.shutdown()
+                except Exception:
+                    pass
+            self.device_manager._connected.pop(short_name, None)
+            print(f"Hot-plug: {short_name} disconnected", flush=True)
+
+            # If focused device was removed, switch to another
+            if short_name == self.device_manager.focus_key:
+                remaining = list(self.device_manager._connected.keys())
+                if remaining:
+                    self.device_manager.set_focus(remaining[0])
+                    screen = self.current_screen
+                    if hasattr(screen, "on_focus_changed"):
+                        screen.on_focus_changed()
+                    print(f"Focus auto-switched to {remaining[0]}", flush=True)
+                else:
+                    self.device_manager._focus_key = None
+                    self.device_manager._active_device = None
+
     def switch_screen(self, name: str):
         if name in self.screens and name != self.current_screen_name:
             old_screen = self.screens.get(self.current_screen_name)
@@ -995,6 +1146,12 @@ class P6App:
             self.current_screen.handle_event(event)
 
     def _update(self):
+        # Hot-plug: periodic USB rescan (every 5 seconds)
+        now = time.monotonic()
+        if now - getattr(self, "_last_usb_scan", 0) > 5.0:
+            self._last_usb_scan = now
+            self._check_hotplug()
+
         # Check for remote screenshot request
         if os.path.exists("/tmp/compa_screenshot_request"):
             os.remove("/tmp/compa_screenshot_request")

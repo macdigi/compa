@@ -155,17 +155,31 @@ class P6SessionScreen:
         surf = f_small.render(f"{dev_name} Companion", True, theme.TEXT_DIM)
         surface.blit(surf, (240, y + 20))
 
-        # Connection status (right of logo)
-        p6_connected = self.app.p6 and self.app.p6.connected
+        # Connection status — show ALL connected devices
         status_x = 240
-        status_y = y + 40
-        if p6_connected:
-            pygame.draw.circle(surface, theme.GREEN, (status_x + 5, status_y + 7), 4)
-            surf = f_small.render(f"{dev_name} connected", True, theme.GREEN)
-        else:
-            pygame.draw.circle(surface, theme.RED, (status_x + 5, status_y + 7), 4, 1)
-            surf = f_small.render(f"{dev_name} not found", True, theme.RED)
-        surface.blit(surf, (status_x + 14, status_y))
+        status_y = y + 36
+        connected = self.app.device_manager.connected
+        focus_key = self.app.device_manager.focus_key
+
+        for short_name, profile in connected.items():
+            midi_conn = self.app._midi_connections.get(short_name)
+            is_focused = (short_name == focus_key)
+            is_connected = midi_conn and midi_conn.connected
+
+            if is_connected:
+                color = theme.GREEN if is_focused else theme.TEXT_DIM
+                pygame.draw.circle(surface, color, (status_x + 5, status_y + 7), 4)
+                label = f"{profile.name}"
+                if is_focused:
+                    label += " [FOCUS]"
+            else:
+                color = theme.RED
+                pygame.draw.circle(surface, color, (status_x + 5, status_y + 7), 4, 1)
+                label = f"{profile.name} — not found"
+
+            surf = f_small.render(label, True, color)
+            surface.blit(surf, (status_x + 14, status_y))
+            status_y += 14
 
         y += 62
         pygame.draw.line(surface, theme.BORDER, (12, y), (theme.SCREEN_WIDTH - 12, y))
@@ -175,46 +189,97 @@ class P6SessionScreen:
         left_x = 16
         col_y = y
 
-        # Transport + BPM + Pattern — compact row
-        theme.draw_panel(surface, pygame.Rect(10, col_y - 2, 400, 90))
+        # Transport + BPM + Pattern — show all connected devices
+        connected = self.app.device_manager.connected
+        num_devices = len([sn for sn in connected if sn in self.app._midi_connections])
+        panel_h = 90 if num_devices <= 1 else 58 + num_devices * 30
+        theme.draw_panel(surface, pygame.Rect(10, col_y - 2, 400, panel_h))
 
-        if self.app.p6 and self.app.p6.state.playing:
-            pygame.draw.circle(surface, theme.GREEN, (left_x + 6, col_y + 10), 5)
-            surf = f_med.render("PLAYING", True, theme.GREEN)
+        if num_devices > 1:
+            # Multi-device: show a compact row per device
+            for short_name, profile in connected.items():
+                midi = self.app._midi_connections.get(short_name)
+                if not midi:
+                    continue
+                is_focused = (short_name == self.app.device_manager.focus_key)
+
+                # Transport dot
+                if midi.state.playing:
+                    pygame.draw.circle(surface, theme.GREEN, (left_x + 6, col_y + 8), 4)
+                    t_text = "PLAY"
+                    t_color = theme.GREEN
+                else:
+                    pygame.draw.circle(surface, theme.TEXT_DIM, (left_x + 6, col_y + 8), 3, 1)
+                    t_text = "STOP"
+                    t_color = theme.TEXT_DIM
+
+                # Device name (bold if focused)
+                name_color = theme.TEXT if is_focused else theme.TEXT_DIM
+                surf = f_med.render(short_name, True, name_color)
+                surface.blit(surf, (left_x + 16, col_y))
+
+                # BPM
+                bpm = midi.state.bpm
+                surf = f_large.render(f"{bpm:.0f}", True, theme.TEXT)
+                surface.blit(surf, (110, col_y - 2))
+                surf = f_small.render("bpm", True, theme.TEXT_DIM)
+                surface.blit(surf, (110 + 45, col_y + 6))
+
+                # Pattern
+                pat = midi.state.active_pattern + 1
+                pat_max = getattr(profile, "pattern_count", 64)
+                surf = f_med.render(f"Ptn {pat}/{pat_max}", True,
+                                    theme.ACCENT if is_focused else theme.TEXT_DIM)
+                surface.blit(surf, (220, col_y))
+
+                # Transport state
+                surf = f_small.render(t_text, True, t_color)
+                surface.blit(surf, (330, col_y + 2))
+
+                col_y += 26
+            col_y += 4
         else:
-            pygame.draw.circle(surface, theme.TEXT_DIM, (left_x + 6, col_y + 10), 4, 1)
-            surf = f_med.render("STOPPED", True, theme.TEXT_DIM)
-        surface.blit(surf, (left_x + 16, col_y))
+            # Single device: original big BPM layout
+            if self.app.p6 and self.app.p6.state.playing:
+                pygame.draw.circle(surface, theme.GREEN, (left_x + 6, col_y + 10), 5)
+                surf = f_med.render("PLAYING", True, theme.GREEN)
+            else:
+                pygame.draw.circle(surface, theme.TEXT_DIM, (left_x + 6, col_y + 10), 4, 1)
+                surf = f_med.render("STOPPED", True, theme.TEXT_DIM)
+            surface.blit(surf, (left_x + 16, col_y))
 
-        # Recording indicator
+            if self.app.recorder.is_recording:
+                dur = self.app.recorder.duration
+                surf = f_med.render(f"REC {dur:.0f}s", True, theme.RED)
+                surface.blit(surf, (140, col_y))
+            col_y += 22
+
+            bpm = self.app.p6.state.bpm if self.app.p6 else 120.0
+            f_hero = theme.font("hero")
+            surf = f_hero.render(f"{bpm:.0f}", True, theme.TEXT)
+            surface.blit(surf, (left_x, col_y))
+            bpm_w = surf.get_width()
+            surf = f_med.render("BPM", True, theme.TEXT_DIM)
+            surface.blit(surf, (left_x + bpm_w + 6, col_y + 14))
+
+            pattern = self.app.p6.state.active_pattern if self.app.p6 else 0
+            surf = f_large.render(f"Pattern {pattern + 1}", True, theme.ACCENT)
+            surface.blit(surf, (220, col_y + 8))
+            col_y += 50
+
+        # Recording indicator + auto-record status
         if self.app.recorder.is_recording:
             dur = self.app.recorder.duration
-            surf = f_med.render(f"REC {dur:.0f}s", True, theme.RED)
-            surface.blit(surf, (140, col_y))
-        col_y += 22
-
-        # BPM big + Pattern
-        bpm = self.app.p6.state.bpm if self.app.p6 else 120.0
-        f_hero = theme.font("hero")
-        surf = f_hero.render(f"{bpm:.0f}", True, theme.TEXT)
-        surface.blit(surf, (left_x, col_y))
-        bpm_w = surf.get_width()
-        surf = f_med.render("BPM", True, theme.TEXT_DIM)
-        surface.blit(surf, (left_x + bpm_w + 6, col_y + 14))
-
-        pattern = self.app.p6.state.active_pattern if self.app.p6 else 0
-        surf = f_large.render(f"Pattern {pattern + 1}", True, theme.ACCENT)
-        surface.blit(surf, (220, col_y + 8))
-
-        col_y += 50
-        # Auto-record indicator
-        if self.app.auto_record:
+            src = self.app.recorder.device_name
+            surf = f_small.render(f"REC {dur:.0f}s [{src}]", True, theme.RED)
+            surface.blit(surf, (left_x, col_y))
+        elif self.app.auto_record:
             surf = f_small.render("AUTO-REC ON", True, theme.GREEN)
             surface.blit(surf, (left_x, col_y))
         recall_secs = self.app.recorder.recall_seconds_available
         if recall_secs > 0:
             surf = f_small.render(f"Buffer: {int(recall_secs)}s", True, theme.ACCENT)
-            surface.blit(surf, (140, col_y))
+            surface.blit(surf, (200, col_y))
         col_y += 20
 
         # ── Resample calc — compact 2-line ───────────────────────────

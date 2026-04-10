@@ -65,6 +65,13 @@ class P6SettingsScreen:
         self.app.config["SKIP_SPLASH"] = new_val
         save_config_key("SKIP_SPLASH", new_val)
 
+    def _start_clock_relay(self, source_key: str, dest_key: str):
+        if self.app.start_clock_relay(source_key, dest_key):
+            print(f"Clock relay started: {source_key} → {dest_key}", flush=True)
+
+    def _stop_clock_relay(self):
+        self.app.stop_clock_relay()
+
     def _start_audio_route(self, source_key: str, dest_key: str):
         if self.app.start_audio_route(source_key, dest_key):
             print(f"Audio route started: {source_key} → {dest_key}", flush=True)
@@ -164,6 +171,29 @@ class P6SettingsScreen:
                             "label": label, "type": "button",
                             "btn_label": "START",
                             "action": lambda s=src_key, d=dst_key: self._start_audio_route(s, d),
+                        })
+
+        # MIDI clock relay (only when multiple devices)
+        if len(connected) >= 2:
+            self._rows.append({"label": "", "type": "section", "value": "MIDI CLOCK RELAY"})
+            if self.app.clock_relay_active:
+                src = getattr(self.app, "_clock_relay_source", "?")
+                dst = getattr(self.app, "_clock_relay_dest", "?")
+                self._rows.append({
+                    "label": f"  Clock: {src} → {dst}", "type": "button",
+                    "btn_label": "STOP",
+                    "action": self._stop_clock_relay,
+                })
+            else:
+                keys = list(connected.keys())
+                for src_key in keys:
+                    for dst_key in keys:
+                        if src_key == dst_key:
+                            continue
+                        self._rows.append({
+                            "label": f"  {src_key} → {dst_key}", "type": "button",
+                            "btn_label": "SYNC",
+                            "action": lambda s=src_key, d=dst_key: self._start_clock_relay(s, d),
                         })
 
         # Audio and display info
