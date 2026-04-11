@@ -1360,8 +1360,8 @@ class P6App:
         print("Shutting down Compa...")
         if self.audio_route and self.audio_route.is_active:
             self.audio_route.stop()
-        if self.akai_storage.is_connected:
-            self.akai_storage.unmount_all()
+        # Don't unmount Akai storage on shutdown — leave drives mounted
+        # so they're available immediately on next boot
         if hasattr(self.screens.get("radio", None), '_radio'):
             self.screens["radio"]._radio.shutdown()
         self.recorder.shutdown()

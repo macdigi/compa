@@ -379,6 +379,24 @@ class AkaiStorageManager:
 
     def _mount_partition(self, part_path: str, drive_type: str) -> Optional[MountedDrive]:
         """Mount a partition and identify key directories."""
+        # Determine size first to correct drive_type if needed
+        try:
+            out = subprocess.run(
+                ["lsblk", "-rno", "SIZE", part_path],
+                capture_output=True, text=True, timeout=5)
+            size_str = out.stdout.strip()
+            size_gb = 0.0
+            if "G" in size_str:
+                size_gb = float(size_str.replace("G", ""))
+            elif "T" in size_str:
+                size_gb = float(size_str.replace("T", "")) * 1024
+            if size_gb > 100:
+                drive_type = "internal_ssd"
+            elif size_gb < 1:
+                return None  # Skip tiny partitions
+        except Exception:
+            pass
+
         label = "Internal SSD" if drive_type == "internal_ssd" else "SD Card"
         safe_name = f"Force_{'SSD' if 'ssd' in drive_type else 'SD'}"
         mount_point = os.path.join(MOUNT_BASE, safe_name)
