@@ -32,14 +32,14 @@ THEMES = {
         "knob_fill": (0, 200, 180),
         "pad_active": (0, 200, 180),
     },
-    "p6": {  # Roland P-6 — yellow/gold on black (matches hardware)
-        "accent": (255, 200, 0),
-        "accent_dim": (160, 125, 0),
-        "accent_bright": (255, 225, 60),
-        "nav_active": (255, 200, 0),
-        "border_focus": (255, 210, 30),
-        "knob_fill": (255, 200, 0),
-        "pad_active": (255, 200, 0),
+    "p6": {  # Roland P-6 — bright yellow on black (matches hardware)
+        "accent": (255, 230, 0),
+        "accent_dim": (180, 160, 0),
+        "accent_bright": (255, 245, 80),
+        "nav_active": (255, 230, 0),
+        "border_focus": (255, 240, 40),
+        "knob_fill": (255, 230, 0),
+        "pad_active": (255, 230, 0),
     },
     "force": {  # Akai Force — red/crimson on dark (Akai's brand color)
         "accent": (220, 50, 50),
