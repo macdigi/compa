@@ -267,8 +267,9 @@ class P6RecordScreen:
             return
 
         # Sort recordings
+        import os as _os
         sort_funcs = {
-            "date": lambda r: r.get("filename", ""),  # Filename has timestamp
+            "date": lambda r: _os.path.getmtime(r["path"]) if _os.path.exists(r.get("path", "")) else 0,
             "name": lambda r: (r.get("user_name") or r.get("filename", "")).lower(),
             "size": lambda r: r.get("size_mb", 0),
             "length": lambda r: r.get("duration", 0),
