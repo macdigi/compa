@@ -28,6 +28,8 @@ _DEFAULT_LABELS = {
     "bus1_fx": "BUS 1", "bus2_fx": "BUS 2", "bus3_fx": "BUS 3",
     "bus4_fx": "BUS 4", "input_fx": "INPUT FX",
     "looper": "LOOPER", "dj_mode": "DJ",
+    # Force categories
+    "transport": "TRANSPORT",
 }
 
 # Map CC category → MIDI channel for SP-404 multi-bus routing

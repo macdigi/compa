@@ -275,6 +275,76 @@ def _make_sp404mk2_profile() -> DeviceProfile:
     )
 
 
+def _make_force_profile() -> DeviceProfile:
+    """Akai Force — standalone production hub.
+
+    USB-B connection provides class-compliant audio + 3 MIDI ports:
+      - Public: general MIDI I/O
+      - Private: internal system messages
+      - MIDI Port: traditional MIDI thru
+    Audio: 2in/4out at 44.1kHz.
+    Force runs Linux internally — most control is via its own screen,
+    but MIDI notes, CCs, clock sync, and program changes all work.
+    """
+    return DeviceProfile(
+        name="Akai Force",
+        short_name="Force",
+        usb_vendor=0x09e8,
+        usb_products=[0x0040, 0x1040, 0x5040],
+
+        # Audio
+        audio_hint="Force",
+        audio_in_channels=2,
+        audio_out_channels=4,
+        supported_sample_rates=[44100],
+
+        # MIDI — use Public port for general I/O
+        midi_hint="Akai Pro Force",
+        midi_channels={
+            "pads": 0,       # Ch1 — pad triggers
+            "keys": 1,       # Ch2 — keyboard/chromatic
+            "program": 0,    # Ch1 — program change
+        },
+        midi_note_range=(36, 99),  # 4x4 pads + chromatic range
+
+        # CC map — Force has knobs/faders on its own screen
+        # but responds to standard CCs for external control
+        cc_map={
+            "mixer": [
+                MidiCC(7,  "Volume",   0, 127, 100),
+                MidiCC(10, "Pan",      0, 127, 64),
+                MidiCC(11, "Expression", 0, 127, 127),
+            ],
+            "transport": [
+                MidiCC(64, "Sustain",  0, 127, 0),
+                MidiCC(1,  "Mod Wheel", 0, 127, 0),
+            ],
+        },
+
+        # Patterns — Force uses clips/scenes, not numbered patterns
+        pattern_count=0,
+        pattern_pc_channel=0,
+
+        # Transport
+        sends_clock=True,
+        receives_clock=True,
+        transport_works=True,
+
+        # Storage — Force's internal drive via USB
+        mount_path="",  # Force SD card shows up as separate USB device
+
+        # Features
+        has_granular=False,
+        has_effects=False,
+        has_dj_mode=False,
+        has_looper=False,
+        has_sequencer=True,
+
+        sample_format="wav",
+        kit_format="xpm",  # Akai .Drum.xpm format
+    )
+
+
 def _make_generic_usb_audio_profile() -> DeviceProfile:
     """Fallback for any USB audio interface with no MIDI features."""
     return DeviceProfile(
@@ -358,6 +428,7 @@ class DeviceManager:
     def _register_builtin_profiles(self):
         self.register_profile(_make_p6_profile())
         self.register_profile(_make_sp404mk2_profile())
+        self.register_profile(_make_force_profile())
         # Generic fallback is NOT registered — it's used only when nothing matches
 
     # ── Public API ───────────────────────────────────────────────────
