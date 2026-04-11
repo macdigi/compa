@@ -183,7 +183,12 @@ class P6SessionScreen:
             self._save_notes()
 
     # ── ASCII art device names (playing card style) ────────────────
-    pass  # Logo rendered using Inter Bold font in draw()
+    _COMPA_LOGO = [
+        "  ___ ___  __  __ ___  _   ",
+        " / __/ _ \\|  \\/  | _ \\/ \\  ",
+        "| (_| (_) | |\\/| |  _/ _ \\ ",
+        " \\___\\___/|_|  |_|_|/_/ \\_\\",
+    ]
 
     # Device → theme color name for card accent
     _DEVICE_COLORS = {
@@ -201,17 +206,16 @@ class P6SessionScreen:
         f_tiny = theme.font("tiny")
         f_mono = theme.font("mono")
 
-        # ── COMPA logo (top left, big bold Inter font) ────────────────
-        f_logo = theme.font("hero")
-        surf = f_logo.render("COMPA", True, theme.ACCENT)
-        surface.blit(surf, (14, 8))
-        logo_w = surf.get_width()
+        # ── COMPA ASCII logo (top left) ──────────────────────────────
+        for i, line in enumerate(self._COMPA_LOGO):
+            surf = f_mono.render(line, True, theme.ACCENT)
+            surface.blit(surf, (12, 6 + i * 14))
 
         # Version + subtitle
         surf = f_tiny.render("v1.0", True, theme.TEXT_DIM)
-        surface.blit(surf, (logo_w + 22, 14))
-        surf = f_tiny.render("universal companion", True, theme.TEXT_DIM)
-        surface.blit(surf, (logo_w + 22, 28))
+        surface.blit(surf, (240, 10))
+        surf = f_tiny.render("raredata.net", True, theme.TEXT_DIM)
+        surface.blit(surf, (240, 24))
 
         # Reset card rects each frame
         self._card_buttons = []
