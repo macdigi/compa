@@ -47,6 +47,9 @@ class TransferScreen:
         self._transferring = False
         self._max_visible = 14
 
+        # Active drive index (which mounted drive to transfer to/from)
+        self._active_drive = -1  # -1 = auto (first with Samples/)
+
     def on_enter(self):
         self._refresh_local_files()
         self._refresh_device_files()
@@ -76,12 +79,29 @@ class TransferScreen:
                     })
 
     def _refresh_device_files(self):
-        """Load list of device samples."""
+        """Load list of device samples from active drive."""
         storage = getattr(self.app, "akai_storage", None)
         if storage and storage.is_connected:
-            self._device_files = storage.list_samples()
+            self._device_files = storage.list_samples(self._active_drive)
         else:
             self._device_files = []
+
+    def _get_active_samples_dir(self) -> str:
+        """Get the Samples directory on the active drive."""
+        storage = getattr(self.app, "akai_storage", None)
+        if not storage or not storage.is_connected:
+            return ""
+        drives = storage.drives
+        if 0 <= self._active_drive < len(drives):
+            d = drives[self._active_drive]
+            if d.samples_dir:
+                return d.samples_dir
+            # No Samples/ dir — create one
+            sdir = os.path.join(d.mount_point, "Samples")
+            os.makedirs(sdir, exist_ok=True)
+            d.samples_dir = sdir
+            return sdir
+        return storage.samples_dir
 
     def _refresh_kits(self):
         """Find converted kit directories."""
@@ -109,6 +129,14 @@ class TransferScreen:
     def handle_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
+
+            # Drive selector buttons
+            if hasattr(self, "_drive_btn_rects"):
+                for rect, drive_idx in self._drive_btn_rects:
+                    if rect.collidepoint(mx, my):
+                        self._active_drive = drive_idx
+                        self._refresh_device_files()
+                        return
 
             # Mode tabs
             tabs = [
@@ -217,15 +245,24 @@ class TransferScreen:
             return
 
         files = [self._local_files[i] for i in sorted(self._local_selected)]
+        samples_dir = self._get_active_samples_dir()
+        if not samples_dir:
+            self._set_status("No Samples directory on selected drive")
+            return
         self._transferring = True
         self._set_status(f"Pushing {len(files)} file(s)...")
 
         def worker():
+            import shutil
+            dest = os.path.join(samples_dir, "Compa")
+            os.makedirs(dest, exist_ok=True)
             ok = 0
             for f in files:
-                result = storage.push_file(f["path"], "Compa")
-                if result:
+                try:
+                    shutil.copy2(f["path"], os.path.join(dest, f["name"]))
                     ok += 1
+                except Exception as e:
+                    log.error("Push failed %s: %s", f["name"], e)
             self._set_status(f"Pushed {ok}/{len(files)} files to device")
             self._local_selected.clear()
             self._transferring = False
@@ -259,20 +296,25 @@ class TransferScreen:
     def _push_kit(self, kit: dict):
         if self._transferring:
             return
-        storage = getattr(self.app, "akai_storage", None)
-        if not storage or not storage.is_connected:
-            self._set_status("No device storage mounted")
+        samples_dir = self._get_active_samples_dir()
+        if not samples_dir:
+            self._set_status("No Samples directory on selected drive")
             return
 
         self._transferring = True
         self._set_status(f"Pushing kit {kit['name']}...")
 
         def worker():
-            result = storage.push_kit(kit["path"])
-            if result:
+            import shutil
+            dest = os.path.join(samples_dir, "Compa Kits", kit["name"])
+            try:
+                if os.path.exists(dest):
+                    shutil.rmtree(dest)
+                shutil.copytree(kit["path"], dest)
                 self._set_status(f"Kit '{kit['name']}' pushed to device!")
-            else:
-                self._set_status(f"Failed to push kit '{kit['name']}'")
+            except Exception as e:
+                self._set_status(f"Failed: {e}")
+                log.error("Kit push failed: %s", e)
             self._transferring = False
 
         threading.Thread(target=worker, daemon=True).start()
@@ -293,16 +335,48 @@ class TransferScreen:
         # Header
         storage = getattr(self.app, "akai_storage", None)
         connected = storage and storage.is_connected
+
         if connected:
             drives = storage.drives
-            info_parts = []
-            for d in drives:
-                info_parts.append(f"{d.label}: {d.free_gb}GB free")
-            info = " | ".join(info_parts)
-            theme.draw_screen_header(surface, "TRANSFER", info)
+            # Auto-select first drive with Samples/ if none selected
+            if self._active_drive < 0 or self._active_drive >= len(drives):
+                # Prefer SSD over SD card
+                for i, d in enumerate(drives):
+                    if d.samples_dir and "ssd" in d.drive_type.lower():
+                        self._active_drive = i
+                        break
+                else:
+                    for i, d in enumerate(drives):
+                        if d.samples_dir:
+                            self._active_drive = i
+                            break
+                    else:
+                        self._active_drive = 0
+
+            active_d = drives[self._active_drive] if self._active_drive < len(drives) else None
+            header_info = f"{active_d.label}: {active_d.free_gb}GB free" if active_d else ""
+            theme.draw_screen_header(surface, "TRANSFER", header_info)
+
+            # Drive selector buttons (top right) — tap to switch target drive
+            self._drive_btn_rects = []
+            dx = theme.SCREEN_WIDTH - 16
+            for i in range(len(drives) - 1, -1, -1):
+                d = drives[i]
+                is_active = (i == self._active_drive)
+                label = f"{d.label} ({d.free_gb}G)"
+                w = max(100, len(label) * 7 + 20)
+                rect = pygame.Rect(dx - w, 6, w, 24)
+                bg = theme.ACCENT if is_active else theme.BUTTON_BG
+                tc = theme.BG if is_active else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, rect, border_radius=4)
+                surf = f_tiny.render(label, True, tc)
+                surface.blit(surf, surf.get_rect(center=rect.center))
+                self._drive_btn_rects.append((rect, i))
+                dx = rect.x - 6
         else:
             theme.draw_screen_header(surface, "TRANSFER",
                                       "No device in Computer Mode")
+            self._drive_btn_rects = []
 
         # Mode tabs
         modes = [
