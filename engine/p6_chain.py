@@ -20,10 +20,16 @@ class ChainStep:
     fx_snapshot: optional dict of CC messages to send when this step starts.
     Format: {(channel, cc_number): value, ...}
     Example: {(0, 83): 18, (0, 19): 127}  → Bus1 FX=303VinylSim, FX ON
+
+    device_patterns: optional dict of per-device pattern numbers.
+    Format: {device_short_name: pattern_number}
+    Example: {"P-6": 3, "SP-404": 7}
+    If empty, uses the single `pattern` field for the focused device.
     """
-    pattern: int = 0    # 0-63
+    pattern: int = 0    # 0-63 (primary / focused device)
     bars: int = 4       # 1-64
     fx_snapshot: dict = field(default_factory=dict)  # {(ch, cc): val}
+    device_patterns: dict = field(default_factory=dict)  # {short_name: pattern}
 
 
 @dataclass
@@ -49,6 +55,8 @@ class Chain:
                     "fx_snapshot": {f"{ch},{cc}": val
                                     for (ch, cc), val in s.fx_snapshot.items()}
                     if s.fx_snapshot else {},
+                    "device_patterns": dict(s.device_patterns)
+                    if s.device_patterns else {},
                 }
                 for s in self.steps
             ],
@@ -73,6 +81,7 @@ class Chain:
                 pattern=s.get("pattern", 0),
                 bars=s.get("bars", 4),
                 fx_snapshot=fx,
+                device_patterns=s.get("device_patterns", {}),
             ))
         return chain
 
@@ -95,8 +104,11 @@ class ChainPlayer:
         self.beat_in_bar = 0
         self.tick_count = 0
 
-        # MIDI output (for FX snapshots)
+        # MIDI output (for FX snapshots — focused device)
         self._midi_out = None
+
+        # Multi-device MIDI connections {short_name: P6Midi}
+        self._device_midi: dict = {}
 
         # Callbacks
         self.on_pattern_change: Optional[Callable[[int], None]] = None
@@ -191,8 +203,19 @@ class ChainPlayer:
 
     def _fire_pattern_change(self) -> None:
         step = self.chain.steps[self.step_index]
+
+        # Send pattern change to focused device (backward compat)
         if self.on_pattern_change:
             self.on_pattern_change(step.pattern)
+
+        # Send per-device pattern changes (multi-device chain)
+        if step.device_patterns:
+            for dev_name, pat in step.device_patterns.items():
+                midi = self._device_midi.get(dev_name)
+                if midi:
+                    midi.send_program_change(pat)
+                    log.info("Chain step %d: %s → pattern %d",
+                             self.step_index + 1, dev_name, pat + 1)
 
         # Send FX snapshot CCs if present
         if step.fx_snapshot and self._midi_out:

@@ -37,10 +37,11 @@ class P6PatternScreen:
         self._chains_dir = os.path.join(
             app.config.get("P6_SESSIONS_DIR", "sessions"), "chains")
 
-        # Wire chain player
+        # Wire chain player — focused device + all devices for multi-chain
         if self.app.p6:
             self.chain_player.on_pattern_change = self.app.p6.send_program_change
             self.chain_player._midi_out = self.app.p6
+        self.chain_player._device_midi = dict(self.app._midi_connections)
 
         # Pi-side step sequencer
         self.sequencer = PiSequencer(num_steps=16)
@@ -118,6 +119,7 @@ class P6PatternScreen:
             self.chain_player.on_pattern_change = self.app.p6.send_program_change
             self.chain_player._midi_out = self.app.p6
             self.sequencer.set_midi_out(self.app.p6)
+        self.chain_player._device_midi = dict(self.app._midi_connections)
         # Configure sequencer rows for current device
         self.sequencer.configure_for_device(self.app.device_name)
         self._recalc_grid()
