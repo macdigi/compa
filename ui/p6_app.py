@@ -893,7 +893,13 @@ class P6App:
         if dst_idx is None:
             return
 
-        dst_rate = dst_profile.supported_sample_rates[0] if dst_profile.supported_sample_rates else 44100
+        # Use the device's actual default sample rate (not profile's first entry)
+        try:
+            import sounddevice as sd
+            dev_info = sd.query_devices(dst_idx)
+            dst_rate = int(dev_info.get("default_samplerate", 48000))
+        except Exception:
+            dst_rate = dst_profile.supported_sample_rates[-1] if dst_profile.supported_sample_rates else 48000
 
         if self.recorder.start_monitor_output(dst_idx, dst_rate):
             print(f"Monitor route: {source_key} → {self.monitor_output}", flush=True)
