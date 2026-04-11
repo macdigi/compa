@@ -231,9 +231,15 @@ class P6RecordScreen:
             print("SLICE IT: no recording to slice", flush=True)
 
     def _refresh_rec_list(self):
-        """Populate the TouchList with current recordings."""
+        """Populate the TouchList with current recordings, preserving scroll."""
         from ui.components.touch_list import TouchListItem
         recordings = self.app.recorder.list_recordings()
+
+        # Don't rebuild if count hasn't changed (preserves scroll)
+        if len(recordings) == len(self._rec_list.items):
+            return
+
+        saved_scroll = self._rec_list.scroll_offset
         items = []
         for rec in recordings:
             name = rec.get("user_name") or rec["filename"]
@@ -254,6 +260,7 @@ class P6RecordScreen:
                 data=rec,
             ))
         self._rec_list.set_items(items)
+        self._rec_list.scroll_offset = saved_scroll  # Restore scroll position
 
     def update(self):
         peak_l, peak_r = (0.0, 0.0)
@@ -265,8 +272,12 @@ class P6RecordScreen:
         if self._recall_flash > 0:
             self._recall_flash -= 1
 
-        # Refresh recording list periodically + momentum
-        self._refresh_rec_list()
+        # Refresh recording list only every 2 seconds (not every frame!)
+        import time
+        now = time.monotonic()
+        if now - getattr(self, "_last_rec_refresh", 0) > 2.0:
+            self._last_rec_refresh = now
+            self._refresh_rec_list()
         self._rec_list.update()
 
     def draw(self, surface: pygame.Surface):
