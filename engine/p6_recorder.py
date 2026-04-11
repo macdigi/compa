@@ -267,34 +267,56 @@ class P6Recorder:
             log.error("Failed to start monitoring: %s", e)
             self._stream = None
 
-    def start_monitor_output(self, device_idx: int, sample_rate: int) -> bool:
+    def start_monitor_output(self, device_idx: int, sample_rate: int = 0) -> bool:
         """Start forwarding audio to a second output device (headphones).
 
         The recorder's audio callback will write to this output stream
         in addition to recording/buffering. No second input stream needed.
+        Opens at the recorder's own sample rate so no resampling is needed
+        in the audio callback — ALSA plughw handles any conversion.
         """
         self.stop_monitor_output()
         if sd is None:
             return False
 
+        # Use the recorder's input rate — avoids resampling in the callback
+        out_rate = self._sample_rate
+
         try:
-            self._monitor_out_rate = sample_rate
+            self._monitor_out_rate = out_rate
             self._monitor_out_device = device_idx
 
             self._monitor_out_stream = sd.OutputStream(
                 device=device_idx,
-                samplerate=sample_rate,
+                samplerate=out_rate,
                 channels=P6_CHANNELS,
                 dtype="float32",
                 blocksize=2048,
+                latency="high",  # Larger buffer = fewer glitches
             )
             self._monitor_out_stream.start()
-            log.info("Monitor output started: device %d @ %dHz", device_idx, sample_rate)
+            log.info("Monitor output started: device %d @ %dHz", device_idx, out_rate)
             return True
         except Exception as e:
-            log.error("Monitor output failed: %s", e)
-            self._monitor_out_stream = None
-            return False
+            # If source rate doesn't work, try the requested rate
+            log.warning("Monitor at %dHz failed, trying %dHz", out_rate, sample_rate)
+            try:
+                self._monitor_out_rate = sample_rate
+                self._monitor_out_stream = sd.OutputStream(
+                    device=device_idx,
+                    samplerate=sample_rate,
+                    channels=P6_CHANNELS,
+                    dtype="float32",
+                    blocksize=4096,
+                    latency="high",
+                )
+                self._monitor_out_stream.start()
+                log.info("Monitor output started: device %d @ %dHz (fallback)", device_idx, sample_rate)
+                return True
+            except Exception as e2:
+                log.error("Monitor output failed: %s", e2)
+                self._monitor_out_stream = None
+                return False
 
     def stop_monitor_output(self):
         """Stop the monitor output stream."""
@@ -444,16 +466,7 @@ class P6Recorder:
         # Forward to monitor output (headphones on another device)
         if self._monitor_out_stream and self._monitor_out_stream.active:
             try:
-                # If sample rates match, direct write. Otherwise basic resample.
-                if self._monitor_out_rate == self._sample_rate:
-                    self._monitor_out_stream.write(indata)
-                else:
-                    # Simple linear resample
-                    ratio = self._monitor_out_rate / self._sample_rate
-                    out_frames = int(frames * ratio)
-                    indices = np.linspace(0, frames - 1, out_frames).astype(np.int32)
-                    resampled = indata[indices]
-                    self._monitor_out_stream.write(resampled)
+                self._monitor_out_stream.write(indata)
             except Exception:
                 pass  # Don't crash the audio callback
 
