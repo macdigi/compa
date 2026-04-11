@@ -76,7 +76,7 @@ class AkaiStorageManager:
         return ""
 
     def scan_and_mount(self) -> list[MountedDrive]:
-        """Scan for Akai storage devices and mount any new ones.
+        """Scan for Akai storage devices — detect mounted + mount new ones.
 
         Called periodically from the app's update loop.
         Returns list of currently mounted drives.
@@ -86,16 +86,95 @@ class AkaiStorageManager:
             return self._drives
         self._last_scan = now
 
-        # Find block devices that aren't mounted yet
-        new_drives = self._detect_unmounted_drives()
-        for dev_path, part_path, drive_type in new_drives:
+        known_devices = {d.device for d in self._drives}
+        known_mounts = {d.mount_point for d in self._drives}
+
+        # Strategy 1: Check already-mounted partitions for Akai content
+        try:
+            out = subprocess.run(
+                ["lsblk", "-rno", "NAME,SIZE,TYPE,MOUNTPOINT"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in out.stdout.strip().split("\n"):
+                fields = line.split()
+                if len(fields) < 4 or fields[2] != "part":
+                    continue
+                dev_path = f"/dev/{fields[0]}"
+                mount_point = fields[3]
+                if dev_path in known_devices or not mount_point or mount_point == "/":
+                    continue
+                if mount_point in known_mounts:
+                    continue  # Already tracked this mount point
+                if "mmcblk0" in fields[0]:
+                    continue  # Skip Pi's own SD card
+
+                # Check if this mount has Akai content
+                has_samples = os.path.isdir(os.path.join(mount_point, "Samples"))
+                has_projects = os.path.isdir(os.path.join(mount_point, "Projects"))
+                has_mockba = os.path.exists(os.path.join(mount_point, "MockbaMod"))
+                has_synths = os.path.isdir(os.path.join(mount_point, "Synths"))
+                has_addons = os.path.isdir(os.path.join(mount_point, "AddOns"))
+
+                if has_samples or has_projects or has_mockba or has_synths or has_addons:
+                    # Determine type by size and content
+                    size_str = fields[1]
+                    size_gb = 0.0
+                    try:
+                        if "G" in size_str:
+                            size_gb = float(size_str.replace("G", ""))
+                        elif "T" in size_str:
+                            size_gb = float(size_str.replace("T", "")) * 1024
+                    except ValueError:
+                        pass
+
+                    if size_gb > 100 or has_projects or has_synths:
+                        drive_type = "internal_ssd"
+                        label = "Internal SSD"
+                    else:
+                        drive_type = "sd_card"
+                        label = "SD Card"
+
+                    # Get disk space
+                    total_gb = free_gb = 0.0
+                    try:
+                        st = os.statvfs(mount_point)
+                        total_gb = round((st.f_blocks * st.f_frsize) / (1024**3), 1)
+                        free_gb = round((st.f_bavail * st.f_frsize) / (1024**3), 1)
+                    except Exception:
+                        pass
+
+                    drive = MountedDrive(
+                        device=dev_path,
+                        mount_point=mount_point,
+                        drive_type=drive_type,
+                        label=label,
+                        total_gb=total_gb,
+                        free_gb=free_gb,
+                        samples_dir=os.path.join(mount_point, "Samples") if has_samples else "",
+                        projects_dir=os.path.join(mount_point, "Projects") if has_projects else "",
+                    )
+                    self._drives.append(drive)
+                    known_devices.add(dev_path)
+                    known_mounts.add(mount_point)
+                    log.info("Found Akai %s: %s at %s (%.1fGB free)",
+                             label, dev_path, mount_point, free_gb)
+
+        except Exception as e:
+            log.debug("Drive scan error: %s", e)
+
+        # Strategy 2: Try to mount unmounted partitions
+        new_unmounted = self._detect_unmounted_drives()
+        for dev_path, part_path, drive_type in new_unmounted:
+            if part_path in known_devices:
+                continue
             mount = self._mount_partition(part_path, drive_type)
             if mount:
                 self._drives.append(mount)
+                known_devices.add(part_path)
                 log.info("Mounted Akai %s: %s → %s",
                          mount.label, part_path, mount.mount_point)
 
-        # Check if any mounted drives have been removed
+        # Remove drives that are no longer mounted
         self._drives = [d for d in self._drives if os.path.ismount(d.mount_point)]
 
         return self._drives
