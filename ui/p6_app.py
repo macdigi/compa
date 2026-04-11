@@ -24,6 +24,7 @@ from ui.screens.p6_help_screen import P6HelpScreen
 from ui.screens.p6_radio_screen import P6RadioScreen
 from ui.screens.p6_settings_screen import P6SettingsScreen
 from ui.screens.kit_builder_screen import KitBuilderScreen
+from ui.screens.transfer_screen import TransferScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
@@ -31,6 +32,7 @@ from engine.p6_recorder import P6Recorder
 from engine.device_profiles import DeviceManager
 from engine.audio_router import AudioRoute, find_device_index
 from engine.midi_lfo import MidiLFO
+from engine.usb_storage import AkaiStorageManager
 from ui.splash import run_splash
 from ui.wizard import run_wizard
 
@@ -217,6 +219,9 @@ class P6App:
         # ── LFO automation engine ────────────────────────────────────
         self.lfo = MidiLFO()
 
+        # ── Akai USB storage (Computer Mode file transfer) ───────────
+        self.akai_storage = AkaiStorageManager()
+
         # ── Recorder ─────────────────────────────────────────────────
         self.recorder = P6Recorder(
             recording_dir=self.config["P6_RECORDING_DIR"],
@@ -237,6 +242,7 @@ class P6App:
             "help":    P6HelpScreen(self),
             "settings": P6SettingsScreen(self),
             "kit": KitBuilderScreen(self),
+            "transfer": TransferScreen(self),
         }
         self.current_screen_name = "session"
 
@@ -248,6 +254,7 @@ class P6App:
                 ("SESSION", "session"), ("CONTROL", "control"),
                 ("PATTERN", "pattern"), ("RECORD",  "record"),
                 ("SAMPLE",  "sample"),  ("RADIO",   "radio"),
+                ("XFER",    "transfer"),
             ]
             font_name = "small"
         elif theme.SCREEN_WIDTH >= 400:
@@ -256,6 +263,7 @@ class P6App:
                 ("SES", "session"), ("CTL", "control"),
                 ("PAT", "pattern"), ("REC", "record"),
                 ("SMP", "sample"),  ("RAD", "radio"),
+                ("XFR", "transfer"),
             ]
             font_name = "tiny"
         else:
@@ -264,6 +272,7 @@ class P6App:
                 ("S", "session"), ("C", "control"),
                 ("P", "pattern"), ("R", "record"),
                 ("F", "sample"),  ("~", "radio"),
+                ("X", "transfer"),
             ]
             font_name = "tiny"
 
@@ -1155,6 +1164,8 @@ class P6App:
         if now - getattr(self, "_last_usb_scan", 0) > 5.0:
             self._last_usb_scan = now
             self._check_hotplug()
+            # Also scan for Akai USB storage (Computer Mode)
+            self.akai_storage.scan_and_mount()
 
         # Check for remote screenshot request
         if os.path.exists("/tmp/compa_screenshot_request"):
@@ -1349,6 +1360,8 @@ class P6App:
         print("Shutting down Compa...")
         if self.audio_route and self.audio_route.is_active:
             self.audio_route.stop()
+        if self.akai_storage.is_connected:
+            self.akai_storage.unmount_all()
         if hasattr(self.screens.get("radio", None), '_radio'):
             self.screens["radio"]._radio.shutdown()
         self.recorder.shutdown()
