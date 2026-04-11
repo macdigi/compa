@@ -1,38 +1,84 @@
-"""Compa UI theme — Claude Code inspired dark aesthetic.
+"""Compa UI theme — hardware-inspired with device-specific color schemes.
 
-Deep blacks, warm orange accents, clean typography, subtle depth.
+Inter for UI text, JetBrains Mono for data/numbers.
+Theme auto-switches based on focused device.
 """
 
+import os
 import pygame
 
 # Screen dimensions (defaults — updated by init_display() at startup)
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 
-# ── Color Palette ────────────────────────────────────────────────────
-# Background layers (darkest → lightest for depth)
-BG = (10, 10, 14)              # Deep black base
-BG_PANEL = (28, 28, 38)        # Raised panel — VISIBLE contrast
-BG_LIGHTER = (38, 38, 50)      # Cards, elevated surfaces
-BG_INPUT = (22, 22, 32)        # Input fields, text areas
+# ── Hardware-Inspired Theme Presets ──────────────────────────────────
 
-# Borders (visible separators)
-BORDER = (55, 55, 68)          # Default border — brighter
-BORDER_LIGHT = (70, 70, 85)    # Emphasized border
-BORDER_FOCUS = (255, 130, 40)  # Focused element border
+THEMES = {
+    "compa": {  # Default — warm orange (Claude Code inspired)
+        "accent": (235, 120, 30),
+        "accent_dim": (160, 80, 18),
+        "accent_bright": (255, 155, 50),
+        "nav_active": (235, 120, 30),
+        "border_focus": (255, 130, 40),
+        "knob_fill": (235, 120, 30),
+        "pad_active": (235, 120, 30),
+    },
+    "sp404": {  # SP-404 MK2 — teal/cyan on dark (like the SP's screen)
+        "accent": (0, 200, 180),
+        "accent_dim": (0, 120, 110),
+        "accent_bright": (50, 240, 210),
+        "nav_active": (0, 200, 180),
+        "border_focus": (0, 220, 195),
+        "knob_fill": (0, 200, 180),
+        "pad_active": (0, 200, 180),
+    },
+    "p6": {  # Roland P-6 — yellow/gold on black (matches hardware)
+        "accent": (255, 200, 0),
+        "accent_dim": (160, 125, 0),
+        "accent_bright": (255, 225, 60),
+        "nav_active": (255, 200, 0),
+        "border_focus": (255, 210, 30),
+        "knob_fill": (255, 200, 0),
+        "pad_active": (255, 200, 0),
+    },
+    "force": {  # Akai Force — red/crimson on dark (Akai's brand color)
+        "accent": (220, 50, 50),
+        "accent_dim": (140, 30, 30),
+        "accent_bright": (255, 80, 80),
+        "nav_active": (220, 50, 50),
+        "border_focus": (240, 60, 60),
+        "knob_fill": (220, 50, 50),
+        "pad_active": (220, 50, 50),
+    },
+}
 
-# Text hierarchy
-TEXT = (210, 210, 218)          # Primary text
-TEXT_DIM = (120, 120, 135)      # Secondary/muted text
-TEXT_BRIGHT = (248, 248, 252)   # Emphasized text
+# Active theme name
+_active_theme = "compa"
 
-# Accent — warm orange (Claude Code inspired)
-ACCENT = (235, 120, 30)        # Primary accent
-ACCENT_DIM = (160, 80, 18)     # Dimmed accent
-ACCENT_BRIGHT = (255, 155, 50) # Bright accent hover
-ACCENT_GLOW = (235, 120, 30, 40)  # Glow effect (with alpha)
+# ── Color Palette (mutable — updated by apply_theme) ────────────────
+# Background layers (same across all themes)
+BG = (10, 10, 14)
+BG_PANEL = (28, 28, 38)
+BG_LIGHTER = (38, 38, 50)
+BG_INPUT = (22, 22, 32)
 
-# Status colors
+# Borders
+BORDER = (55, 55, 68)
+BORDER_LIGHT = (70, 70, 85)
+BORDER_FOCUS = (255, 130, 40)
+
+# Text
+TEXT = (210, 210, 218)
+TEXT_DIM = (120, 120, 135)
+TEXT_BRIGHT = (248, 248, 252)
+
+# Accent (set by active theme)
+ACCENT = (235, 120, 30)
+ACCENT_DIM = (160, 80, 18)
+ACCENT_BRIGHT = (255, 155, 50)
+ACCENT_GLOW = (235, 120, 30, 40)
+
+# Status colors (universal)
 GREEN = (50, 195, 70)
 RED = (210, 55, 55)
 YELLOW = (210, 195, 40)
@@ -66,6 +112,42 @@ NAV_INACTIVE = (42, 42, 55)
 
 SCROLLBAR = (35, 35, 45)
 SCROLLBAR_THUMB = (80, 80, 95)
+
+
+def apply_theme(name: str):
+    """Apply a color theme by name. Updates all accent-derived colors."""
+    global _active_theme, ACCENT, ACCENT_DIM, ACCENT_BRIGHT, ACCENT_GLOW
+    global BORDER_FOCUS, KNOB_FILL, PAD_ACTIVE, PAD_PLAYING, NAV_ACTIVE
+
+    if name not in THEMES:
+        name = "compa"
+    _active_theme = name
+    t = THEMES[name]
+
+    ACCENT = t["accent"]
+    ACCENT_DIM = t["accent_dim"]
+    ACCENT_BRIGHT = t["accent_bright"]
+    ACCENT_GLOW = (*t["accent"], 40)
+    BORDER_FOCUS = t["border_focus"]
+    KNOB_FILL = t["knob_fill"]
+    PAD_ACTIVE = t["pad_active"]
+    PAD_PLAYING = tuple(min(255, c + 40) for c in t["accent"])
+    NAV_ACTIVE = t["nav_active"]
+
+
+def apply_theme_for_device(device_short_name: str):
+    """Auto-apply theme matching a device. Falls back to 'compa'."""
+    mapping = {
+        "SP-404": "sp404",
+        "P-6": "p6",
+        "Force": "force",
+    }
+    theme_name = mapping.get(device_short_name, "compa")
+    apply_theme(theme_name)
+
+
+def active_theme_name() -> str:
+    return _active_theme
 
 # ── Font Sizes ───────────────────────────────────────────────────────
 FONT_TINY = 12
@@ -101,14 +183,30 @@ def init_display(width: int = 0, height: int = 0):
         SCREEN_HEIGHT = height
 
 
+def _find_font(name: str, fallback: str) -> str | None:
+    """Find a TTF font file by name. Checks bundled fonts first, then system."""
+    # Bundled fonts in docs/fonts/
+    bundled_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "docs", "fonts")
+    bundled = os.path.join(bundled_dir, name)
+    if os.path.isfile(bundled):
+        return bundled
+    # System install
+    system = f"/usr/share/fonts/truetype/compa/{name}"
+    if os.path.isfile(system):
+        return system
+    return None
+
+
 def init_fonts():
-    """Initialize fonts after pygame.init(). Scales font sizes for small screens."""
+    """Initialize fonts after pygame.init(). Uses Inter + JetBrains Mono."""
     global _fonts
     pygame.font.init()
-    # Scale fonts if screen is smaller than default
+
+    # Scale for small screens
     scale = min(SCREEN_WIDTH / 800, SCREEN_HEIGHT / 600)
     if scale < 0.85:
-        # Small screen — shrink fonts
         sizes = {
             "tiny": max(9, int(FONT_TINY * scale)),
             "small": max(10, int(FONT_SMALL * scale)),
@@ -125,16 +223,35 @@ def init_fonts():
             "large": FONT_LARGE, "title": FONT_TITLE, "hero": FONT_HERO,
             "mono": FONT_SMALL, "mono_med": FONT_MEDIUM,
         }
+
+    # Try Inter for UI text, JetBrains Mono for data
+    inter_regular = _find_font("Inter-Regular.ttf", "")
+    inter_medium = _find_font("Inter-Medium.ttf", "")
+    inter_bold = _find_font("Inter-Bold.ttf", "")
+    jbm_regular = _find_font("JetBrainsMono-Regular.ttf", "")
+    jbm_bold = _find_font("JetBrainsMono-Bold.ttf", "")
+
+    def _load(path, size, fallback_name="dejavusans"):
+        if path:
+            try:
+                return pygame.font.Font(path, size)
+            except Exception:
+                pass
+        return pygame.font.SysFont(fallback_name, size)
+
     _fonts = {
-        "tiny": pygame.font.SysFont("dejavusans", sizes["tiny"]),
-        "small": pygame.font.SysFont("dejavusans", sizes["small"]),
-        "medium": pygame.font.SysFont("dejavusans", sizes["medium"]),
-        "large": pygame.font.SysFont("dejavusans", sizes["large"]),
-        "title": pygame.font.SysFont("dejavusans", sizes["title"]),
-        "hero": pygame.font.SysFont("dejavusansmono", sizes["hero"]),
-        "mono": pygame.font.SysFont("dejavusansmono", sizes["mono"]),
-        "mono_med": pygame.font.SysFont("dejavusansmono", sizes["mono_med"]),
+        "tiny":     _load(inter_regular, sizes["tiny"]),
+        "small":    _load(inter_regular, sizes["small"]),
+        "medium":   _load(inter_medium or inter_regular, sizes["medium"]),
+        "large":    _load(inter_bold or inter_medium, sizes["large"]),
+        "title":    _load(inter_bold, sizes["title"]),
+        "hero":     _load(jbm_bold or jbm_regular, sizes["hero"], "dejavusansmono"),
+        "mono":     _load(jbm_regular, sizes["mono"], "dejavusansmono"),
+        "mono_med": _load(jbm_regular, sizes["mono_med"], "dejavusansmono"),
     }
+
+    which = "Inter + JetBrains Mono" if inter_regular else "DejaVu Sans (fallback)"
+    print(f"Fonts: {which}", flush=True)
 
 
 def font(name: str = "medium") -> pygame.font.Font:

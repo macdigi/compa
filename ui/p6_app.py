@@ -203,6 +203,10 @@ class P6App:
         else:
             print("No USB device detected — running in offline mode", flush=True)
 
+        # Apply hardware theme for focused device
+        if self.device_name != "---":
+            theme.apply_theme_for_device(self.device_name)
+
         # ── Mouse mode (show cursor, skip touch-to-mouse conversion) ──
         self.mouse_mode = self.config.get("MOUSE_MODE", "0") == "1"
         if self.mouse_mode:
@@ -782,6 +786,9 @@ class P6App:
             return False
 
         print(f"Focus → {short_name}", flush=True)
+
+        # Auto-apply hardware theme
+        theme.apply_theme_for_device(short_name)
 
         # Rewire MIDI router to focused device
         if self.atom_sq and self.p6:

@@ -65,6 +65,14 @@ class P6SettingsScreen:
         self.app.config["SKIP_SPLASH"] = new_val
         save_config_key("SKIP_SPLASH", new_val)
 
+    def _cycle_theme(self):
+        names = list(theme.THEMES.keys())
+        current = theme.active_theme_name()
+        idx = names.index(current) if current in names else 0
+        next_name = names[(idx + 1) % len(names)]
+        theme.apply_theme(next_name)
+        print(f"Theme → {next_name}", flush=True)
+
     def _start_clock_relay(self, source_key: str, dest_key: str):
         if self.app.start_clock_relay(source_key, dest_key):
             print(f"Clock relay started: {source_key} → {dest_key}", flush=True)
@@ -111,6 +119,9 @@ class P6SettingsScreen:
              "action_inc": lambda: self._set_threshold(self._get_threshold() + 5)},
             {"label": "Splash Screen", "type": "toggle", "value": not splash_off,
              "action": self._toggle_splash},
+            {"label": "Color Theme", "type": "button",
+             "btn_label": theme.active_theme_name().upper(),
+             "action": self._cycle_theme},
             {"label": "", "type": "section", "value": "CONNECTED DEVICES"},
         ]
 
