@@ -25,6 +25,15 @@ class P6RecordScreen:
         self._scroll_offset = 0
         self._recall_flash = 0
 
+        # Touch-friendly recording list
+        from ui.components.touch_list import TouchList
+        list_y = 172
+        list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - list_y - 4
+        self._rec_list = TouchList(
+            pygame.Rect(16, list_y, theme.SCREEN_WIDTH - 32, list_h),
+            item_height=44,
+        )
+
         # Detail modal for recording management
         self._detail_modal = Modal(
             "Recording", "", buttons=["PLAY", "STAR", "RENAME", "DELETE", "CLOSE"],
@@ -181,35 +190,49 @@ class P6RecordScreen:
                 self.app.recorder.set_threshold(self.app.recorder._threshold + 0.005)
                 return
 
-            # Recording list -- tap to open detail modal
-            recordings = self.app.recorder.list_recordings()
-            list_y = self._list_y
-            for i, rec in enumerate(recordings[self._scroll_offset:
-                                               self._scroll_offset + self._max_visible]):
-                item_rect = pygame.Rect(16, list_y + i * 26, theme.SCREEN_WIDTH - 32, 24)
-                if item_rect.collidepoint(mx, my):
-                    self._detail_rec = rec
-                    display_name = rec.get("user_name") or rec["filename"]
-                    dur = rec.get("duration", 0)
-                    bpm = rec.get("bpm_at_record", "?")
-                    pat = rec.get("pattern_at_record", "?")
-                    starred = "YES" if rec.get("starred") else "no"
-                    size = rec.get("size_mb", 0)
-                    msg = f"{display_name}  |  {dur:.1f}s  |  {size:.1f}MB"
-                    self._detail_modal.show(
-                        title=f"BPM:{bpm}  Pat:{pat}  Star:{starred}",
-                        message=msg,
-                    )
-                    return
+            # Recording list handled by TouchList below
 
-        # Scroll recording list
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
-            recordings = self.app.recorder.list_recordings()
-            max_offset = max(0, len(recordings) - self._max_visible)
-            if event.button == 4:  # scroll up
-                self._scroll_offset = max(0, self._scroll_offset - 1)
-            elif event.button == 5:  # scroll down
-                self._scroll_offset = min(max_offset, self._scroll_offset + 1)
+        # TouchList handles drag scroll, wheel scroll, and tap
+        tapped = self._rec_list.handle_event(event)
+        if tapped and tapped.data:
+            rec = tapped.data
+            self._detail_rec = rec
+            display_name = rec.get("user_name") or rec["filename"]
+            dur = rec.get("duration", 0)
+            bpm = rec.get("bpm_at_record", "?")
+            pat = rec.get("pattern_at_record", "?")
+            starred = "YES" if rec.get("starred") else "no"
+            size = rec.get("size_mb", 0)
+            msg = f"{display_name}  |  {dur:.1f}s  |  {size:.1f}MB"
+            self._detail_modal.show(
+                title=f"BPM:{bpm}  Pat:{pat}  Star:{starred}",
+                message=msg,
+            )
+
+    def _refresh_rec_list(self):
+        """Populate the TouchList with current recordings."""
+        from ui.components.touch_list import TouchListItem
+        recordings = self.app.recorder.list_recordings()
+        items = []
+        for rec in recordings:
+            name = rec.get("user_name") or rec["filename"]
+            dur = rec.get("duration", 0)
+            size = rec.get("size_mb", 0)
+            starred = rec.get("starred", False)
+            source = rec.get("source_device", "")
+            icon = "*" if starred else "~"
+            icon_color = theme.ACCENT if starred else theme.WAVEFORM_COLOR
+            subtext = f"{dur:.1f}s  {size:.1f}MB"
+            if source:
+                subtext += f"  [{source}]"
+            items.append(TouchListItem(
+                text=name[:40],
+                subtext=subtext,
+                icon=icon,
+                icon_color=icon_color,
+                data=rec,
+            ))
+        self._rec_list.set_items(items)
 
     def update(self):
         peak_l, peak_r = (0.0, 0.0)
@@ -220,6 +243,10 @@ class P6RecordScreen:
 
         if self._recall_flash > 0:
             self._recall_flash -= 1
+
+        # Refresh recording list periodically + momentum
+        self._refresh_rec_list()
+        self._rec_list.update()
 
     def draw(self, surface: pygame.Surface):
         f_large = theme.font("large")
@@ -358,78 +385,10 @@ class P6RecordScreen:
         pygame.draw.line(surface, theme.BORDER,
                         (wave_rect.x, cy), (wave_rect.right, cy), 1)
 
-        # -- Recording list label (y=162-170) -----------------------------
+        # -- Recording list (touch-friendly) --------------------------------
         surf = f_small.render("RECORDINGS  (tap for details)", True, theme.TEXT_DIM)
         surface.blit(surf, (16, 162))
-
-        # -- Recording list (y=172-540, 26px rows, ~14 visible) -----------
-        list_y = 172
-        recordings = self.app.recorder.list_recordings()
-        list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - list_y - 4
-        self._max_visible = list_h // 26
-        self._list_y = list_y
-
-        visible = recordings[self._scroll_offset:self._scroll_offset + self._max_visible]
-        y = list_y
-
-        for i, rec in enumerate(visible):
-            dur = rec.get("duration", 0)
-            mins = int(dur) // 60
-            secs = dur % 60
-            starred = rec.get("starred", False)
-            user_name = rec.get("user_name", "")
-            bpm = rec.get("bpm_at_record", "")
-            pat = rec.get("pattern_at_record", "")
-
-            is_playing = (self.app.recorder.is_playing_back and
-                         self.app.recorder.playback_file == rec["path"])
-
-            # Row background (alternating + playing highlight)
-            item_rect = pygame.Rect(16, y, theme.SCREEN_WIDTH - 32, 24)
-            if is_playing:
-                pygame.draw.rect(surface, theme.ACCENT_DIM, item_rect, border_radius=2)
-            elif i % 2 == 1:
-                pygame.draw.rect(surface, theme.BG_LIGHTER, item_rect, border_radius=2)
-
-            # Star indicator
-            star_text = "*" if starred else " "
-            star_color = theme.ACCENT if starred else theme.TEXT_DIM
-            surf = f_med.render(star_text, True, star_color)
-            surface.blit(surf, (18, y + 2))
-
-            # Name or filename
-            display = user_name if user_name else rec["filename"]
-            if is_playing:
-                display = ">> " + display
-            surf = f_small.render(display[:35], True,
-                                  theme.GREEN if is_playing else theme.TEXT)
-            surface.blit(surf, (38, y + 4))
-
-            # Metadata on right side
-            meta_parts = [f"{mins}:{secs:04.1f}"]
-            if bpm:
-                meta_parts.insert(0, f"{bpm:.0f}bpm" if isinstance(bpm, float) else f"{bpm}bpm")
-            if pat != "":
-                meta_parts.insert(0, f"P:{int(pat)+1}" if isinstance(pat, (int, float)) else "")
-            meta_text = "  ".join(meta_parts)
-            surf = f_small.render(meta_text, True, theme.TEXT_DIM)
-            surface.blit(surf, (theme.SCREEN_WIDTH - 16 - surf.get_width(), y + 4))
-
-            y += 26
-
-        if not recordings:
-            surf = f_small.render("No recordings yet", True, theme.TEXT_DIM)
-            surface.blit(surf, (16, list_y + 10))
-
-        # Scroll indicator
-        if len(recordings) > self._max_visible:
-            total = len(recordings)
-            bar_h = list_h - 4
-            thumb_h = max(20, int(bar_h * self._max_visible / total))
-            thumb_y = self._list_y + int((bar_h - thumb_h) * self._scroll_offset / max(1, total - self._max_visible))
-            bar_x = theme.SCREEN_WIDTH - 8
-            pygame.draw.rect(surface, theme.BORDER, (bar_x, self._list_y, 4, bar_h), border_radius=2)
-            pygame.draw.rect(surface, theme.ACCENT, (bar_x, thumb_y, 4, thumb_h), border_radius=2)
+        self._rec_list.draw(surface)
 
         # -- Draw modals on top -------------------------------------------
         self._detail_modal.draw(surface)

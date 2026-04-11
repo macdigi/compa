@@ -54,10 +54,17 @@ class KitBuilderScreen:
         self._current_bank: int = 0   # 0-7 (A-H)
         self._selected_pad: int = 0   # 0-127 absolute index
 
-        # Sample browser state
+        # Sample browser (touch-friendly)
+        from ui.components.touch_list import TouchList
+        browser_rect = pygame.Rect(
+            self._BROWSER_X, self._BROWSER_Y + self._BROWSER_HEADER_H,
+            self._BROWSER_W, self._BROWSER_H - self._BROWSER_HEADER_H)
+        self._sample_touch_list = TouchList(browser_rect, item_height=36)
+
+        # Legacy state
         self._sample_list: list[dict] = []
         self._sample_scroll: int = 0
-        self._sample_source: str = "recordings"  # "recordings" or "samples"
+        self._sample_source: str = "recordings"
 
         # Export state
         self._status: str = ""
@@ -121,6 +128,22 @@ class KitBuilderScreen:
                 pass
 
         self._sample_scroll = 0
+
+        # Populate TouchList
+        from ui.components.touch_list import TouchListItem
+        items = []
+        for s in self._sample_list:
+            dur = s.get("duration", 0)
+            icon = "R" if s["source"] == "rec" else "L"
+            icon_color = theme.ACCENT if s["source"] == "rec" else theme.BLUE
+            items.append(TouchListItem(
+                text=s["filename"][:28],
+                subtext=f"{dur:.1f}s" if dur else "",
+                icon=icon,
+                icon_color=icon_color,
+                data=s,
+            ))
+        self._sample_touch_list.set_items(items)
 
     # ── Computed helpers ────────────────────────────────────────────
 
@@ -229,11 +252,20 @@ class KitBuilderScreen:
                 self._modal.hide()
             return
 
+        # TouchList handles drag scroll, wheel, and tap in browser panel
+        tapped = self._sample_touch_list.handle_event(event)
+        if tapped and tapped.data:
+            # Find the index in _sample_list and assign
+            for idx, s in enumerate(self._sample_list):
+                if s["path"] == tapped.data.get("path"):
+                    self._assign_sample(idx)
+                    break
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
             self._handle_click(mx, my)
 
-        # Scroll wheel in sample browser
+        # Legacy scroll (only for non-browser areas now)
         if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
             mx = event.pos[0] if hasattr(event, 'pos') else 0
             if mx >= self._BROWSER_X:
@@ -276,15 +308,7 @@ class KitBuilderScreen:
             if refresh_rect.collidepoint(mx, my):
                 self._refresh_samples()
                 return
-
-            # Sample list items
-            list_top = self._browser_list_y()
-            if my >= list_top:
-                row_idx = (my - list_top) // self._BROWSER_ITEM_H
-                abs_idx = self._sample_scroll + row_idx
-                if 0 <= abs_idx < len(self._sample_list):
-                    self._assign_sample(abs_idx)
-                return
+            # TouchList handles tap + scroll below
             return
 
         # ---- Bank selector ----
@@ -471,6 +495,7 @@ class KitBuilderScreen:
     # ── Update ──────────────────────────────────────────────────────
 
     def update(self):
+        self._sample_touch_list.update()
         if self._status_timer > 0:
             self._status_timer -= 1
             if self._status_timer == 0:
@@ -575,57 +600,8 @@ class KitBuilderScreen:
         refresh_rect = self._refresh_btn_rect()
         theme.draw_button(surface, refresh_rect, "REFRESH", f_tiny)
 
-        # Sample list items
-        list_top = self._browser_list_y()
-        max_vis = self._browser_max_visible()
-        visible = self._sample_list[self._sample_scroll:
-                                     self._sample_scroll + max_vis]
-
-        for i, sample in enumerate(visible):
-            item_y = list_top + i * self._BROWSER_ITEM_H
-            item_rect = pygame.Rect(
-                self._BROWSER_X + 2, item_y,
-                self._BROWSER_W - 4, self._BROWSER_ITEM_H - 2)
-
-            # Alternating row bg
-            if i % 2 == 1:
-                pygame.draw.rect(surface, theme.BG_LIGHTER, item_rect,
-                                 border_radius=2)
-
-            # Source indicator
-            src_char = "R" if sample.get("source") == "rec" else "L"
-            src_color = theme.ACCENT if src_char == "R" else theme.BLUE
-            src_surf = f_tiny.render(src_char, True, src_color)
-            surface.blit(src_surf, (item_rect.x + 4, item_y + 6))
-
-            # Filename (truncated)
-            fname = _truncate(sample.get("filename", "???"), 24)
-            fname_surf = f_tiny.render(fname, True, theme.TEXT)
-            surface.blit(fname_surf, (item_rect.x + 18, item_y + 6))
-
-            # Duration on right
-            dur = sample.get("duration", 0)
-            dur_str = f"{dur:.1f}s"
-            dur_surf = f_tiny.render(dur_str, True, theme.TEXT_DIM)
-            surface.blit(dur_surf,
-                         (item_rect.right - dur_surf.get_width() - 6, item_y + 6))
-
-        # Scroll indicator
-        total = len(self._sample_list)
-        if total > max_vis:
-            shown_end = min(self._sample_scroll + max_vis, total)
-            scroll_text = f"{self._sample_scroll + 1}-{shown_end}/{total}"
-            scroll_surf = f_tiny.render(scroll_text, True, theme.TEXT_DIM)
-            surface.blit(scroll_surf,
-                         (self._BROWSER_X + self._BROWSER_W - scroll_surf.get_width() - 6,
-                          self._BROWSER_Y + self._BROWSER_H - 14))
-
-        if not self._sample_list:
-            empty_surf = f_small.render("No samples found", True, theme.TEXT_DIM)
-            er = empty_surf.get_rect(
-                centerx=self._BROWSER_X + self._BROWSER_W // 2,
-                centery=self._BROWSER_Y + self._BROWSER_H // 2)
-            surface.blit(empty_surf, er)
+        # Sample list (touch-friendly)
+        self._sample_touch_list.draw(surface)
 
         # ---- Bank selector (y=354-386) ----
         for i in range(8):

@@ -31,6 +31,19 @@ class P6SampleScreen:
         os.makedirs(sample_dir, exist_ok=True)
         self._recordings_dir = app.config.get("P6_RECORDING_DIR", "recordings")
 
+        # Touch-friendly folder browser for browse mode
+        from ui.components.folder_browser import FolderBrowser
+        browse_rect = pygame.Rect(16, 78,
+                                   theme.SCREEN_WIDTH - 32,
+                                   theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 82)
+        self._browser = FolderBrowser(
+            browse_rect, root_dir=sample_dir,
+            file_filter=lambda f: any(f.lower().endswith(e)
+                                      for e in (".wav", ".aif", ".aiff", ".mp3", ".flac")),
+            item_height=44,
+        )
+
+        # Legacy state for backward compat (convert mode still uses these)
         self._file_list: list[dict] = []
         self._file_scroll = 0
         self._file_selected = -1
@@ -135,21 +148,32 @@ class P6SampleScreen:
                 return
 
             if self._mode == "browse":
-                self._handle_browse(mx, my)
+                # Recordings shortcut button
+                rec_rect = pygame.Rect(110, 42, 130, 28)
+                if rec_rect.collidepoint(mx, my):
+                    self._browser.navigate_to(self._recordings_dir)
+                    return
+                # FolderBrowser handles the rest
             elif self._mode == "slicer":
                 self._handle_slicer(mx, my)
             elif self._mode == "convert":
                 self._handle_convert(mx, my)
 
+        # Browse mode: delegate ALL events to FolderBrowser (drag scroll, wheel, etc.)
+        if self._mode == "browse":
+            result = self._browser.handle_event(event)
+            if result and result.get("type") == "file":
+                # File selected — load into slicer
+                if self._slicer.load(result["path"]):
+                    self._mode = "slicer"
+                    self._slice_scroll = 0
+            return
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
             mx_pos = event.pos[0] if hasattr(event, 'pos') else 0
             my_pos = event.pos[1] if hasattr(event, 'pos') else 0
             if self._mode == "browse":
-                max_s = max(0, len(self._file_list) - 14)
-                if event.button == 4:
-                    self._file_scroll = max(0, self._file_scroll - 1)
-                else:
-                    self._file_scroll = min(max_s, self._file_scroll + 1)
+                pass  # Handled by FolderBrowser above
             elif self._mode == "convert":
                 max_s = max(0, len(self._convert_recordings) - 9)
                 if event.button == 4:
@@ -359,6 +383,8 @@ class P6SampleScreen:
         return int(wave_rect.x + view_frac * wave_rect.width)
 
     def update(self):
+        if self._mode == "browse":
+            self._browser.update()
         if self._export_flash > 0:
             self._export_flash -= 1
         if self._transfer_flash > 0:
@@ -392,7 +418,13 @@ class P6SampleScreen:
         surface.blit(surf, (theme.SCREEN_WIDTH - 480, 12))
 
         if self._mode == "browse":
-            self._draw_browse(surface, f_med, f_small)
+            # Recordings shortcut button (above browser)
+            rec_rect = pygame.Rect(110, 42, 130, 28)
+            pygame.draw.rect(surface, theme.BUTTON_BG, rec_rect, border_radius=4)
+            surf = f_small.render("RECORDINGS", True, theme.ACCENT)
+            surface.blit(surf, surf.get_rect(center=rec_rect.center))
+            # Touch-friendly folder browser
+            self._browser.draw(surface)
         elif self._mode == "slicer":
             self._draw_slicer(surface, f_large, f_med, f_small)
         elif self._mode == "convert":
