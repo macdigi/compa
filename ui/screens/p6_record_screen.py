@@ -24,10 +24,12 @@ class P6RecordScreen:
         self._disp_peak_r = 0.0
         self._scroll_offset = 0
         self._recall_flash = 0
+        self._sort_key = "date"  # date, name, size, length
+        self._sort_reverse = True  # newest first by default
 
         # Touch-friendly recording list
         from ui.components.touch_list import TouchList
-        list_y = 172
+        list_y = 182  # Below sort bar
         list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - list_y - 4
         self._rec_list = TouchList(
             pygame.Rect(16, list_y, theme.SCREEN_WIDTH - 32, list_h),
@@ -37,7 +39,7 @@ class P6RecordScreen:
         # Detail modal for recording management
         self._detail_modal = Modal(
             "Recording", "", buttons=["PLAY", "STAR", "RENAME", "DELETE", "CLOSE"],
-            width=500, height=260,
+            width=680, height=220,
         )
         self._detail_rec: dict | None = None  # currently selected recording
 
@@ -196,9 +198,21 @@ class P6RecordScreen:
                 self._send_to_slicer()
                 return
 
-            # Recording list handled by TouchList below
+            # Sort buttons (y=162, between waveform and list)
+            sort_y = 162
+            sort_btns = [
+                (pygame.Rect(16, sort_y, 60, 16), "date"),
+                (pygame.Rect(80, sort_y, 60, 16), "name"),
+                (pygame.Rect(144, sort_y, 50, 16), "size"),
+                (pygame.Rect(198, sort_y, 60, 16), "length"),
+            ]
+            for rect, sort_key in sort_btns:
+                if rect.collidepoint(mx, my):
+                    self._sort_recordings(sort_key)
+                    return
 
-        # TouchList handles drag scroll, wheel scroll, and tap
+        # TouchList handles ALL events (drag scroll, wheel, tap)
+        # Must be outside the button-1 check so MOUSEMOTION/UP reach it
         tapped = self._rec_list.handle_event(event)
         if tapped and tapped.data:
             rec = tapped.data
@@ -214,6 +228,18 @@ class P6RecordScreen:
                 title=f"BPM:{bpm}  Pat:{pat}  Star:{starred}",
                 message=msg,
             )
+
+    def _sort_recordings(self, key: str):
+        """Change sort order. Tap same key again to reverse."""
+        if key == self._sort_key:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_key = key
+            self._sort_reverse = True if key == "date" else False
+        self._last_rec_refresh = 0  # Force refresh
+        # Force rebuild by clearing items
+        self._rec_list.set_items([])
+        print(f"Sort: {key} {'desc' if self._sort_reverse else 'asc'}", flush=True)
 
     def _send_to_slicer(self):
         """Send the most recent recording (or selected) to the slicer."""
@@ -237,8 +263,18 @@ class P6RecordScreen:
         recordings = self.app.recorder.list_recordings()
 
         # Don't rebuild if count hasn't changed (preserves scroll)
-        if len(recordings) == len(self._rec_list.items):
+        if len(recordings) == len(self._rec_list.items) and len(recordings) > 0:
             return
+
+        # Sort recordings
+        sort_funcs = {
+            "date": lambda r: r.get("filename", ""),  # Filename has timestamp
+            "name": lambda r: (r.get("user_name") or r.get("filename", "")).lower(),
+            "size": lambda r: r.get("size_mb", 0),
+            "length": lambda r: r.get("duration", 0),
+        }
+        key_func = sort_funcs.get(self._sort_key, sort_funcs["date"])
+        recordings = sorted(recordings, key=key_func, reverse=self._sort_reverse)
 
         saved_scroll = self._rec_list.scroll_offset
         items = []
@@ -452,9 +488,27 @@ class P6RecordScreen:
         pygame.draw.line(surface, theme.BORDER,
                         (wave_rect.x, cy), (wave_rect.right, cy), 1)
 
-        # -- Recording list (touch-friendly) --------------------------------
-        surf = f_small.render("RECORDINGS  (tap for details)", True, theme.TEXT_DIM)
-        surface.blit(surf, (16, 162))
+        # -- Sort bar (y=160) ------------------------------------------------
+        sort_y = 162
+        sort_btns = [
+            (pygame.Rect(16, sort_y, 60, 16), "date", "DATE"),
+            (pygame.Rect(80, sort_y, 60, 16), "name", "NAME"),
+            (pygame.Rect(144, sort_y, 50, 16), "size", "SIZE"),
+            (pygame.Rect(198, sort_y, 60, 16), "length", "LENGTH"),
+        ]
+        for rect, key, label in sort_btns:
+            active = self._sort_key == key
+            bg = theme.ACCENT if active else theme.BUTTON_BG
+            tc = theme.BG if active else theme.TEXT_DIM
+            pygame.draw.rect(surface, bg, rect, border_radius=3)
+            arrow = " v" if active and self._sort_reverse else " ^" if active else ""
+            surf = f_small.render(f"{label}{arrow}", True, tc)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+
+        # Recording count
+        count = len(self._rec_list.items)
+        surf = f_small.render(f"{count} recordings", True, theme.TEXT_DIM)
+        surface.blit(surf, (270, sort_y + 1))
         self._rec_list.draw(surface)
 
         # -- Draw modals on top -------------------------------------------

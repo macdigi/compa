@@ -21,17 +21,19 @@ class Modal:
         y = (theme.SCREEN_HEIGHT - height) // 2
         self.rect = pygame.Rect(x, y, width, height)
 
-        # Create buttons
+        # Create buttons — auto-size to fit within modal width
         button_labels = buttons or ["OK"]
         self._buttons: list[Button] = []
-        btn_w = 100
+        btn_gap = 10
         btn_h = 36
-        total_btn_w = len(button_labels) * btn_w + (len(button_labels) - 1) * 12
+        max_btn_area = width - 32  # Padding on each side
+        btn_w = min(100, (max_btn_area - (len(button_labels) - 1) * btn_gap) // max(1, len(button_labels)))
+        total_btn_w = len(button_labels) * btn_w + (len(button_labels) - 1) * btn_gap
         start_x = self.rect.centerx - total_btn_w // 2
         btn_y = self.rect.bottom - 52
 
         for i, label in enumerate(button_labels):
-            bx = start_x + i * (btn_w + 12)
+            bx = start_x + i * (btn_w + btn_gap)
             color = theme.ACCENT if i == 0 else theme.BUTTON_BG
             btn = Button(
                 pygame.Rect(bx, btn_y, btn_w, btn_h),
