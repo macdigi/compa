@@ -233,6 +233,7 @@ class P6RecordScreen:
     def _refresh_rec_list(self):
         """Populate the TouchList with current recordings, preserving scroll."""
         from ui.components.touch_list import TouchListItem
+        import re
         recordings = self.app.recorder.list_recordings()
 
         # Don't rebuild if count hasn't changed (preserves scroll)
@@ -242,25 +243,57 @@ class P6RecordScreen:
         saved_scroll = self._rec_list.scroll_offset
         items = []
         for rec in recordings:
-            name = rec.get("user_name") or rec["filename"]
+            fname = rec.get("filename", "")
+            user_name = rec.get("user_name", "")
             dur = rec.get("duration", 0)
             size = rec.get("size_mb", 0)
             starred = rec.get("starred", False)
             source = rec.get("source_device", "")
-            icon = "*" if starred else "~"
-            icon_color = theme.ACCENT if starred else theme.WAVEFORM_COLOR
-            subtext = f"{dur:.1f}s  {size:.1f}MB"
+
+            # Smart display name
+            display = user_name if user_name else fname
+            # Remove extension
+            display = display.rsplit(".", 1)[0] if "." in display else display
+
+            # Parse date from filename (YYYYMMDD_HHMMSS pattern)
+            date_str = ""
+            m = re.search(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})', fname)
+            if m:
+                date_str = f"{m.group(2)}/{m.group(3)} {m.group(4)}:{m.group(5)}"
+
+            # Icon based on type
+            if fname.startswith("recall_"):
+                icon = "R"
+                icon_color = theme.YELLOW
+            elif fname.startswith("radio_"):
+                icon = "~"
+                icon_color = theme.BLUE
+            elif starred:
+                icon = "*"
+                icon_color = theme.ACCENT
+            else:
+                icon = "~"
+                icon_color = theme.WAVEFORM_COLOR
+
+            # Subtext: date + duration + size + source
+            parts = []
+            if date_str:
+                parts.append(date_str)
+            parts.append(f"{dur:.1f}s")
+            parts.append(f"{size:.1f}MB")
             if source:
-                subtext += f"  [{source}]"
+                parts.append(f"[{source}]")
+            subtext = "  ".join(parts)
+
             items.append(TouchListItem(
-                text=name[:40],
+                text=display[:45],
                 subtext=subtext,
                 icon=icon,
                 icon_color=icon_color,
                 data=rec,
             ))
         self._rec_list.set_items(items)
-        self._rec_list.scroll_offset = saved_scroll  # Restore scroll position
+        self._rec_list.scroll_offset = saved_scroll
 
     def update(self):
         peak_l, peak_r = (0.0, 0.0)

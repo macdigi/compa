@@ -364,9 +364,11 @@ class P6Recorder:
             if self._stream is None:
                 return None
 
-        # Generate filename
+        # Generate filename with device prefix
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        name = f"p6_{session_name + '_' if session_name else ''}{ts}.wav"
+        dev = self.device_name.replace(":", "").replace(" ", "_")
+        prefix = session_name if session_name else dev
+        name = f"{prefix}_{ts}.wav"
         filepath = os.path.join(self._recording_dir, name)
 
         # Store metadata for writing on stop — auto-tag source device
@@ -606,7 +608,9 @@ class P6Recorder:
 
         # Generate filename
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        name = f"p6_recall_{session_name + '_' if session_name else ''}{ts}.wav"
+        dev = self.device_name.replace(":", "").replace(" ", "_")
+        prefix = session_name if session_name else dev
+        name = f"recall_{prefix}_{ts}.wav"
         filepath = os.path.join(self._recording_dir, name)
 
         try:
