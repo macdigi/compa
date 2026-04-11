@@ -57,11 +57,12 @@ class KitBuilderScreen:
         self._current_bank: int = 0   # 0-7 (A-H)
         self._selected_pad: int = 0   # 0-127 absolute index
 
-        # Sample browser (touch-friendly)
+        # Sample browser (touch-friendly) — fits in shorter browser area
         from ui.components.touch_list import TouchList
         browser_rect = pygame.Rect(
             self._BROWSER_X, self._BROWSER_Y + self._BROWSER_HEADER_H,
             self._BROWSER_W, self._BROWSER_H - self._BROWSER_HEADER_H)
+        # Recalculate to ensure it fits
         self._sample_touch_list = TouchList(browser_rect, item_height=36)
 
         # Legacy state
@@ -201,7 +202,7 @@ class KitBuilderScreen:
     _BROWSER_X = 452
     _BROWSER_Y = 44
     _BROWSER_W = 336
-    _BROWSER_H = 300
+    _BROWSER_H = 250  # Shorter to make room for waveform
     _BROWSER_ITEM_H = 26
     _BROWSER_HEADER_H = 30
 
@@ -631,9 +632,9 @@ class KitBuilderScreen:
         """Draw waveform of the currently selected pad's sample."""
         pad_data = self._pads[self._selected_pad]
         wave_x = self._BROWSER_X
-        wave_y = self._BROWSER_Y + self._BROWSER_H + 4
+        wave_y = self._BROWSER_Y + self._BROWSER_H + 6
         wave_w = self._BROWSER_W
-        wave_h = 42
+        wave_h = self._BANK_Y - wave_y - 4  # Fill space between browser and bank selector
 
         wave_rect = pygame.Rect(wave_x, wave_y, wave_w, wave_h)
         pygame.draw.rect(surface, theme.BG_PANEL, wave_rect, border_radius=4)
