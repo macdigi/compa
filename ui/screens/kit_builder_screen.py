@@ -18,6 +18,8 @@ import pygame
 from .. import theme
 from ..components.modal import Modal
 from engine.format_converter import generate_xpm, generate_adg, PadAssignment
+from engine.drum_detector import scan_library, scan_summary
+from engine.drum_mapper import auto_map
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +76,24 @@ class KitBuilderScreen:
         # Modal for rename
         self._modal = Modal("Rename Kit", "Enter kit name:",
                             buttons=["OK", "Cancel"], width=400, height=180)
+
+        # Import mode state
+        self._import_mode = False
+        self._import_summary = ""
+        from ui.components.folder_browser import FolderBrowser
+        import_rect = pygame.Rect(16, 42, theme.SCREEN_WIDTH - 32,
+                                   theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 90)
+        sample_dir = app.config.get("LOCAL_SAMPLE_CACHE",
+                                     os.path.join(os.path.dirname(os.path.dirname(
+                                         os.path.dirname(os.path.abspath(__file__)))), "samples"))
+        rec_dir = app.config.get("P6_RECORDING_DIR", "recordings")
+        self._import_browser = FolderBrowser(
+            import_rect, root_dir=sample_dir,
+            file_filter=lambda f: f.lower().endswith((".wav", ".aif", ".aiff")),
+            item_height=44,
+        )
+        self._import_root = sample_dir
+        self._import_rec_dir = rec_dir
 
         # Audio preview (optional)
         self._preview_thread = None
@@ -228,6 +248,9 @@ class KitBuilderScreen:
     def _clear_all_btn_rect(self) -> pygame.Rect:
         return pygame.Rect(118, self._ACTION_Y, 100, self._ACTION_H)
 
+    def _import_btn_rect(self) -> pygame.Rect:
+        return pygame.Rect(224, self._ACTION_Y, 100, self._ACTION_H)
+
     def _export_adg_btn_rect(self) -> pygame.Rect:
         return pygame.Rect(theme.SCREEN_WIDTH - 440, self._ACTION_Y, 124, self._ACTION_H)
 
@@ -250,6 +273,11 @@ class KitBuilderScreen:
                 self._modal.hide()
             elif result == "Cancel":
                 self._modal.hide()
+            return
+
+        # Import mode — FolderBrowser takes over
+        if self._import_mode:
+            self._handle_import_event(event)
             return
 
         # TouchList handles drag scroll, wheel, and tap in browser panel
@@ -332,6 +360,11 @@ class KitBuilderScreen:
         if self._clear_all_btn_rect().collidepoint(mx, my):
             self._pads = [None] * 128
             self._set_status("All pads cleared")
+            return
+
+        if self._import_btn_rect().collidepoint(mx, my):
+            self._import_mode = True
+            self._import_browser.navigate_to(self._import_root)
             return
 
         if self._export_adg_btn_rect().collidepoint(mx, my):
@@ -494,8 +527,99 @@ class KitBuilderScreen:
 
     # ── Update ──────────────────────────────────────────────────────
 
+    def _handle_import_event(self, event):
+        """Handle events in import browse mode."""
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+
+            # CANCEL button
+            cancel_rect = pygame.Rect(16, theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 44, 100, 36)
+            if cancel_rect.collidepoint(mx, my):
+                self._import_mode = False
+                return
+
+            # SCAN & IMPORT button
+            scan_rect = pygame.Rect(theme.SCREEN_WIDTH - 220,
+                                     theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 44, 200, 36)
+            if scan_rect.collidepoint(mx, my):
+                self._do_import()
+                return
+
+        # Browser handles navigation
+        self._import_browser.handle_event(event)
+
+    def _draw_import_mode(self, surface, f_med, f_small, f_tiny):
+        """Draw the import folder browser overlay."""
+        # Title
+        surf = f_med.render("SELECT SAMPLE LIBRARY FOLDER", True, theme.ACCENT)
+        surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=40))
+
+        # Hint
+        surf = f_tiny.render("Navigate to a folder with drum samples (Kicks/, Snares/, etc.)",
+                            True, theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=60))
+
+        # Browser (below hint)
+        self._import_browser.set_rect(pygame.Rect(
+            16, 78, theme.SCREEN_WIDTH - 32,
+            theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 130))
+        self._import_browser.draw(surface)
+
+        # Bottom buttons
+        btn_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 44
+
+        cancel_rect = pygame.Rect(16, btn_y, 100, 36)
+        pygame.draw.rect(surface, theme.BUTTON_BG, cancel_rect, border_radius=6)
+        surf = f_small.render("CANCEL", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=cancel_rect.center))
+
+        scan_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, btn_y, 200, 36)
+        pygame.draw.rect(surface, theme.GREEN, scan_rect, border_radius=6)
+        surf = f_med.render("SCAN & IMPORT", True, theme.BG)
+        surface.blit(surf, surf.get_rect(center=scan_rect.center))
+
+        # Current path hint
+        cur = self._import_browser.current_path
+        if cur:
+            surf = f_tiny.render(f"Will scan: {os.path.basename(cur)}/",
+                                True, theme.TEXT_DIM)
+            surface.blit(surf, (130, btn_y + 10))
+
+    def _do_import(self):
+        """Scan the current browser directory and auto-map to pads."""
+        scan_dir = self._import_browser.current_path
+        if not scan_dir or not os.path.isdir(scan_dir):
+            self._set_status("No folder selected")
+            return
+
+        # Scan and classify
+        classified = scan_library(scan_dir)
+        summary = scan_summary(classified)
+        total = sum(len(v) for v in classified.values())
+
+        if total == 0:
+            self._set_status("No audio files found in this folder")
+            return
+
+        # Auto-map to pads
+        mapped_pads = auto_map(classified)
+        assigned = sum(1 for p in mapped_pads if p is not None)
+
+        # Apply to Kit Builder
+        self._pads = mapped_pads
+        self._kit_name = os.path.basename(scan_dir)
+        self._current_bank = 0
+        self._selected_pad = 0
+        self._import_mode = False
+        self._import_summary = summary
+        self._set_status(f"Imported {assigned} samples: {summary}")
+        print(f"Smart import: {assigned} pads from {scan_dir}", flush=True)
+        print(f"  {summary}", flush=True)
+
     def update(self):
         self._sample_touch_list.update()
+        if self._import_mode:
+            self._import_browser.update()
         if self._status_timer > 0:
             self._status_timer -= 1
             if self._status_timer == 0:
@@ -513,6 +637,11 @@ class KitBuilderScreen:
 
         # ---- Header (y=0-38) ----
         theme.draw_screen_header(surface, "KIT BUILDER", self._kit_name)
+
+        # Import mode overlay
+        if self._import_mode:
+            self._draw_import_mode(surface, f_med, f_small, f_tiny)
+            return
 
         # Rename button on header
         rename_rect = self._rename_btn_rect()
@@ -637,8 +766,13 @@ class KitBuilderScreen:
         theme.draw_button(surface, clear_all_rect, "CLEAR ALL", f_small,
                           color=theme.RED)
 
-        # Kit name display in the middle
-        name_x = 230
+        # IMPORT button
+        import_rect = self._import_btn_rect()
+        theme.draw_button(surface, import_rect, "IMPORT", f_small,
+                          color=theme.BLUE)
+
+        # Kit name display
+        name_x = 336
         name_surf = f_med.render(self._kit_name, True, theme.ACCENT)
         surface.blit(name_surf, (name_x, self._ACTION_Y + 6))
 
