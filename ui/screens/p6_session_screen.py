@@ -128,32 +128,13 @@ class P6SessionScreen:
             self._save_notes()
 
     # ── ASCII art device names (playing card style) ────────────────
-    _ASCII_ART = {
-        "P-6": [
-            "____    ___  ",
-            "|   \\  / _ \\ ",
-            "|___/ | (_) |",
-            "|     \\___/ ",
-        ],
-        "SP-404": [
-            " __  ___    _  _  ___  _  _ ",
-            "/ _|| _ \\  | || |/ _ \\| || |",
-            "\\_ \\|  _/  |_  _| (_) |_  _|",
-            "|__/|_|      |_| \\___/  |_| ",
-        ],
-        "Force": [
-            " ___ ___  ___  ___ ___ ",
-            "| __/ _ \\| _ \\/ __| __|",
-            "| _| (_) |   / (__| _| ",
-            "|_| \\___/|_|_\\___|___|",
-        ],
-        "COMPA": [
-            "  ___ ___  __  __ ___  _   ",
-            " / __/ _ \\|  \\/  | _ \\/ \\  ",
-            "| (_| (_) | |\\/| |  _/ _ \\ ",
-            " \\___\\___/|_|  |_|_|/_/ \\_\\",
-        ],
-    }
+    # COMPA logo (keep the original that works)
+    _COMPA_LOGO = [
+        "  ___ ___  __  __ ___  _   ",
+        " / __/ _ \\|  \\/  | _ \\/ \\  ",
+        "| (_| (_) | |\\/| |  _/ _ \\ ",
+        " \\___\\___/|_|  |_|_|/_/ \\_\\",
+    ]
 
     # Device → theme color name for card accent
     _DEVICE_COLORS = {
@@ -172,8 +153,7 @@ class P6SessionScreen:
         f_mono = theme.font("mono")
 
         # ── COMPA logo (top left) ────────────────────────────────────
-        logo_lines = self._ASCII_ART.get("COMPA", [])
-        for i, line in enumerate(logo_lines):
+        for i, line in enumerate(self._COMPA_LOGO):
             surf = f_mono.render(line, True, theme.ACCENT)
             surface.blit(surf, (12, 6 + i * 14))
 
@@ -217,17 +197,10 @@ class P6SessionScreen:
             cx = card_x + 12
             cy = cards_y + 12
 
-            # ── ASCII art device name ────────────────────────────────
-            art_lines = self._ASCII_ART.get(short_name, [])
-            if art_lines:
-                for i, line in enumerate(art_lines):
-                    surf = f_mono.render(line, True, device_color)
-                    surface.blit(surf, (cx, cy + i * 13))
-                cy += len(art_lines) * 13 + 6
-            else:
-                surf = f_large.render(profile.name, True, device_color)
-                surface.blit(surf, (cx, cy))
-                cy += 28
+            # ── Device name (big, bold, in device color) ────────────
+            surf = f_title.render(short_name, True, device_color)
+            surface.blit(surf, (cx, cy))
+            cy += surf.get_height() + 4
 
             # Connection dot
             if is_connected:
