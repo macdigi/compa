@@ -981,11 +981,18 @@ class P6App:
                     self.device_manager._focus_key = None
                     self.device_manager._active_device = None
 
-    def switch_screen(self, name: str):
+    def switch_screen(self, name: str, context: dict | None = None):
+        """Switch to a screen, optionally passing context data.
+
+        Context is stored in self._screen_context and consumed by
+        the target screen's on_enter(). Screens that don't use context
+        ignore it — fully backward compatible.
+        """
         if name in self.screens and name != self.current_screen_name:
             old_screen = self.screens.get(self.current_screen_name)
             if old_screen and hasattr(old_screen, "on_exit"):
                 old_screen.on_exit()
+            self._screen_context = context or {}
             self.current_screen_name = name
             new_screen = self.screens[name]
             if hasattr(new_screen, "on_enter"):

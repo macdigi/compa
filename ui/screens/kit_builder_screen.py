@@ -76,6 +76,7 @@ class KitBuilderScreen:
         self._WAVE_POINTS = 300  # Downsample to this many points
 
         # Export state
+        self._last_export_name: str = ""  # Set after successful export for PUSH workflow
         self._status: str = ""
         self._status_timer: int = 0
         self._exporting: bool = False
@@ -110,6 +111,12 @@ class KitBuilderScreen:
     def on_enter(self):
         """Called when screen becomes active."""
         self._refresh_samples()
+
+        # Check for cross-device workflow context (slices from slicer)
+        ctx = getattr(self.app, "_screen_context", {})
+        if ctx.get("slice_paths"):
+            self._import_slice_batch(ctx["slice_paths"], ctx.get("kit_name", "Sliced Kit"))
+            self.app._screen_context = {}  # Consume
 
     def on_exit(self):
         """Called when leaving screen."""
@@ -389,7 +396,14 @@ class KitBuilderScreen:
             return
 
         if self._upload_btn_rect().collidepoint(mx, my):
-            self._export_xpm(upload=True)
+            if self._last_export_name:
+                # PUSH TO DEVICE — jump to transfer screen with kit pre-selected
+                self.app.switch_screen("transfer", {
+                    "mode": "kits",
+                    "kit_name": self._last_export_name,
+                })
+            else:
+                self._export_xpm(upload=True)
             return
 
     # ── Actions ─────────────────────────────────────────────────────
@@ -478,6 +492,7 @@ class KitBuilderScreen:
                     self._set_status(
                         f"Exported! {len(assigned)} pads -> "
                         f"{self._kit_name}.Drum.xpm")
+                    self._last_export_name = self._kit_name
                     if upload:
                         self._set_status(
                             f"Exported! {len(assigned)} pads -> "
@@ -525,6 +540,7 @@ class KitBuilderScreen:
                     self._set_status(
                         f"Exported! {len(assigned)} pads -> "
                         f"{self._kit_name}.adg")
+                    self._last_export_name = self._kit_name
                 else:
                     self._set_status("ADG export failed -- check logs")
             except Exception as e:
@@ -603,6 +619,33 @@ class KitBuilderScreen:
             surf = f_tiny.render(f"Will scan: {os.path.basename(cur)}/",
                                 True, theme.TEXT_DIM)
             surface.blit(surf, (130, btn_y + 10))
+
+    def _import_slice_batch(self, paths: list[str], kit_name: str):
+        """Auto-assign a list of sample paths to consecutive pads."""
+        self._pads = [None] * 128
+        self._kit_name = kit_name
+        self._current_bank = 0
+        self._selected_pad = 0
+
+        for i, path in enumerate(paths[:128]):
+            if not os.path.isfile(path):
+                continue
+            dur = 0.0
+            try:
+                import soundfile as sf
+                info = sf.info(path)
+                dur = info.duration
+            except Exception:
+                pass
+            self._pads[i] = {
+                "path": path,
+                "filename": os.path.basename(path),
+                "duration": dur,
+            }
+
+        assigned = sum(1 for p in self._pads if p is not None)
+        self._set_status(f"Imported {assigned} slices as '{kit_name}'")
+        print(f"Slice batch import: {assigned} pads from {len(paths)} files", flush=True)
 
     def _load_waveform(self, path: str) -> np.ndarray | None:
         """Load and downsample a WAV for preview display."""
@@ -912,7 +955,11 @@ class KitBuilderScreen:
 
         # Export & Upload
         upload_rect = self._upload_btn_rect()
-        if has_pads:
+        if self._last_export_name:
+            pygame.draw.rect(surface, theme.GREEN, upload_rect, border_radius=6)
+            surf = f_small.render("PUSH TO DEVICE →", True, theme.BG)
+            surface.blit(surf, surf.get_rect(center=upload_rect.center))
+        elif has_pads:
             theme.draw_button(surface, upload_rect, "EXPORT & UPLOAD", f_small,
                               active=True)
         else:

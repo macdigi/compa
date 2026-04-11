@@ -56,6 +56,7 @@ class P6SampleScreen:
         self._slice_scroll = 0
         self._export_flash = 0
         self._transfer_flash = 0
+        self._last_exported_slices: list[str] = []  # For BUILD KIT workflow
         self._p6_mounted = False
 
         # Waveform zoom
@@ -103,6 +104,17 @@ class P6SampleScreen:
     def on_enter(self):
         self._p6_mounted = os.path.isdir(P6_MOUNT_PATH)
         self._refresh_files()
+
+        # Check for cross-device workflow context
+        ctx = getattr(self.app, "_screen_context", {})
+        if ctx.get("recording_path"):
+            path = ctx["recording_path"]
+            if os.path.isfile(path) and self._slicer.load(path):
+                self._mode = "slicer"
+                self._slice_scroll = 0
+                print(f"Auto-loaded recording: {os.path.basename(path)}", flush=True)
+            self.app._screen_context = {}  # Consume context
+
         # Auto-detect connected device for convert target default
         if self._p6_mounted:
             self._convert_target = "p6"
@@ -304,14 +316,27 @@ class P6SampleScreen:
 
         export_rect = pygame.Rect(theme.SCREEN_WIDTH - 230, btn_y, 105, 28)
         if export_rect.collidepoint(mx, my):
-            if self._slicer.export_slices(normalize=True):
+            exported = self._slicer.export_slices(normalize=True)
+            if exported:
                 self._export_flash = 30
+                self._last_exported_slices = exported
             return
 
         transfer_rect = pygame.Rect(theme.SCREEN_WIDTH - 120, btn_y, 105, 28)
         if transfer_rect.collidepoint(mx, my):
             if self._slicer.transfer_to_p6() > 0:
                 self._transfer_flash = 30
+            return
+
+        # BUILD KIT button (visible after exporting slices)
+        kit_rect = pygame.Rect(theme.SCREEN_WIDTH - 345, btn_y, 105, 28)
+        if kit_rect.collidepoint(mx, my) and self._last_exported_slices:
+            stem = os.path.splitext(os.path.basename(
+                self._slicer._filepath or "slices"))[0]
+            self.app.switch_screen("kit", {
+                "slice_paths": self._last_exported_slices,
+                "kit_name": stem,
+            })
             return
 
         # Edit toolbar row (y=318) — positions must match _draw_slicer exactly
@@ -702,6 +727,13 @@ class P6SampleScreen:
         pygame.draw.rect(surface, theme.BUTTON_BG, clear_rect, border_radius=6)
         surf = f_med.render("CLEAR", True, theme.RED)
         surface.blit(surf, surf.get_rect(center=clear_rect.center))
+
+        # BUILD KIT button (visible after export)
+        if self._last_exported_slices:
+            kit_rect = pygame.Rect(theme.SCREEN_WIDTH - 345, btn_y, 105, 28)
+            pygame.draw.rect(surface, theme.BLUE, kit_rect, border_radius=6)
+            surf = f_med.render("BUILD KIT →", True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=kit_rect.center))
 
         # Export + transfer
         export_rect = pygame.Rect(theme.SCREEN_WIDTH - 230, btn_y, 105, 28)

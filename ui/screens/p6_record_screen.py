@@ -190,6 +190,12 @@ class P6RecordScreen:
                 self.app.recorder.set_threshold(self.app.recorder._threshold + 0.005)
                 return
 
+            # SLICE IT button (row 2 right side) — sends to slicer
+            slice_rect = pygame.Rect(theme.SCREEN_WIDTH - 130, 24, 110, 14)
+            if slice_rect.collidepoint(mx, my):
+                self._send_to_slicer()
+                return
+
             # Recording list handled by TouchList below
 
         # TouchList handles drag scroll, wheel scroll, and tap
@@ -208,6 +214,21 @@ class P6RecordScreen:
                 title=f"BPM:{bpm}  Pat:{pat}  Star:{starred}",
                 message=msg,
             )
+
+    def _send_to_slicer(self):
+        """Send the most recent recording (or selected) to the slicer."""
+        # Use detail_rec if one is selected, otherwise use the last recording
+        path = None
+        if self._detail_rec:
+            path = self._detail_rec.get("path")
+        else:
+            recordings = self.app.recorder.list_recordings()
+            if recordings:
+                path = recordings[0].get("path")
+        if path and os.path.isfile(path):
+            self.app.switch_screen("sample", {"recording_path": path})
+        else:
+            print("SLICE IT: no recording to slice", flush=True)
 
     def _refresh_rec_list(self):
         """Populate the TouchList with current recordings."""
@@ -345,11 +366,13 @@ class P6RecordScreen:
         th_val = f_small.render(f"{self.app.recorder._threshold:.3f}", True, theme.TEXT_DIM)
         surface.blit(th_val, (160, 25))
 
-        # File name on row 2 right side
-        fname = self.app.recorder.current_file
-        if fname and recording:
-            surf = f_small.render(os.path.basename(fname)[:30], True, theme.TEXT_DIM)
-            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 16, 25))
+        # SLICE IT button (row 2 right) — always visible when recordings exist
+        slice_rect = pygame.Rect(theme.SCREEN_WIDTH - 130, 24, 110, 14)
+        has_recs = len(self.app.recorder.list_recordings()) > 0
+        if has_recs:
+            pygame.draw.rect(surface, theme.BLUE, slice_rect, border_radius=3)
+            surf = f_small.render("SLICE IT →", True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=slice_rect.center))
 
         # -- Level meters (y=42-56, each 6px tall) ------------------------
         meter_x = 16

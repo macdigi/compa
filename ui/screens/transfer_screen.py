@@ -71,6 +71,20 @@ class TransferScreen:
         self._refresh_pull_browser()
         self._refresh_kit_list()
 
+        # Check for cross-device workflow context
+        ctx = getattr(self.app, "_screen_context", {})
+        if ctx.get("mode") == "kits":
+            self._mode = "kits"
+            # Pre-highlight the specified kit
+            kit_name = ctx.get("kit_name", "")
+            if kit_name:
+                for item in self._kit_list.items:
+                    if item.data and item.data.get("name") == kit_name:
+                        item.selected = True
+                        self._set_status(f"Kit '{kit_name}' ready to push")
+                        break
+            self.app._screen_context = {}  # Consume
+
     def on_exit(self):
         pass
 
