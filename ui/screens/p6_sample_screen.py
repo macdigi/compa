@@ -174,15 +174,21 @@ class P6SampleScreen:
             elif self._mode == "convert":
                 self._handle_convert(mx, my)
 
-        # Browse mode: delegate ALL events to FolderBrowser (drag scroll, wheel, etc.)
+        # Browse mode: delegate ALL events to FolderBrowser
         if self._mode == "browse":
             result = self._browser.handle_event(event)
             if result and result.get("type") == "file":
-                # File selected — load into slicer
                 if self._slicer.load(result["path"]):
                     self._mode = "slicer"
                     self._slice_scroll = 0
             return
+
+        # Slicer mode: delegate to slice TouchList for drag scroll
+        if self._mode == "slicer" and hasattr(self, "_slice_touch_list"):
+            tapped = self._slice_touch_list.handle_event(event)
+            if tapped and tapped.data:
+                idx = tapped.data.get("index", 0)
+                self._slicer.preview_slice(idx)
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
             mx_pos = event.pos[0] if hasattr(event, 'pos') else 0
@@ -246,18 +252,19 @@ class P6SampleScreen:
                 return
 
     def _get_wave_rect(self):
-        return pygame.Rect(16, 42, 700, 188)
+        zx = theme.SCREEN_WIDTH - 66
+        return pygame.Rect(16, 42, zx - 24, 256)
 
     def _handle_slicer(self, mx, my):
         if not self._slicer.loaded:
             return
 
-        # Zoom buttons FIRST (right side, stacked vertically)
-        zx = 724
-        zoom_in_rect = pygame.Rect(zx, 42, 60, 30)
-        zoom_out_rect = pygame.Rect(zx, 76, 60, 30)
-        zoom_fit_rect = pygame.Rect(zx, 110, 60, 30)
-        se_btn = pygame.Rect(zx, 144, 60, 30)
+        # Zoom buttons (right side)
+        zx = theme.SCREEN_WIDTH - 66
+        zoom_in_rect = pygame.Rect(zx, 42, 60, 36)
+        zoom_out_rect = pygame.Rect(zx, 82, 60, 36)
+        zoom_fit_rect = pygame.Rect(zx, 122, 60, 36)
+        se_btn = pygame.Rect(zx, 162, 60, 36)
         if zoom_in_rect.collidepoint(mx, my):
             self._zoom_in(400)
             return
@@ -268,19 +275,15 @@ class P6SampleScreen:
             self._zoom = 1.0
             self._zoom_offset = 0.0
             return
-
-        # S/E mode toggle button
         if se_btn.collidepoint(mx, my):
             self._place_mode = "trim" if self._place_mode == "slice" else "slice"
             return
 
-        # Waveform click
+        # Waveform click (y=42-298, expanded)
         wave_rect = self._get_wave_rect()
         if wave_rect.collidepoint(mx, my):
             frame = self._pixel_to_frame(mx, wave_rect)
-
             if self._place_mode == "trim":
-                # In trim mode: left half = set start, right half = set end
                 mid = (self._slicer.start_frame + self._slicer.end_frame) // 2
                 if frame < mid:
                     self._slicer.set_start(frame, snap_zero=True)
@@ -289,76 +292,93 @@ class P6SampleScreen:
                     self._slicer.set_end(frame, snap_zero=True)
                     self._dragging_marker = "end"
             else:
-                # Slice mode: add/remove slice markers
                 tolerance = int(15 / wave_rect.width / self._zoom * self._slicer.total_frames)
                 if not self._slicer.remove_nearest_marker(frame, tolerance):
                     self._slicer.add_marker(frame, snap_zero=True)
             return
 
-        # Slice list (y=248, rows 16px tall, max 4 visible)
-        list_y = 248
-        slices = self._slicer.get_slices()
-        for i in range(min(4, len(slices) - self._slice_scroll)):
-            row_rect = pygame.Rect(16, list_y + i * 16, 500, 15)
-            if row_rect.collidepoint(mx, my):
-                self._slicer.preview_slice(self._slice_scroll + i)
-                return
-
-        # Slice action buttons (y=352)
-        btn_y = 352
+        # ── Toolbar Row 1 (y=320): /2 /4 /8 /16 CLEAR TRANSIENT ─────
+        r1y = 320
+        bh = 24
         for j, n in enumerate([2, 4, 8, 16]):
-            rect = pygame.Rect(16 + j * 69, btn_y, 65, 28)
+            rect = pygame.Rect(16 + j * 56, r1y, 52, bh)
             if rect.collidepoint(mx, my):
                 self._slicer.auto_slice(n)
                 return
 
-        clear_rect = pygame.Rect(16 + 4 * 69, btn_y, 65, 28)
+        clear_rect = pygame.Rect(16 + 4 * 56, r1y, 52, bh)
         if clear_rect.collidepoint(mx, my):
             self._slicer.clear_markers()
             return
 
-        # Transient detection button
-        trans_rect = pygame.Rect(16 + 5 * 69, btn_y, 90, 28)
+        trans_rect = pygame.Rect(16 + 5 * 56, r1y, 80, bh)
         if trans_rect.collidepoint(mx, my):
-            count = self._slicer.transient_slice(
-                sensitivity=self._transient_sens)
+            count = self._slicer.transient_slice(sensitivity=self._transient_sens)
             self._set_status(f"Transient: {count} slices")
             return
 
-        # Sensitivity -/+ for transient detection
-        sens_down = pygame.Rect(16 + 5 * 69 + 94, btn_y, 28, 28)
+        sx = 16 + 5 * 56 + 84
+        sens_down = pygame.Rect(sx, r1y, 24, bh)
         if sens_down.collidepoint(mx, my):
             self._transient_sens = max(0.05, self._transient_sens - 0.1)
             return
-        sens_up = pygame.Rect(16 + 5 * 69 + 126, btn_y, 28, 28)
+        sens_up = pygame.Rect(sx + 50, r1y, 24, bh)
         if sens_up.collidepoint(mx, my):
             self._transient_sens = min(1.0, self._transient_sens + 0.1)
             return
 
-        export_rect = pygame.Rect(theme.SCREEN_WIDTH - 230, btn_y, 105, 28)
+        # ── Toolbar Row 2 (y=348): edit + export ─────────────────────
+        r2y = 348
+        edit_rects = [
+            (pygame.Rect(16, r2y, 56, bh), "trim"),
+            (pygame.Rect(76, r2y, 56, bh), "norm"),
+            (pygame.Rect(136, r2y, 56, bh), "mono"),
+            (pygame.Rect(196, r2y, 56, bh), "undo"),
+        ]
+        for rect, action in edit_rects:
+            if rect.collidepoint(mx, my):
+                if action == "trim":
+                    self._slicer.trim_to_selection()
+                elif action == "norm":
+                    self._slicer.normalize()
+                elif action == "mono":
+                    self._slicer.to_mono()
+                elif action == "undo" and self._slicer.can_undo:
+                    self._slicer.undo()
+                return
+
+        # Export
+        rx = theme.SCREEN_WIDTH - 16
+        dev_name = self.app.device_name
+        tw = 100
+        transfer_rect = pygame.Rect(rx - tw, r2y, tw, bh)
+        if transfer_rect.collidepoint(mx, my):
+            if self._slicer.transfer_to_p6() > 0:
+                self._transfer_flash = 30
+            return
+        rx -= tw + 4
+
+        ew = 80
+        export_rect = pygame.Rect(rx - ew, r2y, ew, bh)
         if export_rect.collidepoint(mx, my):
             exported = self._slicer.export_slices(normalize=True)
             if exported:
                 self._export_flash = 30
                 self._last_exported_slices = exported
             return
+        rx -= ew + 4
 
-        transfer_rect = pygame.Rect(theme.SCREEN_WIDTH - 120, btn_y, 105, 28)
-        if transfer_rect.collidepoint(mx, my):
-            if self._slicer.transfer_to_p6() > 0:
-                self._transfer_flash = 30
-            return
-
-        # BUILD KIT button (visible after exporting slices)
-        kit_rect = pygame.Rect(theme.SCREEN_WIDTH - 345, btn_y, 105, 28)
-        if kit_rect.collidepoint(mx, my) and self._last_exported_slices:
-            stem = os.path.splitext(os.path.basename(
-                self._slicer._filepath or "slices"))[0]
-            self.app.switch_screen("kit", {
-                "slice_paths": self._last_exported_slices,
-                "kit_name": stem,
-            })
-            return
+        if self._last_exported_slices:
+            kw = 90
+            kit_rect = pygame.Rect(rx - kw, r2y, kw, bh)
+            if kit_rect.collidepoint(mx, my):
+                stem = os.path.splitext(os.path.basename(
+                    self._slicer._filepath or "slices"))[0]
+                self.app.switch_screen("kit", {
+                    "slice_paths": self._last_exported_slices,
+                    "kit_name": stem,
+                })
+                return
 
         # Edit toolbar row (y=318) — positions must match _draw_slicer exactly
         edit_y = 318
@@ -436,6 +456,8 @@ class P6SampleScreen:
     def update(self):
         if self._mode == "browse":
             self._browser.update()
+        if self._mode == "slicer" and hasattr(self, "_slice_touch_list"):
+            self._slice_touch_list.update()
         if self._export_flash > 0:
             self._export_flash -= 1
         if self._transfer_flash > 0:
@@ -461,10 +483,16 @@ class P6SampleScreen:
             surf = f_small.render(label, True, tc)
             surface.blit(surf, surf.get_rect(center=rect.center))
 
-        # P-6 mount status (inline with header, left of mode buttons)
+        # Device mount status (device-agnostic)
+        dev = self.app.device
         self._p6_mounted = os.path.isdir(P6_MOUNT_PATH)
-        mt = "P-6 USB: READY" if self._p6_mounted else "P-6 USB: --"
-        mc = theme.GREEN if self._p6_mounted else theme.TEXT_DIM
+        if dev and dev.mount_path:
+            mounted = os.path.isdir(dev.mount_path)
+            mt = f"{self.app.device_name} USB: READY" if mounted else f"{self.app.device_name} USB: --"
+        else:
+            mounted = self._p6_mounted
+            mt = "USB: READY" if mounted else "USB: --"
+        mc = theme.GREEN if mounted else theme.TEXT_DIM
         surf = f_small.render(mt, True, mc)
         surface.blit(surf, (theme.SCREEN_WIDTH - 480, 12))
 
@@ -530,9 +558,11 @@ class P6SampleScreen:
         surface.blit(surf, (16, theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 18))
 
     def _draw_slicer(self, surface, f_large, f_med, f_small):
+        f_tiny = theme.font("tiny")
+
         if not self._slicer.loaded:
-            surf = f_med.render("No file loaded -- tap BROWSE and select a WAV", True, theme.TEXT_DIM)
-            surface.blit(surf, (16, 100))
+            surf = f_med.render("No file loaded — tap BROWSE and select a WAV", True, theme.TEXT_DIM)
+            surface.blit(surf, (16, 150))
             return
 
         # Filename info inline with header
@@ -540,10 +570,11 @@ class P6SampleScreen:
         surf = f_small.render(info, True, theme.TEXT)
         surface.blit(surf, (240, 14))
 
-        # ── Waveform display (y=42-230, 700w, zoom buttons on right) ──
-        wave_panel = pygame.Rect(12, 40, 706, 192)
+        # ── WAVEFORM (y=40-300, 260px tall, full width minus zoom panel) ──
+        zx = theme.SCREEN_WIDTH - 66  # Zoom panel x
+        wave_panel = pygame.Rect(12, 40, zx - 16, 260)
         theme.draw_panel(surface, wave_panel, border=True)
-        wave_rect = pygame.Rect(16, 42, 700, 188)
+        wave_rect = pygame.Rect(16, 42, zx - 24, 256)
         pygame.draw.rect(surface, theme.WAVEFORM_BG, wave_rect, border_radius=4)
 
         waveform = self._slicer.waveform
@@ -635,11 +666,10 @@ class P6SampleScreen:
                         (wave_rect.x, wave_rect.centery),
                         (wave_rect.right, wave_rect.centery), 1)
 
-        # ── Zoom buttons (stacked on right, x=724) ──────────────────
-        zx = 724
-        zoom_in_rect = pygame.Rect(zx, 42, 60, 30)
-        zoom_out_rect = pygame.Rect(zx, 76, 60, 30)
-        zoom_fit_rect = pygame.Rect(zx, 110, 60, 30)
+        # ── Zoom buttons (stacked on right) ──────────────────────────
+        zoom_in_rect = pygame.Rect(zx, 42, 60, 36)
+        zoom_out_rect = pygame.Rect(zx, 82, 60, 36)
+        zoom_fit_rect = pygame.Rect(zx, 122, 60, 36)
 
         for rect, label in [(zoom_in_rect, "+"), (zoom_out_rect, "-"), (zoom_fit_rect, "FIT")]:
             pygame.draw.rect(surface, theme.BUTTON_BG, rect, border_radius=4)
@@ -647,7 +677,7 @@ class P6SampleScreen:
             surface.blit(surf, surf.get_rect(center=rect.center))
 
         # Mode toggle: SLICE vs S/E
-        se_btn = pygame.Rect(zx, 144, 60, 30)
+        se_btn = pygame.Rect(zx, 162, 60, 36)
         if self._place_mode == "trim":
             se_bg = theme.GREEN
             se_label = "S / E"
@@ -662,172 +692,171 @@ class P6SampleScreen:
         # Zoom level indicator
         if self._zoom > 1.0:
             surf = f_small.render(f"{self._zoom:.0f}x", True, theme.ACCENT)
-            surface.blit(surf, (zx + 12, 178))
-            # Mini scroll position bar
+            surface.blit(surf, (zx + 12, 202))
             bar_w = 56
             bar_h = 8
             pygame.draw.rect(surface, (30, 30, 38),
-                            (zx + 2, 194, bar_w, bar_h), border_radius=2)
+                            (zx + 2, 218, bar_w, bar_h), border_radius=2)
             thumb_w = max(4, int(bar_w / self._zoom))
             thumb_x = zx + 2 + int(self._zoom_offset * (bar_w - thumb_w))
             pygame.draw.rect(surface, theme.ACCENT,
-                            (thumb_x, 194, thumb_w, bar_h), border_radius=2)
+                            (thumb_x, 218, thumb_w, bar_h), border_radius=2)
 
-        # ── Info line (y=232): S/E times + marker/slice count ────────
+        # ── Info bar (y=302): S/E times + marker/slice count + sample info ──
         s_time = self._slicer.start_frame / self._slicer.sample_rate
         e_time = self._slicer.end_frame / self._slicer.sample_rate
         sel_dur = e_time - s_time
         slices = self._slicer.get_slices()
-        info_text = (f"S:{s_time:.2f}s  E:{e_time:.2f}s  ({sel_dur:.2f}s)"
-                     f"   |   {len(self._slicer.markers)} markers  |  {len(slices)} slices")
-        surf = f_small.render(info_text, True, theme.TEXT_DIM)
-        surface.blit(surf, (16, 232))
-
-        # ── Slice list (y=248, rows 16px, max 4 visible) ────────────
-        list_y = 248
-        for i in range(min(4, max(0, len(slices) - self._slice_scroll))):
-            real_idx = self._slice_scroll + i
-            start, end, start_s, end_s = slices[real_idx]
-            dur = end_s - start_s
-            row_y = list_y + i * 16
-            # Alternating subtle background
-            if i % 2 == 1:
-                pygame.draw.rect(surface, theme.BG_LIGHTER,
-                                (16, row_y, 500, 15), border_radius=2)
-            text = f"Slice {real_idx + 1:2d}:  {start_s:.2f}s - {end_s:.2f}s  ({dur:.2f}s)"
-            surf = f_small.render(text, True, theme.TEXT)
-            surface.blit(surf, (20, row_y + 1))
-
-        if not slices and self._slicer.loaded:
-            surf = f_small.render("Tap waveform to add slice markers", True, theme.TEXT_DIM)
-            surface.blit(surf, (20, list_y + 2))
-
-        # Scroll hint for slice list
-        if len(slices) > 4:
-            total = len(slices)
-            shown = min(4, total - self._slice_scroll)
-            surf = f_small.render(f"{self._slice_scroll + 1}-{self._slice_scroll + shown}/{total}",
-                                 True, theme.TEXT_DIM)
-            surface.blit(surf, (530, list_y + 2))
-
-        # ── Edit toolbar (y=318) ─────────────────────────────────────
-        edit_y = 318
-        surf = f_small.render("EDIT:", True, theme.TEXT_DIM)
-        surface.blit(surf, (16, edit_y + 6))
-
-        edit_btns = [
-            (pygame.Rect(60, edit_y, 65, 28), "TRIM", theme.ACCENT),
-            (pygame.Rect(129, edit_y, 65, 28), "NORM", theme.ACCENT),
-            (pygame.Rect(198, edit_y, 65, 28), "MONO",
-             theme.GREEN if self._slicer.channels == 1 else theme.ACCENT),
-            (pygame.Rect(267, edit_y, 65, 28), "UNDO",
-             theme.ACCENT if self._slicer.can_undo else theme.BUTTON_BG),
-            (pygame.Rect(354, edit_y, 60, 28), "22k", theme.BUTTON_BG),
-            (pygame.Rect(418, edit_y, 60, 28), "14k", theme.BUTTON_BG),
-            (pygame.Rect(482, edit_y, 60, 28), "11k", theme.BUTTON_BG),
-        ]
-        for rect, label, bg in edit_btns:
-            tc = theme.BG if bg == theme.GREEN else (theme.BG if bg == theme.ACCENT else theme.TEXT_DIM)
-            pygame.draw.rect(surface, bg, rect, border_radius=4)
-            surf = f_small.render(label, True, tc)
-            surface.blit(surf, surf.get_rect(center=rect.center))
-
-        # Sample info on far right of edit toolbar
         sample_info = self._slicer.get_info()
+
+        # Info bar
+        info_y = 304
+        info_text = (f"S:{s_time:.2f}s  E:{e_time:.2f}s  ({sel_dur:.2f}s)"
+                     f"   {len(self._slicer.markers)} markers  {len(slices)} slices")
+        surf = f_small.render(info_text, True, theme.TEXT_DIM)
+        surface.blit(surf, (16, info_y))
+
+        # Sample info (right side of info bar)
         if sample_info:
             ch_text = "mono" if sample_info["channels"] == 1 else "stereo"
-            info_text = (f'{sample_info["sample_rate"]}Hz {ch_text} '
-                        f'peak:{sample_info["peak_db"]}dB')
-            surf = f_small.render(info_text, True, theme.TEXT_DIM)
-            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 16, edit_y + 6))
+            si_text = f'{sample_info["sample_rate"]}Hz {ch_text} peak:{sample_info["peak_db"]}dB'
+            surf = f_tiny.render(si_text, True, theme.TEXT_DIM)
+            surface.blit(surf, (theme.SCREEN_WIDTH - surf.get_width() - 16, info_y + 2))
 
-        # ── Slice action buttons (y=352) ─────────────────────────────
-        btn_y = 352
+        # ── TOOLBAR ROW 1 (y=320): slice division + transient ────────
+        r1y = 320
+        bh = 24
+        # /2 /4 /8 /16 CLEAR
         for j, n in enumerate([2, 4, 8, 16]):
-            rect = pygame.Rect(16 + j * 69, btn_y, 65, 28)
-            pygame.draw.rect(surface, theme.BUTTON_BG, rect, border_radius=6)
-            surf = f_med.render(f"/ {n}", True, theme.ACCENT)
+            rect = pygame.Rect(16 + j * 56, r1y, 52, bh)
+            pygame.draw.rect(surface, theme.BUTTON_BG, rect, border_radius=4)
+            surf = f_small.render(f"/{n}", True, theme.ACCENT)
             surface.blit(surf, surf.get_rect(center=rect.center))
 
-        clear_rect = pygame.Rect(16 + 4 * 69, btn_y, 65, 28)
-        pygame.draw.rect(surface, theme.BUTTON_BG, clear_rect, border_radius=6)
-        surf = f_med.render("CLEAR", True, theme.RED)
+        clear_rect = pygame.Rect(16 + 4 * 56, r1y, 52, bh)
+        pygame.draw.rect(surface, theme.BUTTON_BG, clear_rect, border_radius=4)
+        surf = f_small.render("CLR", True, theme.RED)
         surface.blit(surf, surf.get_rect(center=clear_rect.center))
 
-        # Transient detection button
-        trans_rect = pygame.Rect(16 + 5 * 69, btn_y, 90, 28)
-        pygame.draw.rect(surface, theme.YELLOW, trans_rect, border_radius=6)
-        surf = f_small.render("TRANSIENT", True, theme.BG)
+        # TRANSIENT + sensitivity
+        trans_rect = pygame.Rect(16 + 5 * 56, r1y, 80, bh)
+        pygame.draw.rect(surface, theme.YELLOW, trans_rect, border_radius=4)
+        surf = f_tiny.render("TRANSIENT", True, theme.BG)
         surface.blit(surf, surf.get_rect(center=trans_rect.center))
 
-        # Sensitivity -/+ controls
-        sens_x = 16 + 5 * 69 + 94
-        sens_down = pygame.Rect(sens_x, btn_y, 28, 28)
-        pygame.draw.rect(surface, theme.BUTTON_BG, sens_down, border_radius=4)
-        surf = f_med.render("-", True, theme.TEXT)
+        sx = 16 + 5 * 56 + 84
+        sens_down = pygame.Rect(sx, r1y, 24, bh)
+        pygame.draw.rect(surface, theme.BUTTON_BG, sens_down, border_radius=3)
+        surf = f_small.render("-", True, theme.TEXT)
         surface.blit(surf, surf.get_rect(center=sens_down.center))
-
-        sens_label = f"{self._transient_sens:.1f}"
-        surf = f_small.render(sens_label, True, theme.ACCENT)
-        surface.blit(surf, (sens_x + 32, btn_y + 6))
-
-        sens_up = pygame.Rect(sens_x + 60, btn_y, 28, 28)
-        pygame.draw.rect(surface, theme.BUTTON_BG, sens_up, border_radius=4)
-        surf = f_med.render("+", True, theme.TEXT)
+        surf = f_tiny.render(f"{self._transient_sens:.1f}", True, theme.ACCENT)
+        surface.blit(surf, (sx + 28, r1y + 5))
+        sens_up = pygame.Rect(sx + 50, r1y, 24, bh)
+        pygame.draw.rect(surface, theme.BUTTON_BG, sens_up, border_radius=3)
+        surf = f_small.render("+", True, theme.TEXT)
         surface.blit(surf, surf.get_rect(center=sens_up.center))
 
-        # Slicer status
+        # Status text
         import time
         if self._slicer_status and time.monotonic() - self._slicer_status_time < 5.0:
-            surf = f_small.render(self._slicer_status, True, theme.GREEN)
-            surface.blit(surf, (sens_x + 94, btn_y + 6))
+            surf = f_tiny.render(self._slicer_status, True, theme.GREEN)
+            surface.blit(surf, (sx + 80, r1y + 5))
 
-        # BUILD KIT button (visible after export)
-        if self._last_exported_slices:
-            kit_rect = pygame.Rect(theme.SCREEN_WIDTH - 345, btn_y, 105, 28)
-            pygame.draw.rect(surface, theme.BLUE, kit_rect, border_radius=6)
-            surf = f_med.render("BUILD KIT →", True, theme.TEXT_BRIGHT)
-            surface.blit(surf, surf.get_rect(center=kit_rect.center))
+        # ── TOOLBAR ROW 2 (y=348): edit + export ─────────────────────
+        r2y = 348
+        edit_btns = [
+            (pygame.Rect(16, r2y, 56, bh), "TRIM", theme.ACCENT),
+            (pygame.Rect(76, r2y, 56, bh), "NORM", theme.ACCENT),
+            (pygame.Rect(136, r2y, 56, bh), "MONO",
+             theme.GREEN if self._slicer.channels == 1 else theme.ACCENT),
+            (pygame.Rect(196, r2y, 56, bh), "UNDO",
+             theme.ACCENT if self._slicer.can_undo else theme.BUTTON_BG),
+        ]
+        for rect, label, bg in edit_btns:
+            tc = theme.BG if bg in (theme.GREEN, theme.ACCENT) else theme.TEXT_DIM
+            pygame.draw.rect(surface, bg, rect, border_radius=4)
+            surf = f_tiny.render(label, True, tc)
+            surface.blit(surf, surf.get_rect(center=rect.center))
 
-        # Export + transfer
-        export_rect = pygame.Rect(theme.SCREEN_WIDTH - 230, btn_y, 105, 28)
-        e_bg = theme.GREEN if self._export_flash > 0 else theme.ACCENT
-        e_text = "EXPORTED!" if self._export_flash > 0 else "EXPORT"
-        pygame.draw.rect(surface, e_bg, export_rect, border_radius=6)
-        surf = f_med.render(e_text, True, theme.BG)
-        surface.blit(surf, surf.get_rect(center=export_rect.center))
+        # Right side: BUILD KIT, EXPORT, TRANSFER
+        rx = theme.SCREEN_WIDTH - 16
+        dev_name = self.app.device_name
 
-        transfer_rect = pygame.Rect(theme.SCREEN_WIDTH - 120, btn_y, 105, 28)
+        # Transfer button (device-agnostic)
+        tw = 100
+        transfer_rect = pygame.Rect(rx - tw, r2y, tw, bh)
         if self._transfer_flash > 0:
             t_bg, t_text, t_tc = theme.GREEN, "DONE!", theme.BG
         elif self._p6_mounted:
-            t_bg, t_text, t_tc = theme.ACCENT, "TO P-6", theme.BG
+            t_bg, t_text, t_tc = theme.ACCENT, f"TO {dev_name}", theme.BG
         else:
-            t_bg, t_text, t_tc = theme.BUTTON_BG, "TO P-6", theme.TEXT_DIM
-        pygame.draw.rect(surface, t_bg, transfer_rect, border_radius=6)
-        surf = f_med.render(t_text, True, t_tc)
+            t_bg, t_text, t_tc = theme.BUTTON_BG, f"TO {dev_name}", theme.TEXT_DIM
+        pygame.draw.rect(surface, t_bg, transfer_rect, border_radius=4)
+        surf = f_tiny.render(t_text, True, t_tc)
         surface.blit(surf, surf.get_rect(center=transfer_rect.center))
+        rx -= tw + 4
 
-        # ── P-6 memory fit indicator (y=384) ─────────────────────────
-        if sample_info:
-            mem_y = 384
-            dur = sample_info["duration"]
-            from engine.sample_slicer import P6_SAMPLE_RATES
-            fx = 16
-            surf = f_small.render("P-6 fit:", True, theme.TEXT_DIM)
-            surface.blit(surf, (fx, mem_y))
-            fx += surf.get_width() + 6
-            for rate, max_s in sorted(P6_SAMPLE_RATES.items(), reverse=True):
-                label = f"{rate // 1000}k"
-                color = theme.GREEN if dur <= max_s else theme.RED
-                surf = f_small.render(label, True, color)
-                surface.blit(surf, (fx, mem_y))
-                fx += surf.get_width() + 10
+        # Export
+        ew = 80
+        export_rect = pygame.Rect(rx - ew, r2y, ew, bh)
+        e_bg = theme.GREEN if self._export_flash > 0 else theme.ACCENT
+        e_text = "EXPORTED!" if self._export_flash > 0 else "EXPORT"
+        pygame.draw.rect(surface, e_bg, export_rect, border_radius=4)
+        surf = f_tiny.render(e_text, True, theme.BG)
+        surface.blit(surf, surf.get_rect(center=export_rect.center))
+        rx -= ew + 4
 
-        # ── Hint (y=400) ─────────────────────────────────────────────
-        surf = f_small.render("Tap waveform: markers  |  TRIM: cut to S/E  |  Tap slice: preview",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, (16, 400))
+        # BUILD KIT (visible after export)
+        if self._last_exported_slices:
+            kw = 90
+            kit_rect = pygame.Rect(rx - kw, r2y, kw, bh)
+            pygame.draw.rect(surface, theme.BLUE, kit_rect, border_radius=4)
+            surf = f_tiny.render("BUILD KIT", True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=kit_rect.center))
+
+        # ── SLICE LIST (y=376 to bottom, TouchList with drag scroll) ──
+        list_y = 376
+        list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - list_y - 2
+
+        # Update slice list items
+        if not hasattr(self, "_slice_touch_list"):
+            from ui.components.touch_list import TouchList
+            self._slice_touch_list = TouchList(
+                pygame.Rect(16, list_y, theme.SCREEN_WIDTH - 32, list_h),
+                item_height=40,
+            )
+
+        self._slice_touch_list.set_rect(pygame.Rect(16, list_y, theme.SCREEN_WIDTH - 32, list_h))
+
+        # Rebuild slice items
+        from ui.components.touch_list import TouchListItem
+        slice_items = []
+        for i, (start, end, start_s, end_s) in enumerate(slices):
+            dur = end_s - start_s
+            slice_items.append(TouchListItem(
+                text=f"Slice {i + 1:2d}",
+                subtext=f"{start_s:.2f}s — {end_s:.2f}s  ({dur:.2f}s)",
+                icon=str(i + 1),
+                icon_color=theme.ACCENT,
+                data={"index": i, "start": start, "end": end},
+            ))
+        if len(slice_items) != len(self._slice_touch_list.items):
+            saved = self._slice_touch_list.scroll_offset
+            self._slice_touch_list.set_items(slice_items)
+            self._slice_touch_list.scroll_offset = saved
+
+        # Label
+        surf = f_tiny.render(f"SLICES ({len(slices)})", True, theme.TEXT_DIM)
+        surface.blit(surf, (16, list_y - 14))
+        surf = f_tiny.render("tap to preview", True, theme.TEXT_DIM)
+        surface.blit(surf, (120, list_y - 14))
+
+        self._slice_touch_list.draw(surface)
+
+        if not slices and self._slicer.loaded:
+            surf = f_small.render("Tap waveform to add slice markers", True, theme.TEXT_DIM)
+            cy = list_y + list_h // 2
+            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, centery=cy))
 
     # ── CONVERT mode ──────────────────────────────────────────────────
 
