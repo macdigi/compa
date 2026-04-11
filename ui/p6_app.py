@@ -220,6 +220,10 @@ class P6App:
         # ── Audio routing (device-to-device bridge) ──────────────────
         self.audio_route: AudioRoute | None = None
 
+        # ── Monitor output (which device your headphones are on) ─────
+        self.monitor_output: str = ""  # Device short_name for headphone out
+        self._monitor_route: AudioRoute | None = None
+
         # ── LFO automation engine ────────────────────────────────────
         self.lfo = MidiLFO()
 
@@ -853,6 +857,54 @@ class P6App:
             self.audio_route.stop()
             self.audio_route = None
 
+    # ── Monitor output routing ───────────────────────────────────
+
+    def set_monitor_output(self, device_short_name: str):
+        """Set which device your headphones are on.
+
+        When you monitor a different device, its audio auto-routes
+        through to this output device.
+        """
+        self.monitor_output = device_short_name
+        print(f"Monitor output → {device_short_name}", flush=True)
+
+    def route_monitor(self, source_key: str):
+        """Auto-route a device's audio to the monitor output.
+
+        If source_key IS the monitor output, stop any routing
+        (you're already hearing it directly).
+        """
+        # Stop existing monitor route
+        if self._monitor_route and self._monitor_route.is_active:
+            self._monitor_route.stop()
+            self._monitor_route = None
+
+        if not self.monitor_output:
+            return  # No monitor output set
+
+        if source_key == self.monitor_output:
+            return  # Already hearing it directly
+
+        connected = self.device_manager.connected
+        src_profile = connected.get(source_key)
+        dst_profile = connected.get(self.monitor_output)
+        if not src_profile or not dst_profile:
+            return
+
+        src_idx = find_device_index(src_profile.audio_hint)
+        dst_idx = find_device_index(dst_profile.audio_hint)
+        if src_idx is None or dst_idx is None:
+            return
+
+        src_rate = src_profile.supported_sample_rates[0] if src_profile.supported_sample_rates else 44100
+        dst_rate = dst_profile.supported_sample_rates[0] if dst_profile.supported_sample_rates else 44100
+
+        self._monitor_route = AudioRoute(src_idx, src_rate, dst_idx, dst_rate)
+        if self._monitor_route.start():
+            print(f"Monitor route: {source_key} → {self.monitor_output}", flush=True)
+        else:
+            self._monitor_route = None
+
     # ── MIDI clock relay ─────────────────────────────────────────────
 
     def start_clock_relay(self, source_key: str, dest_key: str) -> bool:
@@ -1372,6 +1424,8 @@ class P6App:
 
     def _shutdown(self):
         print("Shutting down Compa...")
+        if self._monitor_route and self._monitor_route.is_active:
+            self._monitor_route.stop()
         if self.audio_route and self.audio_route.is_active:
             self.audio_route.stop()
         # Don't unmount Akai storage on shutdown — leave drives mounted

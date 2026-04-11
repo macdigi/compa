@@ -125,10 +125,27 @@ class P6SessionScreen:
                             self.app.recorder._recall_write_pos = 0
                             self.app.recorder._recall_total_written = 0
                             self.app.recorder.start_monitoring()
+                            # Auto-route this device to monitor output
+                            self.app.route_monitor(dev_name)
                         return
 
     def _handle_card_button(self, dev_name: str, action: str):
         """Handle transport button taps on device cards."""
+        if action == "set_monitor":
+            if self.app.monitor_output == dev_name:
+                # Toggle off
+                self.app.monitor_output = ""
+                if self.app._monitor_route and self.app._monitor_route.is_active:
+                    self.app._monitor_route.stop()
+                print(f"Monitor output: OFF", flush=True)
+            else:
+                self.app.set_monitor_output(dev_name)
+                # Re-route current focus through new monitor
+                focus = self.app.device_manager.focus_key
+                if focus and focus != dev_name:
+                    self.app.route_monitor(focus)
+            return
+
         midi = self.app._midi_connections.get(dev_name)
         if not midi:
             return
@@ -254,7 +271,8 @@ class P6SessionScreen:
                 surface.blit(surf2, surf2.get_rect(center=tag_rect.center))
             cy += 24
 
-            # ── Row 2: Connection + audio specs ──────────────────────
+            # ── Row 2: Connection + audio specs + headphone button ────
+            is_monitor_out = (short_name == self.app.monitor_output)
             if is_connected:
                 pygame.draw.circle(surface, theme.GREEN, (cx + 4, cy + 5), 3)
             else:
@@ -263,6 +281,19 @@ class P6SessionScreen:
             rates = "/".join(f"{r//1000}k" for r in profile.supported_sample_rates)
             surf = f_tiny.render(f"{audio_info} {rates}", True, theme.TEXT_DIM)
             surface.blit(surf, (cx + 12, cy))
+
+            # Headphone/monitor output button (right side of row 2)
+            hp_rect = pygame.Rect(card_rect.right - 44, cy - 2, 34, 16)
+            if is_monitor_out:
+                pygame.draw.rect(surface, device_color, hp_rect, border_radius=3)
+                surf = f_tiny.render("OUT", True, theme.BG)
+            else:
+                pygame.draw.rect(surface, theme.BUTTON_BG, hp_rect, border_radius=3)
+                pygame.draw.rect(surface, theme.BORDER, hp_rect, 1, border_radius=3)
+                surf = f_tiny.render("OUT", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=hp_rect.center))
+            self._card_buttons.append((hp_rect, short_name, "set_monitor"))
+
             cy += 14
 
             # ── Row 3: Audio level meters (only for monitored device) ──
