@@ -814,8 +814,8 @@ class P6SampleScreen:
             surf = f_tiny.render("BUILD KIT", True, theme.TEXT_BRIGHT)
             surface.blit(surf, surf.get_rect(center=kit_rect.center))
 
-        # ── SLICE LIST (y=376 to bottom, TouchList with drag scroll) ──
-        list_y = 376
+        # ── SLICE LIST ────────────────────────────────────────────────
+        list_y = 390  # Below toolbar (348+24=372) + label (14px) + gap
         list_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - list_y - 2
 
         # Update slice list items
@@ -845,11 +845,9 @@ class P6SampleScreen:
             self._slice_touch_list.set_items(slice_items)
             self._slice_touch_list.scroll_offset = saved
 
-        # Label
-        surf = f_tiny.render(f"SLICES ({len(slices)})", True, theme.TEXT_DIM)
-        surface.blit(surf, (16, list_y - 14))
-        surf = f_tiny.render("tap to preview", True, theme.TEXT_DIM)
-        surface.blit(surf, (120, list_y - 14))
+        # Slice list label
+        surf = f_tiny.render(f"SLICES ({len(slices)})  tap to preview", True, theme.TEXT_DIM)
+        surface.blit(surf, (16, 375))
 
         self._slice_touch_list.draw(surface)
 
