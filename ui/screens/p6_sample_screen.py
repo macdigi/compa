@@ -57,6 +57,9 @@ class P6SampleScreen:
         self._export_flash = 0
         self._transfer_flash = 0
         self._last_exported_slices: list[str] = []  # For BUILD KIT workflow
+        self._transient_sens = 0.3  # Transient detection sensitivity (0.0-1.0)
+        self._slicer_status = ""
+        self._slicer_status_time = 0.0
         self._p6_mounted = False
 
         # Waveform zoom
@@ -314,6 +317,24 @@ class P6SampleScreen:
             self._slicer.clear_markers()
             return
 
+        # Transient detection button
+        trans_rect = pygame.Rect(16 + 5 * 69, btn_y, 90, 28)
+        if trans_rect.collidepoint(mx, my):
+            count = self._slicer.transient_slice(
+                sensitivity=self._transient_sens)
+            self._set_status(f"Transient: {count} slices")
+            return
+
+        # Sensitivity -/+ for transient detection
+        sens_down = pygame.Rect(16 + 5 * 69 + 94, btn_y, 28, 28)
+        if sens_down.collidepoint(mx, my):
+            self._transient_sens = max(0.05, self._transient_sens - 0.1)
+            return
+        sens_up = pygame.Rect(16 + 5 * 69 + 126, btn_y, 28, 28)
+        if sens_up.collidepoint(mx, my):
+            self._transient_sens = min(1.0, self._transient_sens + 0.1)
+            return
+
         export_rect = pygame.Rect(theme.SCREEN_WIDTH - 230, btn_y, 105, 28)
         if export_rect.collidepoint(mx, my):
             exported = self._slicer.export_slices(normalize=True)
@@ -371,6 +392,11 @@ class P6SampleScreen:
                 elif label == "11k":
                     self._slicer.downsample(11025)
                 return
+
+    def _set_status(self, text: str):
+        import time
+        self._slicer_status = text
+        self._slicer_status_time = time.monotonic()
 
     def _zoom_in(self, mouse_x: int = 400):
         """Zoom into the waveform, centered on mouse position."""
@@ -727,6 +753,34 @@ class P6SampleScreen:
         pygame.draw.rect(surface, theme.BUTTON_BG, clear_rect, border_radius=6)
         surf = f_med.render("CLEAR", True, theme.RED)
         surface.blit(surf, surf.get_rect(center=clear_rect.center))
+
+        # Transient detection button
+        trans_rect = pygame.Rect(16 + 5 * 69, btn_y, 90, 28)
+        pygame.draw.rect(surface, theme.YELLOW, trans_rect, border_radius=6)
+        surf = f_small.render("TRANSIENT", True, theme.BG)
+        surface.blit(surf, surf.get_rect(center=trans_rect.center))
+
+        # Sensitivity -/+ controls
+        sens_x = 16 + 5 * 69 + 94
+        sens_down = pygame.Rect(sens_x, btn_y, 28, 28)
+        pygame.draw.rect(surface, theme.BUTTON_BG, sens_down, border_radius=4)
+        surf = f_med.render("-", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=sens_down.center))
+
+        sens_label = f"{self._transient_sens:.1f}"
+        surf = f_small.render(sens_label, True, theme.ACCENT)
+        surface.blit(surf, (sens_x + 32, btn_y + 6))
+
+        sens_up = pygame.Rect(sens_x + 60, btn_y, 28, 28)
+        pygame.draw.rect(surface, theme.BUTTON_BG, sens_up, border_radius=4)
+        surf = f_med.render("+", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=sens_up.center))
+
+        # Slicer status
+        import time
+        if self._slicer_status and time.monotonic() - self._slicer_status_time < 5.0:
+            surf = f_small.render(self._slicer_status, True, theme.GREEN)
+            surface.blit(surf, (sens_x + 94, btn_y + 6))
 
         # BUILD KIT button (visible after export)
         if self._last_exported_slices:

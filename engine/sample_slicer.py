@@ -351,10 +351,129 @@ class SampleSlicer:
         self._markers = []
 
     def auto_slice(self, n: int):
+        """Slice into N equal parts."""
         if self._audio is None or n < 2:
             return
         total = self.total_frames
         self._markers = [int(total * i / n) for i in range(1, n)]
+
+    def transient_slice(self, sensitivity: float = 0.3,
+                        min_gap_ms: float = 50.0,
+                        max_slices: int = 64) -> int:
+        """Auto-slice by detecting transients (sharp attacks).
+
+        Analyzes the audio energy envelope to find sudden jumps
+        that indicate drum hits, note onsets, etc.
+
+        Args:
+            sensitivity: 0.0 (few slices) to 1.0 (many slices).
+                        Controls the threshold for what counts as a transient.
+            min_gap_ms: Minimum gap between slices in milliseconds.
+                        Prevents double-triggers on noisy transients.
+            max_slices: Maximum number of slices to create.
+
+        Returns:
+            Number of markers placed.
+        """
+        if self._audio is None:
+            return 0
+
+        audio = self._audio
+        if audio.ndim > 1:
+            mono = audio.mean(axis=1)
+        else:
+            mono = audio
+
+        # Compute energy envelope using RMS in short windows
+        hop = max(1, self._sample_rate // 200)  # ~5ms hops
+        window = max(1, self._sample_rate // 100)  # ~10ms window
+        n_frames = len(mono)
+
+        # Fast energy computation using reshaping
+        n_hops = n_frames // hop
+        envelope = np.zeros(n_hops)
+        for i in range(n_hops):
+            start = i * hop
+            end = min(start + window, n_frames)
+            chunk = mono[start:end]
+            envelope[i] = np.sqrt(np.mean(chunk ** 2))
+
+        if np.max(envelope) < 0.001:
+            return 0  # Silence
+
+        # Normalize envelope
+        envelope = envelope / np.max(envelope)
+
+        # Compute onset detection function (difference of energy)
+        onset_fn = np.zeros(len(envelope))
+        onset_fn[1:] = np.maximum(0, envelope[1:] - envelope[:-1])
+
+        # Dynamic threshold based on sensitivity
+        # sensitivity 0.0 → threshold = 0.5 (only big transients)
+        # sensitivity 1.0 → threshold = 0.02 (catches everything)
+        threshold = 0.5 - (sensitivity * 0.48)
+        threshold = max(0.02, min(0.5, threshold))
+
+        # Also use a local adaptive threshold (median of recent values)
+        adapt_window = max(10, int(0.5 * self._sample_rate / hop))  # ~500ms
+        local_median = np.zeros(len(onset_fn))
+        for i in range(len(onset_fn)):
+            start_idx = max(0, i - adapt_window)
+            local_median[i] = np.median(onset_fn[start_idx:i + 1]) if i > 0 else 0
+
+        # Minimum gap in frames
+        min_gap_frames = int(min_gap_ms / 1000.0 * self._sample_rate)
+        min_gap_hops = max(1, min_gap_frames // hop)
+
+        # Find peaks above threshold
+        markers = []
+        last_marker_hop = -min_gap_hops * 2
+
+        for i in range(1, len(onset_fn) - 1):
+            val = onset_fn[i]
+            # Must be above absolute threshold
+            if val < threshold:
+                continue
+            # Must be above adaptive threshold
+            if val < local_median[i] * 3.0:
+                continue
+            # Must be a local peak
+            if val < onset_fn[i - 1] or val < onset_fn[i + 1]:
+                continue
+            # Must respect minimum gap
+            if i - last_marker_hop < min_gap_hops:
+                continue
+
+            frame = i * hop
+            # Snap to zero-crossing near the onset
+            frame = self._snap_to_zero(mono, frame, search_range=hop * 2)
+            markers.append(frame)
+            last_marker_hop = i
+
+            if len(markers) >= max_slices:
+                break
+
+        self._markers = markers
+        log.info("Transient detection: %d markers (sensitivity=%.2f, threshold=%.3f)",
+                 len(markers), sensitivity, threshold)
+        return len(markers)
+
+    def _snap_to_zero(self, mono: np.ndarray, frame: int,
+                      search_range: int = 100) -> int:
+        """Snap a frame position to the nearest zero-crossing."""
+        start = max(0, frame - search_range)
+        end = min(len(mono) - 1, frame + search_range)
+        if start >= end:
+            return frame
+        segment = mono[start:end]
+        # Find zero-crossings
+        signs = np.sign(segment)
+        crossings = np.where(np.diff(signs) != 0)[0] + start
+        if len(crossings) == 0:
+            return frame
+        # Return the crossing closest to the original frame
+        closest = crossings[np.argmin(np.abs(crossings - frame))]
+        return int(closest)
 
     # ── Slices ───────────────────────────────────────────────────────
 
