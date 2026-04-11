@@ -97,11 +97,22 @@ class P6SessionScreen:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
-            # Card transport buttons
+            # Card transport buttons (priority over card tap)
             if hasattr(self, "_card_buttons"):
                 for rect, dev_name, action in self._card_buttons:
                     if rect.collidepoint(mx, my):
                         self._handle_card_button(dev_name, action)
+                        return
+
+            # Tap card background → switch focus + start monitoring
+            if hasattr(self, "_card_rects"):
+                for rect, dev_name in self._card_rects:
+                    if rect.collidepoint(mx, my):
+                        self.app.switch_focus(dev_name)
+                        # Switch recorder to monitor this device's audio
+                        dev = self.app.device_manager.connected.get(dev_name)
+                        if dev and dev.audio_hint:
+                            self.app.recorder.switch_device(dev.audio_hint)
                         return
 
     def _handle_card_button(self, dev_name: str, action: str):
@@ -176,8 +187,9 @@ class P6SessionScreen:
         surf = f_tiny.render("v1.0", True, theme.TEXT_DIM)
         surface.blit(surf, (240, 10))
 
-        # Reset card button rects each frame
+        # Reset card rects each frame
         self._card_buttons = []
+        self._card_rects = []  # (rect, short_name) for tap-to-focus
 
         # ── Device playing cards (horizontal, max 3) ─────────────────
         connected = self.app.device_manager.connected
@@ -200,6 +212,9 @@ class P6SessionScreen:
 
             card_x = 12 + idx * (card_w + card_gap)
             card_rect = pygame.Rect(card_x, cards_y, card_w, card_h)
+
+            # Store rect for tap-to-focus
+            self._card_rects.append((card_rect, short_name))
 
             # Card background + border
             pygame.draw.rect(surface, theme.BG_PANEL, card_rect, border_radius=10)
@@ -238,28 +253,45 @@ class P6SessionScreen:
             surface.blit(surf, (cx + 12, cy))
             cy += 14
 
-            # ── Row 3: Audio level meters ────────────────────────────
+            # ── Row 3: Audio level meters (only for monitored device) ──
             meter_w = inner_w - 4
             meter_h = 6
+            # Check if this device is the one being monitored
+            rec_hint = self.app.recorder._device_hint
+            is_monitored = (rec_hint and profile.audio_hint and
+                           (profile.audio_hint in rec_hint or rec_hint in profile.audio_hint))
+            peak_l = self._disp_peak_l if is_monitored else 0.0
+            peak_r = self._disp_peak_r if is_monitored else 0.0
+
             # L meter
             pygame.draw.rect(surface, theme.WAVEFORM_BG,
                             (cx, cy, meter_w, meter_h), border_radius=2)
-            fill = int(meter_w * min(1.0, self._disp_peak_l))
+            fill = int(meter_w * min(1.0, peak_l))
             if fill > 0:
-                mc = theme.RED if self._disp_peak_l > 0.9 else (
-                    theme.YELLOW if self._disp_peak_l > 0.7 else device_color)
+                mc = theme.RED if peak_l > 0.9 else (
+                    theme.YELLOW if peak_l > 0.7 else device_color)
                 pygame.draw.rect(surface, mc,
                                 (cx, cy, fill, meter_h), border_radius=2)
+            if is_monitored:
+                surf = f_tiny.render("L", True, theme.TEXT_DIM)
+                surface.blit(surf, (cx + meter_w + 2, cy - 1))
             cy += meter_h + 2
             # R meter
             pygame.draw.rect(surface, theme.WAVEFORM_BG,
                             (cx, cy, meter_w, meter_h), border_radius=2)
-            fill = int(meter_w * min(1.0, self._disp_peak_r))
+            fill = int(meter_w * min(1.0, peak_r))
             if fill > 0:
-                mc = theme.RED if self._disp_peak_r > 0.9 else (
-                    theme.YELLOW if self._disp_peak_r > 0.7 else device_color)
+                mc = theme.RED if peak_r > 0.9 else (
+                    theme.YELLOW if peak_r > 0.7 else device_color)
                 pygame.draw.rect(surface, mc,
                                 (cx, cy, fill, meter_h), border_radius=2)
+            if is_monitored:
+                surf = f_tiny.render("R", True, theme.TEXT_DIM)
+                surface.blit(surf, (cx + meter_w + 2, cy - 1))
+            elif is_connected:
+                # Show "tap to monitor" hint on inactive cards
+                surf = f_tiny.render("tap card to monitor", True, theme.TEXT_DIM)
+                surface.blit(surf, (cx, cy - meter_h))
             cy += meter_h + 6
 
             # ── Row 4: BPM + Pattern ─────────────────────────────────
