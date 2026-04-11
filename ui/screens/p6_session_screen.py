@@ -357,25 +357,18 @@ class P6SessionScreen:
 
             cy += 30
 
-            # ── Row 6: Mini waveform of last recording ───────────────
+            # ── Row 6: Live waveform (monitored card) or static info ──
             wave_h = max(20, card_rect.bottom - cy - 26)
             wave_rect = pygame.Rect(cx, cy, inner_w, wave_h)
             pygame.draw.rect(surface, (15, 15, 22), wave_rect, border_radius=3)
 
-            # Get last recording waveform
-            recordings = self.app.recorder.list_recordings()
-            if recordings:
-                last_rec = recordings[0]
-                dur = last_rec.get("duration", 0)
-                name = last_rec.get("user_name") or last_rec.get("filename", "")
-
-                # Draw cached waveform preview
+            if is_monitored:
+                # Live rolling waveform from audio input
                 waveform = self.app.recorder.waveform
                 if waveform is not None and len(waveform) > 0:
                     import numpy as np
                     max_val = max(float(np.max(waveform)), 0.001)
                     points = []
-                    w_len = min(len(waveform), wave_rect.width)
                     step = max(1, len(waveform) // wave_rect.width)
                     for px in range(wave_rect.width):
                         wi = min(px * step, len(waveform) - 1)
@@ -385,12 +378,25 @@ class P6SessionScreen:
                     if len(points) > 1:
                         pygame.draw.lines(surface, device_color, False, points, 1)
 
-                # Label
-                label = f"{name[:18]}  {dur:.1f}s"
-                surf = f_tiny.render(label, True, theme.TEXT_DIM)
+                # Center line
+                pygame.draw.line(surface, theme.BORDER,
+                                (wave_rect.x + 2, wave_rect.centery),
+                                (wave_rect.right - 2, wave_rect.centery))
+
+                # Recording indicator
+                if self.app.recorder.is_recording:
+                    dur = self.app.recorder.duration
+                    surf = f_tiny.render(f"REC {dur:.0f}s", True, theme.RED)
+                else:
+                    recall = self.app.recorder.recall_seconds_available
+                    surf = f_tiny.render(f"LIVE  buf:{int(recall)}s", True, device_color)
                 surface.blit(surf, (cx + 2, cy + 1))
             else:
-                surf = f_tiny.render("No recordings", True, theme.TEXT_DIM)
+                # Not monitored — show device info or "tap to monitor"
+                pygame.draw.line(surface, theme.BORDER,
+                                (wave_rect.x + 2, wave_rect.centery),
+                                (wave_rect.right - 2, wave_rect.centery))
+                surf = f_tiny.render("tap card to monitor", True, theme.TEXT_DIM)
                 surface.blit(surf, surf.get_rect(center=wave_rect.center))
 
             cy += wave_h + 4
