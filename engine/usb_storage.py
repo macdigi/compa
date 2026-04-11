@@ -314,9 +314,13 @@ class AkaiStorageManager:
                     dev_path = f"/dev/{fields[0]}"
                     mountpoint = fields[3] if len(fields) > 3 else ""
                     if not mountpoint and dev_path not in already_mounted:
-                        # Check if parent disk is mmcblk0 (Pi's SD) — skip it
-                        if "mmcblk0" not in fields[0]:
-                            parts.append(dev_path)
+                        # Skip Pi's own SD card and tiny partitions (<1GB)
+                        if "mmcblk0" in fields[0]:
+                            continue
+                        size_str = fields[1]
+                        if "M" in size_str:  # Skip MB-sized partitions (boot, EFI)
+                            continue
+                        parts.append(dev_path)
 
             # Match partitions to Akai USB devices via udevadm
             for part in parts:
