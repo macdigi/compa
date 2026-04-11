@@ -99,19 +99,20 @@ class TransferScreen:
         self._push_list.set_items(items)
 
     def _refresh_pull_browser(self):
-        """Point the pull browser at the active drive's samples dir."""
-        samples_dir = self._get_active_samples_dir()
-        if samples_dir and os.path.isdir(samples_dir):
-            self._pull_browser._root_dir = samples_dir
-            self._pull_browser.navigate_to(samples_dir)
-        else:
-            # Try mount point root
-            storage = getattr(self.app, "akai_storage", None)
-            if storage and storage.drives:
-                idx = self._active_drive if 0 <= self._active_drive < len(storage.drives) else 0
-                mount = storage.drives[idx].mount_point
-                self._pull_browser._root_dir = mount
-                self._pull_browser.navigate_to(mount)
+        """Point the pull browser at the active drive."""
+        storage = getattr(self.app, "akai_storage", None)
+        if not storage or not storage.is_connected:
+            return
+        drives = storage.drives
+        idx = self._active_drive if 0 <= self._active_drive < len(drives) else 0
+        if idx >= len(drives):
+            return
+        d = drives[idx]
+        # Use samples dir if available, otherwise mount root
+        root = d.samples_dir if d.samples_dir else d.mount_point
+        if root and os.path.isdir(root):
+            self._pull_browser._root_dir = root
+            self._pull_browser.navigate_to(root)
 
     def _refresh_kit_list(self):
         """Find exported kit directories."""
@@ -153,10 +154,15 @@ class TransferScreen:
             d = drives[self._active_drive]
             if d.samples_dir:
                 return d.samples_dir
+            # Try to create Samples/ dir — may fail on read-only drives
             sdir = os.path.join(d.mount_point, "Samples")
-            os.makedirs(sdir, exist_ok=True)
-            d.samples_dir = sdir
-            return sdir
+            try:
+                os.makedirs(sdir, exist_ok=True)
+                d.samples_dir = sdir
+                return sdir
+            except PermissionError:
+                # Fall back to mount point root
+                return d.mount_point
         return storage.samples_dir
 
     # ── Event handling ───────────────────────────────────────────────
