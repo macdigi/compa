@@ -869,41 +869,36 @@ class P6App:
         print(f"Monitor output → {device_short_name}", flush=True)
 
     def route_monitor(self, source_key: str):
-        """Auto-route a device's audio to the monitor output.
+        """Auto-route monitored audio to the headphone output device.
 
-        If source_key IS the monitor output, stop any routing
-        (you're already hearing it directly).
+        Uses the recorder's built-in monitor output — no second input
+        stream needed. The recorder's audio callback forwards data
+        directly to the output device.
         """
-        # Stop existing monitor route
-        if self._monitor_route and self._monitor_route.is_active:
-            self._monitor_route.stop()
-            self._monitor_route = None
+        # Stop existing monitor output
+        self.recorder.stop_monitor_output()
 
         if not self.monitor_output:
             return  # No monitor output set
 
         if source_key == self.monitor_output:
-            return  # Already hearing it directly
+            return  # Already hearing it directly through headphones
 
         connected = self.device_manager.connected
-        src_profile = connected.get(source_key)
         dst_profile = connected.get(self.monitor_output)
-        if not src_profile or not dst_profile:
+        if not dst_profile:
             return
 
-        src_idx = find_device_index(src_profile.audio_hint)
         dst_idx = find_device_index(dst_profile.audio_hint)
-        if src_idx is None or dst_idx is None:
+        if dst_idx is None:
             return
 
-        src_rate = src_profile.supported_sample_rates[0] if src_profile.supported_sample_rates else 44100
         dst_rate = dst_profile.supported_sample_rates[0] if dst_profile.supported_sample_rates else 44100
 
-        self._monitor_route = AudioRoute(src_idx, src_rate, dst_idx, dst_rate)
-        if self._monitor_route.start():
+        if self.recorder.start_monitor_output(dst_idx, dst_rate):
             print(f"Monitor route: {source_key} → {self.monitor_output}", flush=True)
         else:
-            self._monitor_route = None
+            print(f"Monitor route failed", flush=True)
 
     # ── MIDI clock relay ─────────────────────────────────────────────
 
@@ -1424,8 +1419,7 @@ class P6App:
 
     def _shutdown(self):
         print("Shutting down Compa...")
-        if self._monitor_route and self._monitor_route.is_active:
-            self._monitor_route.stop()
+        self.recorder.stop_monitor_output()
         if self.audio_route and self.audio_route.is_active:
             self.audio_route.stop()
         # Don't unmount Akai storage on shutdown — leave drives mounted

@@ -69,6 +69,11 @@ class P6Recorder:
         # Monitoring
         self._monitoring = False
 
+        # Monitor output — forward audio to a second device (headphones)
+        self._monitor_out_stream: Optional["sd.OutputStream"] = None
+        self._monitor_out_device: Optional[int] = None
+        self._monitor_out_rate: int = 0
+
         # Threshold recording
         self._threshold = 0.02
         self._threshold_mode = False
@@ -262,6 +267,47 @@ class P6Recorder:
             log.error("Failed to start monitoring: %s", e)
             self._stream = None
 
+    def start_monitor_output(self, device_idx: int, sample_rate: int) -> bool:
+        """Start forwarding audio to a second output device (headphones).
+
+        The recorder's audio callback will write to this output stream
+        in addition to recording/buffering. No second input stream needed.
+        """
+        self.stop_monitor_output()
+        if sd is None:
+            return False
+
+        try:
+            self._monitor_out_rate = sample_rate
+            self._monitor_out_device = device_idx
+
+            self._monitor_out_stream = sd.OutputStream(
+                device=device_idx,
+                samplerate=sample_rate,
+                channels=P6_CHANNELS,
+                dtype="float32",
+                blocksize=2048,
+            )
+            self._monitor_out_stream.start()
+            log.info("Monitor output started: device %d @ %dHz", device_idx, sample_rate)
+            return True
+        except Exception as e:
+            log.error("Monitor output failed: %s", e)
+            self._monitor_out_stream = None
+            return False
+
+    def stop_monitor_output(self):
+        """Stop the monitor output stream."""
+        if self._monitor_out_stream:
+            try:
+                self._monitor_out_stream.stop()
+                self._monitor_out_stream.close()
+            except Exception:
+                pass
+            self._monitor_out_stream = None
+            self._monitor_out_device = None
+            log.info("Monitor output stopped")
+
     def stop_monitoring(self) -> None:
         """Stop the input stream."""
         if self._recording:
@@ -394,6 +440,22 @@ class P6Recorder:
             self._recall_buf[:frames - first] = indata[first:]
         self._recall_write_pos = (pos + frames) % buf_len
         self._recall_total_written += frames
+
+        # Forward to monitor output (headphones on another device)
+        if self._monitor_out_stream and self._monitor_out_stream.active:
+            try:
+                # If sample rates match, direct write. Otherwise basic resample.
+                if self._monitor_out_rate == self._sample_rate:
+                    self._monitor_out_stream.write(indata)
+                else:
+                    # Simple linear resample
+                    ratio = self._monitor_out_rate / self._sample_rate
+                    out_frames = int(frames * ratio)
+                    indices = np.linspace(0, frames - 1, out_frames).astype(np.int32)
+                    resampled = indata[indices]
+                    self._monitor_out_stream.write(resampled)
+            except Exception:
+                pass  # Don't crash the audio callback
 
         # Quick level metering — just peak, skip RMS to save CPU
         abs_data = np.abs(indata)
