@@ -73,10 +73,15 @@ class P6SessionScreen:
             pass
 
     def on_enter(self):
-        pass
+        # Start audio monitoring so meters work on this screen
+        if not self.app.recorder._monitoring:
+            self.app.recorder.start_monitoring()
 
     def on_exit(self):
         self._save_notes()
+        # Stop monitoring if not recording (same as Record screen)
+        if not self.app.recorder.is_recording:
+            self.app.recorder.stop_monitoring()
 
     def handle_event(self, event):
         # Modals first
