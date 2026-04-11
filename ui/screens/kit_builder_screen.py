@@ -13,6 +13,7 @@ import threading
 import wave
 import logging
 
+import numpy as np
 import pygame
 
 from .. import theme
@@ -67,6 +68,11 @@ class KitBuilderScreen:
         self._sample_list: list[dict] = []
         self._sample_scroll: int = 0
         self._sample_source: str = "recordings"
+
+        # Waveform preview cache
+        self._wave_cache_path: str = ""
+        self._wave_cache_data: np.ndarray | None = None
+        self._WAVE_POINTS = 300  # Downsample to this many points
 
         # Export state
         self._status: str = ""
@@ -364,7 +370,13 @@ class KitBuilderScreen:
 
         if self._import_btn_rect().collidepoint(mx, my):
             self._import_mode = True
+            # Set correct rect before navigating
+            browser_rect = pygame.Rect(
+                16, 78, theme.SCREEN_WIDTH - 32,
+                theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 130)
+            self._import_browser.set_rect(browser_rect)
             self._import_browser.navigate_to(self._import_root)
+            print(f"Import mode: browsing {self._import_root}", flush=True)
             return
 
         if self._export_adg_btn_rect().collidepoint(mx, my):
@@ -529,23 +541,29 @@ class KitBuilderScreen:
 
     def _handle_import_event(self, event):
         """Handle events in import browse mode."""
+        # Ensure browser rect is correct before handling events
+        browser_rect = pygame.Rect(
+            16, 78, theme.SCREEN_WIDTH - 32,
+            theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 130)
+        self._import_browser.set_rect(browser_rect)
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
+            btn_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 44
 
             # CANCEL button
-            cancel_rect = pygame.Rect(16, theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 44, 100, 36)
+            cancel_rect = pygame.Rect(16, btn_y, 100, 36)
             if cancel_rect.collidepoint(mx, my):
                 self._import_mode = False
                 return
 
             # SCAN & IMPORT button
-            scan_rect = pygame.Rect(theme.SCREEN_WIDTH - 220,
-                                     theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 44, 200, 36)
+            scan_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, btn_y, 200, 36)
             if scan_rect.collidepoint(mx, my):
                 self._do_import()
                 return
 
-        # Browser handles navigation
+        # Browser handles folder navigation, scrolling, etc.
         self._import_browser.handle_event(event)
 
     def _draw_import_mode(self, surface, f_med, f_small, f_tiny):
@@ -585,11 +603,98 @@ class KitBuilderScreen:
                                 True, theme.TEXT_DIM)
             surface.blit(surf, (130, btn_y + 10))
 
+    def _load_waveform(self, path: str) -> np.ndarray | None:
+        """Load and downsample a WAV for preview display."""
+        if path == self._wave_cache_path and self._wave_cache_data is not None:
+            return self._wave_cache_data
+        try:
+            import soundfile as sf
+            data, rate = sf.read(path, dtype="float32")
+            if data.ndim > 1:
+                data = data.mean(axis=1)  # Mono mix
+            # Downsample to WAVE_POINTS
+            n = len(data)
+            if n <= self._WAVE_POINTS:
+                peaks = np.abs(data)
+            else:
+                chunk = n // self._WAVE_POINTS
+                trimmed = data[:chunk * self._WAVE_POINTS]
+                reshaped = trimmed.reshape(self._WAVE_POINTS, chunk)
+                peaks = np.max(np.abs(reshaped), axis=1)
+            self._wave_cache_path = path
+            self._wave_cache_data = peaks
+            return peaks
+        except Exception:
+            return None
+
+    def _draw_waveform_preview(self, surface, f_tiny):
+        """Draw waveform of the currently selected pad's sample."""
+        pad_data = self._pads[self._selected_pad]
+        wave_x = self._BROWSER_X
+        wave_y = self._BROWSER_Y + self._BROWSER_H + 4
+        wave_w = self._BROWSER_W
+        wave_h = 42
+
+        wave_rect = pygame.Rect(wave_x, wave_y, wave_w, wave_h)
+        pygame.draw.rect(surface, theme.BG_PANEL, wave_rect, border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER, wave_rect, 1, border_radius=4)
+
+        if not pad_data:
+            surf = f_tiny.render("No sample on selected pad", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=wave_rect.center))
+            return
+
+        # Pad info label
+        bank = self._selected_pad // 16
+        pad_num = (self._selected_pad % 16) + 1
+        label = f"{BANK_LETTERS[bank]}{pad_num:02d}: {pad_data['filename']}"
+        drum_type = pad_data.get("drum_type", "")
+        if drum_type:
+            label += f" [{drum_type}]"
+        surf = f_tiny.render(label, True, theme.ACCENT)
+        surface.blit(surf, (wave_x + 4, wave_y + 2))
+
+        # Load and draw waveform
+        peaks = self._load_waveform(pad_data["path"])
+        if peaks is None or len(peaks) == 0:
+            return
+
+        # Draw waveform bars
+        draw_y = wave_y + 14
+        draw_h = wave_h - 16
+        max_val = max(float(np.max(peaks)), 0.001)
+        bar_w = max(1, wave_w // len(peaks))
+
+        points_top = []
+        points_bot = []
+        for i, peak in enumerate(peaks):
+            x = wave_x + int(i * wave_w / len(peaks))
+            h = int((peak / max_val) * draw_h * 0.5)
+            cy = draw_y + draw_h // 2
+            points_top.append((x, cy - h))
+            points_bot.append((x, cy + h))
+
+        if len(points_top) > 1:
+            pygame.draw.lines(surface, theme.WAVEFORM_COLOR, False, points_top, 1)
+            pygame.draw.lines(surface, theme.WAVEFORM_COLOR, False, points_bot, 1)
+
+        # Center line
+        cy = draw_y + draw_h // 2
+        pygame.draw.line(surface, theme.BORDER, (wave_x + 2, cy), (wave_x + wave_w - 2, cy))
+
+        # Duration
+        dur = pad_data.get("duration", 0)
+        if dur:
+            dur_surf = f_tiny.render(f"{dur:.1f}s", True, theme.TEXT_DIM)
+            surface.blit(dur_surf, (wave_x + wave_w - dur_surf.get_width() - 4, wave_y + 2))
+
     def _do_import(self):
         """Scan the current browser directory and auto-map to pads."""
         scan_dir = self._import_browser.current_path
+        print(f"SCAN & IMPORT: scanning {scan_dir}", flush=True)
         if not scan_dir or not os.path.isdir(scan_dir):
             self._set_status("No folder selected")
+            print("  No valid folder", flush=True)
             return
 
         # Scan and classify
@@ -731,6 +836,9 @@ class KitBuilderScreen:
 
         # Sample list (touch-friendly)
         self._sample_touch_list.draw(surface)
+
+        # ---- Waveform preview of selected pad (below browser) ----
+        self._draw_waveform_preview(surface, f_tiny)
 
         # ---- Bank selector (y=354-386) ----
         for i in range(8):

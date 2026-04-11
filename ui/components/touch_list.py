@@ -49,7 +49,7 @@ class TouchList:
     tied to file system.
     """
 
-    DRAG_THRESHOLD = 8       # px before registering as drag (not tap)
+    DRAG_THRESHOLD = 12      # px before registering as drag (not tap)
     SCROLL_DECEL = 0.92      # Momentum decay per frame
     SCROLLBAR_WIDTH = 20     # Wide enough for finger taps
     CHECKBOX_SIZE = 28       # Multi-select checkbox size
@@ -185,6 +185,12 @@ class TouchList:
 
             was_dragging = self._dragging
             self._dragging = False
+
+            if was_dragging:
+                # Check total distance — if finger barely moved, it's a tap
+                total_move = abs(event.pos[1] - self._drag_start_y)
+                if total_move <= self.DRAG_THRESHOLD:
+                    self._touch_moved = False  # Override noisy motion events
 
             if was_dragging and not self._touch_moved:
                 # Clean tap — identify which item
