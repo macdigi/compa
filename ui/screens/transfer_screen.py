@@ -255,15 +255,34 @@ class TransferScreen:
         files = [(s.data["path"], s.data["name"]) for s in selected]
 
         def worker():
+            import subprocess
             dest = os.path.join(samples_dir, "Compa")
-            os.makedirs(dest, exist_ok=True)
+            try:
+                os.makedirs(dest, exist_ok=True)
+            except Exception as e:
+                self._set_status(f"Can't create folder: {e}")
+                self._transferring = False
+                return
             ok = 0
             for path, name in files:
                 try:
-                    shutil.copy2(path, os.path.join(dest, name))
-                    ok += 1
-                except Exception as e:
+                    dest_path = os.path.join(dest, name)
+                    shutil.copy2(path, dest_path)
+                    # Verify the file actually landed
+                    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                        ok += 1
+                    else:
+                        log.error("Push verify failed %s: file missing after copy", name)
+                except (PermissionError, OSError) as e:
                     log.error("Push failed %s: %s", name, e)
+                    self._set_status(f"Error: {e}")
+                    self._transferring = False
+                    return
+            # Force flush to disk
+            try:
+                subprocess.run(["sync"], timeout=30)
+            except Exception:
+                pass
             self._set_status(f"Pushed {ok}/{len(files)} files")
             self._push_list.clear_selection()
             self._transferring = False
@@ -311,13 +330,21 @@ class TransferScreen:
         self._set_status(f"Pushing kit {name}...")
 
         def worker():
+            import subprocess
             dest = os.path.join(samples_dir, "Compa Kits", name)
             try:
                 if os.path.exists(dest):
                     shutil.rmtree(dest)
                 shutil.copytree(kit_data["path"], dest)
+                # Verify
+                if not os.path.isdir(dest):
+                    self._set_status(f"Failed: directory not created")
+                    self._transferring = False
+                    return
+                # Flush to disk
+                subprocess.run(["sync"], timeout=30)
                 self._set_status(f"Kit '{name}' pushed!")
-            except Exception as e:
+            except (PermissionError, OSError) as e:
                 self._set_status(f"Failed: {e}")
                 log.error("Kit push failed: %s", e)
             self._transferring = False

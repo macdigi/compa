@@ -174,8 +174,24 @@ class AkaiStorageManager:
                 log.info("Mounted Akai %s: %s → %s",
                          mount.label, part_path, mount.mount_point)
 
-        # Remove drives that are no longer mounted
-        self._drives = [d for d in self._drives if os.path.ismount(d.mount_point)]
+        # Remove drives that are no longer mounted or have gone stale
+        valid = []
+        for d in self._drives:
+            if not os.path.ismount(d.mount_point):
+                log.info("Drive removed (unmounted): %s", d.mount_point)
+                continue
+            # Check for I/O errors (stale USB connection)
+            try:
+                os.listdir(d.mount_point)
+                valid.append(d)
+            except OSError:
+                log.warning("Drive stale (I/O error): %s — removing", d.mount_point)
+                try:
+                    subprocess.run(["sudo", "umount", "-l", d.mount_point],
+                                  timeout=5, capture_output=True)
+                except Exception:
+                    pass
+        self._drives = valid
 
         return self._drives
 
