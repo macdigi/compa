@@ -119,6 +119,11 @@ class P6SessionScreen:
                         if dev and dev.audio_hint:
                             self.app.recorder.stop_monitoring()
                             self.app.recorder.switch_device(dev.audio_hint)
+                            # Clear old buffer so we don't show stale audio
+                            import numpy as np
+                            self.app.recorder._recall_buf[:] = 0
+                            self.app.recorder._recall_write_pos = 0
+                            self.app.recorder._recall_total_written = 0
                             self.app.recorder.start_monitoring()
                         return
 
@@ -365,47 +370,59 @@ class P6SessionScreen:
             pygame.draw.rect(surface, (15, 15, 22), wave_rect, border_radius=3)
 
             if is_monitored:
-                # Real-time bar visualizer — bars bounce with audio level
+                # Oscilloscope — smooth line showing current audio shape
                 import numpy as np
-                waveform = self.app.recorder.waveform
-                num_bars = min(32, wave_rect.width // 6)
-                bar_w = max(3, (wave_rect.width - 4) // num_bars - 1)
-                bar_gap = 1
+                peak_l, peak_r = self.app.recorder.peak_levels
 
-                if waveform is not None and len(waveform) > 0:
-                    # Split waveform into num_bars chunks, get peak per chunk
-                    chunk = max(1, len(waveform) // num_bars)
-                    max_val = max(float(np.max(waveform)), 0.001)
+                # Use the most recent audio from the recall buffer
+                rec = self.app.recorder
+                buf = rec._recall_buf
+                wpos = rec._recall_write_pos
+                display_frames = min(2048, len(buf))
 
-                    for b in range(num_bars):
-                        start = b * chunk
-                        end = min(start + chunk, len(waveform))
-                        if start >= len(waveform):
-                            break
-                        peak = float(np.max(waveform[start:end])) / max_val
-
-                        bx = wave_rect.x + 2 + b * (bar_w + bar_gap)
-                        bar_h = int(peak * (wave_rect.height - 6))
-                        bar_h = max(1, bar_h)
-                        by = wave_rect.bottom - 3 - bar_h
-
-                        # Color gradient: device color → bright at peak
-                        if peak > 0.9:
-                            bc = theme.RED
-                        elif peak > 0.7:
-                            bc = theme.YELLOW
-                        else:
-                            bc = device_color
-                        pygame.draw.rect(surface, bc,
-                                        (bx, by, bar_w, bar_h), border_radius=1)
+                # Read the most recent chunk from the circular buffer
+                if wpos >= display_frames:
+                    recent = buf[wpos - display_frames:wpos]
                 else:
-                    # No data — flat bars
-                    for b in range(num_bars):
-                        bx = wave_rect.x + 2 + b * (bar_w + bar_gap)
-                        pygame.draw.rect(surface, (25, 25, 35),
-                                        (bx, wave_rect.bottom - 4, bar_w, 1))
+                    recent = np.concatenate([buf[-(display_frames - wpos):], buf[:wpos]])
 
-                # Recording / buffer label
+                if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
+                    # Mono mix
+                    if recent.ndim > 1:
+                        mono = recent.mean(axis=1)
+                    else:
+                        mono = recent
+
+                    # Downsample to display width
+                    w = wave_rect.width - 4
+                    step = max(1, len(mono) // w)
+                    points = []
+                    center_y = wave_rect.centery
+                    half_h = (wave_rect.height - 8) // 2
+
+                    for px in range(w):
+                        si = px * step
+                        if si < len(mono):
+                            val = float(mono[si])
+                            # Clamp and scale
+                            val = max(-1.0, min(1.0, val * 3.0))  # Boost for visibility
+                            py = center_y - int(val * half_h)
+                            points.append((wave_rect.x + 2 + px, py))
+
+                    if len(points) > 1:
+                        pygame.draw.lines(surface, device_color, False, points, 2)
+                else:
+                    # Silent — flat center line
+                    pygame.draw.line(surface, theme.BORDER,
+                                   (wave_rect.x + 2, wave_rect.centery),
+                                   (wave_rect.right - 2, wave_rect.centery))
+
+                # Center line (faint, behind the waveform)
+                pygame.draw.line(surface, (30, 30, 40),
+                                (wave_rect.x + 2, wave_rect.centery),
+                                (wave_rect.right - 2, wave_rect.centery))
+
+                # Label
                 if self.app.recorder.is_recording:
                     dur = self.app.recorder.duration
                     surf = f_tiny.render(f"REC {dur:.0f}s", True, theme.RED)
