@@ -21,6 +21,7 @@ from ..components.modal import Modal
 from engine.format_converter import generate_xpm, generate_adg, PadAssignment
 from engine.drum_detector import scan_library, scan_summary
 from engine.drum_mapper import auto_map
+from engine.als_export import export_als
 
 log = logging.getLogger(__name__)
 
@@ -391,6 +392,12 @@ class KitBuilderScreen:
             self._export_adg()
             return
 
+        # EXPORT ALS button (between ADG and XPM)
+        als_rect = pygame.Rect(theme.SCREEN_WIDTH - 560, self._ACTION_Y, 110, self._ACTION_H)
+        if als_rect.collidepoint(mx, my):
+            self._export_als()
+            return
+
         if self._export_btn_rect().collidepoint(mx, my):
             self._export_xpm()
             return
@@ -545,6 +552,66 @@ class KitBuilderScreen:
                     self._set_status("ADG export failed -- check logs")
             except Exception as e:
                 self._set_status(f"ADG export error: {e}")
+            finally:
+                self._exporting = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_als(self):
+        """Export as an Ableton Live Set with audio tracks per drum type."""
+        if self._exporting:
+            return
+        assigned = [(i, p) for i, p in enumerate(self._pads) if p is not None]
+        if not assigned:
+            self._set_status("No pads assigned")
+            return
+
+        self._exporting = True
+        self._set_status(f"Exporting ALS with {len(assigned)} samples...")
+
+        def worker():
+            try:
+                sessions_dir = self.app.config.get("P6_SESSIONS_DIR", "sessions")
+                output_dir = os.path.join(sessions_dir, "converted", self._kit_name)
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Group pads by drum type for separate tracks
+                tracks_by_type: dict[str, list[str]] = {}
+                for idx, pad_info in assigned:
+                    dtype = pad_info.get("drum_type", "samples")
+                    if not dtype or dtype == "unknown":
+                        dtype = "samples"
+                    if dtype not in tracks_by_type:
+                        tracks_by_type[dtype] = []
+                    tracks_by_type[dtype].append(pad_info["path"])
+
+                tracks = []
+                for dtype, paths in tracks_by_type.items():
+                    tracks.append({
+                        "name": dtype.replace("_", " ").title(),
+                        "samples": paths,
+                    })
+
+                # If no drum types, make one track with all samples
+                if not tracks:
+                    tracks = [{"name": self._kit_name,
+                               "samples": [p["path"] for _, p in assigned]}]
+
+                bpm = 120.0
+                if self.app.p6:
+                    bpm = self.app.p6.state.bpm
+
+                als_path = os.path.join(output_dir, f"{self._kit_name}.als")
+                result = export_als(self._kit_name, tracks, als_path, bpm=bpm)
+                if result:
+                    self._set_status(
+                        f"Exported! {len(tracks)} tracks -> "
+                        f"{self._kit_name}.als")
+                    self._last_export_name = self._kit_name
+                else:
+                    self._set_status("ALS export failed")
+            except Exception as e:
+                self._set_status(f"ALS export error: {e}")
             finally:
                 self._exporting = False
 
@@ -931,7 +998,15 @@ class KitBuilderScreen:
         # Export buttons share has_pads state
         has_pads = self._assigned_count() > 0
 
-        # Export ADG (Ableton)
+        # Export ALS (Ableton Live Set)
+        als_rect = pygame.Rect(theme.SCREEN_WIDTH - 560, self._ACTION_Y, 110, self._ACTION_H)
+        if has_pads and not self._exporting:
+            theme.draw_button(surface, als_rect, "EXPORT ALS", f_small,
+                              active=True, color=theme.BLUE)
+        else:
+            theme.draw_button(surface, als_rect, "EXPORT ALS", f_small)
+
+        # Export ADG (Ableton Drum Rack)
         export_adg_rect = self._export_adg_btn_rect()
         if self._exporting:
             theme.draw_button(surface, export_adg_rect, "EXPORTING...", f_small,
