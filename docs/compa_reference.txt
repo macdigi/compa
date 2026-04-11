@@ -639,3 +639,16 @@ Compa stores its data in the following directories on the Pi:
 
 
 == END OF MANUAL ==
+
+
+== MONITOR OUTPUT (EXPERIMENTAL) ==
+The OUT button on session cards sets a device as your headphone output.
+When you tap a different card, audio routes through the Pi to your
+headphone device so you can hear it.
+
+NOTE: Audio pass-through works best on Pi 4 or Pi 5 where USB devices
+are on separate buses. On Pi 3B, the shared USB bus causes glitches
+when routing audio between two USB devices simultaneously.
+
+Pi 3B workaround: use analog cables to monitor multiple devices.
+Run one device headphone out into another device EXT SOURCE input.

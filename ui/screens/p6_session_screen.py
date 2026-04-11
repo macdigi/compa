@@ -283,14 +283,15 @@ class P6SessionScreen:
             surface.blit(surf, (cx + 12, cy))
 
             # Headphone/monitor output button (right side of row 2)
-            hp_rect = pygame.Rect(card_rect.right - 44, cy - 2, 34, 16)
+            # Note: audio pass-through works best on Pi 4/5
+            hp_rect = pygame.Rect(card_rect.right - 62, cy - 2, 52, 16)
             if is_monitor_out:
                 pygame.draw.rect(surface, device_color, hp_rect, border_radius=3)
-                surf = f_tiny.render("OUT", True, theme.BG)
+                surf = f_tiny.render("OUT *", True, theme.BG)
             else:
                 pygame.draw.rect(surface, theme.BUTTON_BG, hp_rect, border_radius=3)
                 pygame.draw.rect(surface, theme.BORDER, hp_rect, 1, border_radius=3)
-                surf = f_tiny.render("OUT", True, theme.TEXT_DIM)
+                surf = f_tiny.render("OUT *", True, theme.TEXT_DIM)
             surface.blit(surf, surf.get_rect(center=hp_rect.center))
             self._card_buttons.append((hp_rect, short_name, "set_monitor"))
 
