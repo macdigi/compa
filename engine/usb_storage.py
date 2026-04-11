@@ -424,7 +424,8 @@ class AkaiStorageManager:
             os.makedirs(mount_point, exist_ok=True)
             try:
                 result = subprocess.run(
-                    ["sudo", "mount", part_path, mount_point],
+                    ["sudo", "mount", "-o", "uid=1000,gid=1000,fmask=0000,dmask=0000",
+                     part_path, mount_point],
                     capture_output=True, text=True, timeout=15,
                 )
                 if result.returncode != 0:
