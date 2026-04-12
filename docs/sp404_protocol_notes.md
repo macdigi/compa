@@ -89,3 +89,33 @@ The Roland Librarian app maintains a local cache at:
 2. Parse PADCONF.BIN to extract pad assignments
 3. Decode RFWV audio format to extract/import samples
 4. Build SP-404 VIEW mode using local cache when available
+
+## Detailed capture (2026-04-11, second session)
+
+### Exact termios settings used by Librarian app:
+- c_iflag: 0x0000
+- c_oflag: 0x0000  
+- c_cflag: 0x4B00 (CS8 | CREAD | HUPCL)
+- c_lflag: 0x0000
+- ispeed/ospeed: 9600 (but CDC ACM ignores this)
+- Raw mode, no flow control
+
+### Handshake byte analysis:
+```
+12 60 e0 05 fe 67 00 6d 33 31 31 03
+                      ^  ^  ^  ^  ^
+                      g  \0 m  3  1  1  ETX
+                         "m311" = from usbmodem path?
+```
+
+### Replicated EXACTLY on Mac (same machine):
+- Same ioctls (TIOCEXCL, TIOCSETA, TIOCGETA, TIOCGWINSZ)
+- Same termios flags (0x4B00, raw, 9600)
+- Same 12-byte handshake
+- STILL NO RESPONSE
+
+### Theory:
+The SP-404 may require the app to send something via the AUDIO/MIDI
+interface (0582:0281) FIRST before the CDC serial port (0582:02e7)
+becomes responsive. The dtrace capture didn't show MIDI activity
+but the app opens MIDI ports during startup.
