@@ -421,7 +421,7 @@ class KitBuilderScreen:
             return
 
         if self._clear_all_btn_rect().collidepoint(mx, my):
-            self._pads = [None] * 128
+            self._pads = [None] * self._total_pads
             self._set_status("All pads cleared")
             return
 
@@ -484,7 +484,7 @@ class KitBuilderScreen:
 
         # Auto-advance to next pad
         next_pad = self._selected_pad + 1
-        if next_pad < 128:
+        if next_pad < self._total_pads:
             self._selected_pad = next_pad
             # Switch bank if needed
             self._current_bank = next_pad // 16
@@ -1032,7 +1032,7 @@ class KitBuilderScreen:
 
         # Pad count to the right of bank buttons
         count_x = 12 + 8 * (38 + 4) + 12
-        count_text = f"{self._assigned_count()}/128 pads assigned"
+        count_text = f"{self._assigned_count()}/{self._total_pads} pads assigned"
         count_surf = f_small.render(count_text, True, theme.TEXT_DIM)
         surface.blit(count_surf, (count_x, self._BANK_Y + 8))
 
