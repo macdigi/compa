@@ -75,6 +75,11 @@ class P6SessionScreen:
     def on_enter(self):
         # Start audio monitoring so meters work on this screen
         if not self.app.recorder._monitoring:
+            # If recorder doesn't have a valid device, try the focused device
+            if not self.app.recorder.available:
+                dev = self.app.device
+                if dev and dev.audio_hint:
+                    self.app.recorder.switch_device(dev.audio_hint)
             self.app.recorder.start_monitoring()
 
     def on_exit(self):
@@ -305,12 +310,13 @@ class P6SessionScreen:
             # Check if this device is the one being monitored
             rec_hint = self.app.recorder._device_hint
             # Check if this device is being monitored
-            if num_cards == 1:
-                # Only one device — always monitored
-                is_monitored = self.app.recorder._monitoring
-            else:
-                is_monitored = (rec_hint and profile.audio_hint and
-                               (profile.audio_hint in rec_hint or rec_hint in profile.audio_hint))
+            # Compare the recorder's actual device name against the profile
+            rec_dev_name = self.app.recorder.device_name
+            is_monitored = (self.app.recorder._monitoring and
+                           rec_dev_name and profile.audio_hint and
+                           (profile.audio_hint in rec_dev_name or
+                            rec_dev_name in profile.audio_hint or
+                            profile.short_name in rec_dev_name))
             peak_l = self._disp_peak_l if is_monitored else 0.0
             peak_r = self._disp_peak_r if is_monitored else 0.0
 
