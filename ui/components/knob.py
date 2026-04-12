@@ -81,21 +81,28 @@ class Knob:
         surface.blit(val_surf, val_rect)
 
     def handle_event(self, event: pygame.event.Event) -> bool:
-        """Handle touch drag. Returns True if value changed."""
+        """Handle touch drag + tap to adjust. Returns True if value changed."""
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            # Check if touch is near knob
             dx = event.pos[0] - self.center[0]
             dy = event.pos[1] - self.center[1]
-            if dx * dx + dy * dy <= (self.radius + 15) ** 2:
+            dist_sq = dx * dx + dy * dy
+            hit_radius = self.radius + 20  # Generous touch target
+
+            if dist_sq <= hit_radius * hit_radius:
                 self._dragging = True
                 self._drag_start_y = event.pos[1]
                 self._drag_start_val = self.value
+                self._touch_moved = False
                 return False
 
         elif event.type == pygame.MOUSEMOTION and self._dragging:
             delta_y = self._drag_start_y - event.pos[1]  # Up = increase
+            if abs(delta_y) > 3:
+                self._touch_moved = True
+
             range_val = self.max_val - self.min_val
-            delta_val = (delta_y / self.sensitivity) * range_val
+            # Much more responsive — 80px for full range (was 200)
+            delta_val = (delta_y / 80.0) * range_val
             new_val = self._drag_start_val + delta_val
             new_val = max(self.min_val, min(self.max_val, new_val))
 
@@ -106,8 +113,27 @@ class Knob:
                 self.value = new_val
                 return True
 
-        elif event.type == pygame.MOUSEBUTTONUP:
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            was_dragging = self._dragging
             self._dragging = False
+
+            # Tap without drag — increment/decrement by step
+            if was_dragging and not self._touch_moved:
+                range_val = self.max_val - self.min_val
+                # Tap above center = increase, below = decrease
+                step = range_val * 0.05  # 5% per tap
+                if self.int_mode:
+                    step = max(1, round(step))
+                dy = event.pos[1] - self.center[1]
+                if dy < 0:  # Tapped above center
+                    new_val = min(self.max_val, self.value + step)
+                else:  # Tapped below center
+                    new_val = max(self.min_val, self.value - step)
+                if self.int_mode:
+                    new_val = round(new_val)
+                if new_val != self.value:
+                    self.value = new_val
+                    return True
 
         return False
 
