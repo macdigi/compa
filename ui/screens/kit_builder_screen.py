@@ -43,7 +43,7 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 # Bank letters A-H
-BANK_LETTERS = "ABCDEFGH"
+BANK_LETTERS = "ABCDEFGHIJ"  # Up to 10 banks for P-6 mode
 
 
 class KitBuilderScreen:
@@ -76,8 +76,11 @@ class KitBuilderScreen:
         self._wave_cache_data: np.ndarray | None = None
         self._WAVE_POINTS = 300  # Downsample to this many points
 
+        # Kit mode: "mpc" (4x4, 8 banks, 128 pads) or "p6" (6 pads, ~10 banks, 64 slots)
+        self._kit_mode = "mpc"
+
         # Export state
-        self._last_export_name: str = ""  # Set after successful export for PUSH workflow
+        self._last_export_name: str = ""
         self._status: str = ""
         self._status_timer: int = 0
         self._exporting: bool = False
@@ -182,9 +185,29 @@ class KitBuilderScreen:
 
     # ── Computed helpers ────────────────────────────────────────────
 
+    @property
+    def _pads_per_bank(self) -> int:
+        return 6 if self._kit_mode == "p6" else 16
+
+    @property
+    def _num_banks(self) -> int:
+        return 10 if self._kit_mode == "p6" else 8
+
+    @property
+    def _total_pads(self) -> int:
+        return self._pads_per_bank * self._num_banks
+
+    @property
+    def _grid_cols(self) -> int:
+        return 3 if self._kit_mode == "p6" else 4
+
+    @property
+    def _grid_rows(self) -> int:
+        return 2 if self._kit_mode == "p6" else 4
+
     def _bank_start(self) -> int:
         """First absolute pad index for the current bank."""
-        return self._current_bank * 16
+        return self._current_bank * self._pads_per_bank
 
     def _assigned_count(self) -> int:
         """How many pads have samples assigned."""
@@ -197,14 +220,20 @@ class KitBuilderScreen:
 
     # ── Layout constants (shared between draw and handle_event) ─────
 
-    # Pad grid: 4 cols x 4 rows in left panel
+    # Pad grid (MPC mode: 4 cols x 4 rows, P-6 mode: 3 cols x 2 rows)
     _GRID_X = 12
     _GRID_Y = 44
     _GRID_W = 430
     _GRID_H = 300
-    _PAD_COLS = 4
-    _PAD_ROWS = 4
     _PAD_GAP = 6
+
+    @property
+    def _PAD_COLS(self):
+        return 3 if self._kit_mode == "p6" else 4
+
+    @property
+    def _PAD_ROWS(self):
+        return 2 if self._kit_mode == "p6" else 4
 
     # Sample browser: right panel
     _BROWSER_X = 452
@@ -326,6 +355,26 @@ class KitBuilderScreen:
                              input_mode=True, default_text=self._kit_name)
             return
 
+        # Mode toggle (MPC ↔ P-6)
+        mode_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 6, 80, 26)
+        if mode_rect.collidepoint(mx, my):
+            if self._kit_mode == "mpc":
+                self._kit_mode = "p6"
+                # Resize pads array for P-6 (60 pads: 6 x 10 banks)
+                new_pads = [None] * 60
+                for i in range(min(60, len(self._pads))):
+                    new_pads[i] = self._pads[i]
+                self._pads = new_pads
+            else:
+                self._kit_mode = "mpc"
+                new_pads = [None] * 128
+                for i in range(min(128, len(self._pads))):
+                    new_pads[i] = self._pads[i]
+                self._pads = new_pads
+            self._current_bank = 0
+            self._selected_pad = 0
+            return
+
         # ---- Pad grid clicks ----
         if (self._GRID_X <= mx <= self._GRID_X + self._GRID_W and
                 self._GRID_Y <= my <= self._GRID_Y + self._GRID_H):
@@ -334,7 +383,7 @@ class KitBuilderScreen:
                     rect = self._pad_rect(col, row)
                     if rect.collidepoint(mx, my):
                         # MPC pad layout: bottom-left = pad 0 (row 3 col 0)
-                        pad_in_bank = (3 - row) * 4 + col
+                        pad_in_bank = (self._PAD_ROWS - 1 - row) * self._PAD_COLS + col
                         abs_idx = self._bank_start() + pad_in_bank
                         self._selected_pad = abs_idx
                         # If pad has sample, preview it
@@ -356,13 +405,12 @@ class KitBuilderScreen:
 
         # ---- Bank selector ----
         if self._BANK_Y <= my <= self._BANK_Y + self._BANK_H:
-            for i in range(8):
+            for i in range(self._num_banks):
                 rect = self._bank_btn_rect(i)
                 if rect.collidepoint(mx, my):
                     self._current_bank = i
-                    # Keep selected pad in the new bank
-                    pad_in_old_bank = self._selected_pad % 16
-                    self._selected_pad = i * 16 + pad_in_old_bank
+                    pad_in_old_bank = self._selected_pad % self._pads_per_bank
+                    self._selected_pad = i * self._pads_per_bank + pad_in_old_bank
                     return
             return
 
@@ -428,8 +476,9 @@ class KitBuilderScreen:
             "filename": sample.get("filename", os.path.basename(path)),
             "duration": sample.get("duration", _wav_duration(path)),
         }
-        bank_letter = BANK_LETTERS[self._selected_pad // 16]
-        pad_num = (self._selected_pad % 16) + 1
+        ppb = self._pads_per_bank
+        bank_letter = BANK_LETTERS[self._selected_pad // ppb] if self._selected_pad // ppb < len(BANK_LETTERS) else "?"
+        pad_num = (self._selected_pad % ppb) + 1
         self._set_status(
             f"Assigned to {bank_letter}{pad_num:02d}: {sample['filename']}")
 
@@ -852,7 +901,8 @@ class KitBuilderScreen:
         f_mono = theme.font("mono")
 
         # ---- Header (y=0-38) ----
-        theme.draw_screen_header(surface, "KIT BUILDER", self._kit_name)
+        mode_label = "P-6 MODE" if self._kit_mode == "p6" else "MPC MODE"
+        theme.draw_screen_header(surface, "KIT BUILDER", f"{self._kit_name}  [{mode_label}]")
 
         # Import mode overlay
         if self._import_mode:
@@ -862,6 +912,13 @@ class KitBuilderScreen:
         # Rename button on header
         rename_rect = self._rename_btn_rect()
         theme.draw_button(surface, rename_rect, "RENAME", f_small)
+
+        # Mode toggle (MPC ↔ P-6) — in header area
+        mode_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 6, 80, 26)
+        mode_bg = theme.YELLOW if self._kit_mode == "p6" else theme.ACCENT
+        pygame.draw.rect(surface, mode_bg, mode_rect, border_radius=4)
+        surf = f_tiny.render(mode_label, True, theme.BG)
+        surface.blit(surf, surf.get_rect(center=mode_rect.center))
 
         # ---- Pad grid panel (left, y=42-344) ----
         grid_panel = pygame.Rect(
@@ -873,9 +930,11 @@ class KitBuilderScreen:
         for row in range(self._PAD_ROWS):
             for col in range(self._PAD_COLS):
                 rect = self._pad_rect(col, row)
-                # MPC layout: bottom-left is pad 0
-                pad_in_bank = (3 - row) * 4 + col
+                # Layout: bottom-left is pad 0
+                pad_in_bank = (self._PAD_ROWS - 1 - row) * self._PAD_COLS + col
                 abs_idx = bank_start + pad_in_bank
+                if abs_idx >= len(self._pads):
+                    continue
                 pad_info = self._pads[abs_idx]
                 is_selected = (abs_idx == self._selected_pad)
 
@@ -895,7 +954,7 @@ class KitBuilderScreen:
                     pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=4)
 
                 # Pad label: A01-A16 etc.
-                bank_letter = BANK_LETTERS[self._current_bank]
+                bank_letter = BANK_LETTERS[self._current_bank] if self._current_bank < len(BANK_LETTERS) else "?"
                 pad_label = f"{bank_letter}{pad_in_bank + 1:02d}"
 
                 if pad_info is not None:
@@ -952,13 +1011,15 @@ class KitBuilderScreen:
         self._draw_waveform_preview(surface, f_tiny)
 
         # ---- Bank selector (y=354-386) ----
-        for i in range(8):
+        for i in range(self._num_banks):
             rect = self._bank_btn_rect(i)
             active = (i == self._current_bank)
-            label = BANK_LETTERS[i]
+            label = BANK_LETTERS[i] if i < len(BANK_LETTERS) else str(i)
             # Show dot if bank has any assigned pads
+            ppb = self._pads_per_bank
             bank_has_pads = any(
-                self._pads[i * 16 + j] is not None for j in range(16))
+                i * ppb + j < len(self._pads) and self._pads[i * ppb + j] is not None
+                for j in range(ppb))
             if bank_has_pads and not active:
                 theme.draw_button(surface, rect, label, f_small,
                                   active=False, color=theme.BG_LIGHTER)
