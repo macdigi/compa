@@ -201,7 +201,10 @@ class P6ControlScreen:
             self._knobs[tab_key] = knob_list
 
     def on_enter(self):
-        # Sync knob values with P-6 state
+        # Rebuild tabs/knobs for the focused device (fixes stale P-6 tabs
+        # when SP-404 is focused but you navigated away and back)
+        self.rebuild_for_device()
+        # Sync knob values with device state
         self._sync_knobs()
         # Register CC callback for live updates
         if self.app.p6:

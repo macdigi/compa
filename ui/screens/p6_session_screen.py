@@ -114,25 +114,12 @@ class P6SessionScreen:
                         self._handle_card_button(dev_name, action)
                         return
 
-            # Tap card background → switch focus + start monitoring
+            # Tap card → expand to device workspace
             if hasattr(self, "_card_rects"):
                 for rect, dev_name in self._card_rects:
                     if rect.collidepoint(mx, my):
-                        self.app.switch_focus(dev_name)
-                        # Switch recorder to this device and start monitoring
-                        dev = self.app.device_manager.connected.get(dev_name)
-                        if dev and dev.audio_hint:
-                            self.app.recorder.stop_monitoring()
-                            self.app.recorder.switch_device(dev.audio_hint)
-                            import numpy as np
-                            self.app.recorder._recall_buf[:] = 0
-                            self.app.recorder._recall_write_pos = 0
-                            self.app.recorder._recall_total_written = 0
-                            self.app.recorder.start_monitoring()
-                            self.app.route_monitor(dev_name)
-                        elif not self.app.recorder._monitoring:
-                            # No audio hint but try to start monitoring anyway
-                            self.app.recorder.start_monitoring()
+                        self.app.switch_screen("device_workspace",
+                                               context={"device": dev_name})
                         return
 
     def _handle_card_button(self, dev_name: str, action: str):
@@ -161,6 +148,11 @@ class P6SessionScreen:
             midi.send_stop()
             if self.app.recorder.is_recording:
                 self.app.recorder.stop_recording()
+        elif action == "recall":
+            path = self.app.recorder.recall_buffer()
+            if path:
+                print(f"Recall saved: {path}", flush=True)
+            return
         elif action == "rec":
             if self.app.recorder.is_recording:
                 self.app.recorder.stop_recording()
@@ -402,10 +394,20 @@ class P6SessionScreen:
                 surf = f_tiny.render("STOP", True, theme.TEXT)
                 surface.blit(surf, surf.get_rect(center=stop_rect.center))
 
+                # RECALL button
+                recall_rect = pygame.Rect(bx + 3 * (btn_w + 4), cy, btn_w, btn_h)
+                recall_secs = self.app.recorder.recall_seconds_available
+                recall_bg = theme.ACCENT if recall_secs >= 1 else theme.BUTTON_BG
+                recall_tc = theme.BG if recall_secs >= 1 else theme.TEXT_DIM
+                pygame.draw.rect(surface, recall_bg, recall_rect, border_radius=4)
+                surf = f_tiny.render(f"RCL {int(recall_secs)}s", True, recall_tc)
+                surface.blit(surf, surf.get_rect(center=recall_rect.center))
+
                 # Store button rects for click handling
                 self._card_buttons.append((play_rect, short_name, "play"))
                 self._card_buttons.append((rec_rect, short_name, "rec"))
                 self._card_buttons.append((stop_rect, short_name, "stop"))
+                self._card_buttons.append((recall_rect, short_name, "recall"))
 
             cy += 30
 

@@ -25,6 +25,7 @@ from ui.screens.p6_radio_screen import P6RadioScreen
 from ui.screens.p6_settings_screen import P6SettingsScreen
 from ui.screens.kit_builder_screen import KitBuilderScreen
 from ui.screens.transfer_screen import TransferScreen
+from ui.screens.device_workspace import DeviceWorkspaceScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
@@ -255,6 +256,7 @@ class P6App:
             "settings": P6SettingsScreen(self),
             "kit": KitBuilderScreen(self),
             "transfer": TransferScreen(self),
+            "device_workspace": DeviceWorkspaceScreen(self),
         }
         self.current_screen_name = "session"
 
