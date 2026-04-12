@@ -44,3 +44,48 @@ The SP-404 MK2 presents TWO USB devices:
 3. May require USB control transfers before bulk data flows
 4. Could try MITM using a USB hardware analyzer
 5. Serial number from USB descriptor: `SP-404MKII-G-423721E8Q2875`
+
+## BREAKTHROUGH — dtrace capture (2026-04-11)
+
+### Handshake bytes (first write to serial port)
+```
+12 60 e0 05 fe 67 00 6d 33 31 31 03
+```
+12 bytes sent on fd=13 (/dev/tty.usbmodem31131101) immediately after
+opening the port and setting ioctl parameters.
+
+### ioctl sequence
+1. 0x2000740d — TIOCEXCL (exclusive access)
+2. 0x40487413 — TIOCSETA (set terminal attributes)
+3. 0x80487414 — TIOCGETA (get terminal attributes) x2
+4. 0x80085402 — TIOCGWINSZ (get window size)
+
+### Local cache discovery
+The Roland Librarian app maintains a local cache at:
+```
+~/SP404 User/ROLAND/SP-404MKII_LOCAL/
+  PROJECT_01/
+    PADCONF.BIN          — Pad configuration (starts with "RFPD" magic)
+    SMPL/
+      BANK1-01.SMP       — Sample files (starts with "RFWV" magic)
+      BANK2-06.SMP       — 48kHz audio data
+      ...
+```
+
+### SMP file format
+- Magic: `RFWV` (4 bytes)
+- Data length: uint32 BE (offset 4)
+- Sample rate: uint32 BE (offset 8) — 0x0000BB80 = 48000
+- Channels: uint32 BE (offset 12) — 0x00000001 = mono
+- Bit depth: uint32 BE (offset 16) — 0x00000010 = 16-bit
+
+### PADCONF.BIN format
+- Magic: `RFPD` (4 bytes)
+- Contains pad assignments, names, parameters for all 160 pads
+- Bank naming at offset 0x80+ (space-padded)
+
+### Next steps
+1. Try sending the handshake bytes from the Pi to see if SP-404 responds
+2. Parse PADCONF.BIN to extract pad assignments
+3. Decode RFWV audio format to extract/import samples
+4. Build SP-404 VIEW mode using local cache when available
