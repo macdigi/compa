@@ -472,11 +472,12 @@ class P6ControlScreen:
             if highlight_active and cc == self._last_cc:
                 alpha = max(0, 1.0 - (now - self._last_cc_time) / self._highlight_duration)
                 ring_color = (
-                    int(255 * alpha),
-                    int(200 * alpha),
-                    int(50 * alpha),
+                    max(0, min(255, int(255 * alpha))),
+                    max(0, min(255, int(200 * alpha))),
+                    max(0, min(255, int(50 * alpha))),
                 )
-                pygame.draw.circle(surface, ring_color, knob.center, knob.radius + 4, 3)
+                if ring_color[0] > 0:
+                    pygame.draw.circle(surface, ring_color, knob.center, knob.radius + 4, 3)
 
         # ── Bus signal flow bar for SP-404 ────────────────────────────
         if tab_key in ("bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"):
