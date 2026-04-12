@@ -43,7 +43,7 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 # Bank letters A-H
-BANK_LETTERS = "ABCDEFGHIJ"  # Up to 10 banks for P-6 mode
+BANK_LETTERS = "ABCDEFGH"
 
 
 class KitBuilderScreen:
@@ -191,7 +191,7 @@ class KitBuilderScreen:
 
     @property
     def _num_banks(self) -> int:
-        return 10 if self._kit_mode == "p6" else 8
+        return 8  # Both P-6 and MPC use 8 banks (A-H)
 
     @property
     def _total_pads(self) -> int:
@@ -360,9 +360,9 @@ class KitBuilderScreen:
         if mode_rect.collidepoint(mx, my):
             if self._kit_mode == "mpc":
                 self._kit_mode = "p6"
-                # Resize pads array for P-6 (60 pads: 6 x 10 banks)
-                new_pads = [None] * 60
-                for i in range(min(60, len(self._pads))):
+                # Resize pads array for P-6 (48 pads: 6 x 8 banks)
+                new_pads = [None] * 48
+                for i in range(min(48, len(self._pads))):
                     new_pads[i] = self._pads[i]
                 self._pads = new_pads
             else:
