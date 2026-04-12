@@ -32,6 +32,10 @@ _DEFAULT_LABELS = {
     "transport": "TRANSPORT",
 }
 
+# CCs that should be toggle buttons instead of knobs
+# Value 0-63 = OFF, 64-127 = ON
+_TOGGLE_CCS = {19}  # FX On/Off
+
 # Map CC category → MIDI channel for SP-404 multi-bus routing
 _SP404_CATEGORY_CHANNELS = {
     "bus1_fx": 0,      # Ch1
@@ -347,8 +351,28 @@ class P6ControlScreen:
                     return
             return
 
-        # Knob interaction — sends CC on the appropriate channel(s)
+        # Toggle + Knob interaction
         for knob, cc in self._knobs.get(tab_key, []):
+            # Toggle buttons (CC#19 FX On/Off)
+            if cc in _TOGGLE_CCS and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                btn_rect = pygame.Rect(
+                    knob.center[0] - knob.radius,
+                    knob.center[1] - knob.radius // 2,
+                    knob.radius * 2, knob.radius + 4)
+                if btn_rect.collidepoint(event.pos):
+                    # Toggle: was ON (>=64) → OFF (0), was OFF (<64) → ON (127)
+                    new_val = 0 if knob.value >= 64 else 127
+                    knob.value = float(new_val)
+                    bus_ch = _SP404_CATEGORY_CHANNELS.get(tab_key)
+                    if self.app.p6 and bus_ch is not None:
+                        self.app.p6.send_cc(cc, new_val, channel=bus_ch)
+                    elif self.app.p6:
+                        from engine.p6_midi import CH_GRANULAR, CH_AUTO
+                        self.app.p6.send_cc(cc, new_val, channel=CH_AUTO)
+                    self._last_cc = cc
+                    self._last_cc_time = time.monotonic()
+                    return
+
             if knob.handle_event(event):
                 if self.app.p6:
                     val = int(knob.value)
@@ -424,7 +448,27 @@ class P6ControlScreen:
         highlight_active = (now - self._last_cc_time < self._highlight_duration)
 
         for knob, cc in self._knobs.get(tab_key, []):
-            knob.draw(surface)
+            if cc in _TOGGLE_CCS:
+                # Draw as toggle button instead of knob
+                is_on = knob.value >= 64
+                btn_rect = pygame.Rect(
+                    knob.center[0] - knob.radius,
+                    knob.center[1] - knob.radius // 2,
+                    knob.radius * 2, knob.radius + 4)
+                bg = theme.GREEN if is_on else theme.BUTTON_BG
+                tc = theme.BG if is_on else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, btn_rect, border_radius=8)
+                pygame.draw.rect(surface, theme.BORDER, btn_rect, 1, border_radius=8)
+                f_btn = theme.font("medium")
+                surf = f_btn.render("ON" if is_on else "OFF", True, tc)
+                surface.blit(surf, surf.get_rect(center=btn_rect.center))
+                # Label above
+                f_lbl = theme.font("small")
+                surf = f_lbl.render(knob.label, True, theme.TEXT_DIM)
+                surface.blit(surf, surf.get_rect(centerx=knob.center[0],
+                                                  bottom=btn_rect.top - 4))
+            else:
+                knob.draw(surface)
             if highlight_active and cc == self._last_cc:
                 alpha = max(0, 1.0 - (now - self._last_cc_time) / self._highlight_duration)
                 ring_color = (
