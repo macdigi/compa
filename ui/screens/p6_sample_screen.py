@@ -368,17 +368,23 @@ class P6SampleScreen:
             return
         rx -= ew + 4
 
-        if self._last_exported_slices:
-            kw = 90
-            kit_rect = pygame.Rect(rx - kw, r2y, kw, bh)
-            if kit_rect.collidepoint(mx, my):
+        # BUILD KIT — auto-exports if not already exported
+        kw = 90
+        kit_rect = pygame.Rect(rx - kw, r2y, kw, bh)
+        if kit_rect.collidepoint(mx, my):
+            # Auto-export if we have slices but haven't exported yet
+            if not self._last_exported_slices:
+                exported = self._slicer.export_slices(normalize=True)
+                if exported:
+                    self._last_exported_slices = exported
+            if self._last_exported_slices:
                 stem = os.path.splitext(os.path.basename(
                     self._slicer._filepath or "slices"))[0]
                 self.app.switch_screen("kit", {
                     "slice_paths": self._last_exported_slices,
                     "kit_name": stem,
                 })
-                return
+            return
 
         # Edit toolbar row (y=318) — positions must match _draw_slicer exactly
         edit_y = 318
@@ -806,12 +812,15 @@ class P6SampleScreen:
         surface.blit(surf, surf.get_rect(center=export_rect.center))
         rx -= ew + 4
 
-        # BUILD KIT (visible after export)
-        if self._last_exported_slices:
+        # BUILD KIT (always visible when slices exist)
+        slices = self._slicer.get_slices()
+        if len(slices) > 1:  # More than 1 slice means markers exist
             kw = 90
             kit_rect = pygame.Rect(rx - kw, r2y, kw, bh)
-            pygame.draw.rect(surface, theme.BLUE, kit_rect, border_radius=4)
-            surf = f_tiny.render("BUILD KIT", True, theme.TEXT_BRIGHT)
+            bg = theme.GREEN if self._last_exported_slices else theme.BLUE
+            pygame.draw.rect(surface, bg, kit_rect, border_radius=4)
+            label = "BUILD KIT" if not self._last_exported_slices else "KIT >"
+            surf = f_tiny.render(label, True, theme.BG)
             surface.blit(surf, surf.get_rect(center=kit_rect.center))
 
         # ── SLICE LIST ────────────────────────────────────────────────
