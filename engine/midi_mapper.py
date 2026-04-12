@@ -102,6 +102,10 @@ class MidiMapper:
         self._controller_name = ""
         self._controller_profile = None
 
+        # Detection cache (avoid creating rtmidi objects every frame)
+        self._last_scan = 0.0
+        self._cached_controllers: Optional[list] = None
+
         # Callback for UI updates
         self.on_cc_received: Optional[Callable[[int, int, int], None]] = None
 
@@ -122,32 +126,49 @@ class MidiMapper:
         return list(self._macros)
 
     def detect_controllers(self) -> list[dict]:
-        """Scan for external MIDI controllers (not SP-404, P-6, etc.)."""
+        """Scan for external MIDI controllers (not SP-404, P-6, etc.).
+
+        Caches result to avoid creating new rtmidi objects every frame.
+        """
+        now = time.monotonic()
+        if now - self._last_scan < 3.0 and self._cached_controllers is not None:
+            return self._cached_controllers
+
+        self._last_scan = now
+
         if rtmidi is None:
+            self._cached_controllers = []
             return []
 
-        mi = rtmidi.MidiIn()
+        try:
+            mi = rtmidi.MidiIn()
+        except Exception:
+            self._cached_controllers = []
+            return []
+
         found = []
-        device_hints = {"SP-404", "P-6", "Through", "RtMidi", "ATOM"}
+        device_hints = {"SP-404", "P-6", "Through", "RtMidi", "ATOM", "Force"}
 
         for i in range(mi.get_port_count()):
             name = mi.get_port_name(i)
-            # Skip known music devices
             if any(h in name for h in device_hints):
                 continue
-            # This is likely an external controller
             profile = None
-            for prof_name, prof in KNOWN_CONTROLLERS.items():
+            prof_name = "Generic"
+            for pn, prof in KNOWN_CONTROLLERS.items():
                 if prof["hint"] in name:
                     profile = prof
+                    prof_name = pn
                     break
             found.append({
                 "index": i,
                 "name": name,
                 "profile": profile,
-                "profile_name": prof_name if profile else "Generic",
+                "profile_name": prof_name,
             })
 
+        del mi  # Release immediately
+        self._cached_controllers = found
         return found
 
     def connect_controller(self, port_name_hint: str) -> bool:
