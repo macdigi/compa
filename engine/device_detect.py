@@ -104,10 +104,14 @@ def find_audio_device(hint: str) -> Optional[tuple[int, int]]:
         return None
 
     devices = sd.query_devices()
-    if not isinstance(devices, list):
-        devices = [devices]
 
-    for idx, dev in enumerate(devices):
+    for idx in range(len(devices)):
+        try:
+            dev = sd.query_devices(idx)
+        except Exception:
+            continue
+        if not isinstance(dev, dict):
+            continue
         if dev.get("max_input_channels", 0) < 1:
             continue
         name: str = dev.get("name", "")
