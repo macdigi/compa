@@ -435,10 +435,16 @@ class KitBuilderScreen:
             self._import_browser.navigate_to(self._import_root)
             return
 
-        # VIEW P-6 button (next to IMPORT)
-        view_p6_rect = pygame.Rect(330, self._ACTION_Y, 100, self._ACTION_H)
+        # VIEW P-6 button
+        view_p6_rect = pygame.Rect(330, self._ACTION_Y, 80, self._ACTION_H)
         if view_p6_rect.collidepoint(mx, my):
             self._load_from_device()
+            return
+
+        # VIEW SP-404 button
+        view_sp_rect = pygame.Rect(414, self._ACTION_Y, 80, self._ACTION_H)
+        if view_sp_rect.collidepoint(mx, my):
+            self._load_from_sp404()
             return
 
         if self._export_adg_btn_rect().collidepoint(mx, my):
@@ -827,6 +833,54 @@ class KitBuilderScreen:
         self._set_status(f"P-6: {total_on_device} on device, {total_import} in import")
         print(f"P-6 storage: {loaded} pads populated", flush=True)
 
+    def _load_from_sp404(self):
+        """Load SP-404 pad data from the Librarian app's local cache."""
+        from engine.sp404_storage import find_sp404_cache, list_projects, read_project_pads
+
+        cache_dir = find_sp404_cache()
+        if not cache_dir:
+            self._set_status("SP-404 Librarian cache not found")
+            return
+
+        projects = list_projects(cache_dir)
+        if not projects:
+            self._set_status("No SP-404 projects found")
+            return
+
+        # Load the first project that has samples
+        proj = None
+        for p in projects:
+            if p["num_samples"] > 0:
+                proj = p
+                break
+        if not proj:
+            self._set_status("No samples in any SP-404 project")
+            return
+
+        # Read pad data
+        pads = read_project_pads(proj["path"])
+
+        # Switch to MPC mode (SP-404 uses 10 banks x 16 pads = 160)
+        self._kit_mode = "mpc"
+        self._pads = [None] * 128  # Kit Builder max is 128
+
+        loaded = 0
+        for i, pad in enumerate(pads[:128]):
+            if pad:
+                self._pads[i] = {
+                    "path": pad["path"],
+                    "filename": pad["filename"],
+                    "duration": pad.get("duration", 0),
+                    "sp404_pad": pad.get("pad_id", ""),
+                }
+                loaded += 1
+
+        self._current_bank = 0
+        self._selected_pad = 0
+        self._kit_name = f"SP-404 {proj['name']}"
+        self._set_status(f"Loaded {loaded} samples from {proj['name']}")
+        print(f"SP-404 cache: {loaded} pads from {proj['path']}", flush=True)
+
     def _import_slice_batch(self, paths: list[str], kit_name: str):
         """Auto-assign a list of sample paths to consecutive pads."""
         self._pads = [None] * 128
@@ -1145,6 +1199,16 @@ class KitBuilderScreen:
         # VIEW P-6 button
         from engine.sample_slicer import P6_MOUNT_PATH
         p6_mounted = os.path.isdir(os.path.join(P6_MOUNT_PATH, "IMPORT"))
+
+        # VIEW SP-404 button
+        from engine.sp404_storage import find_sp404_cache
+        sp_cache = find_sp404_cache()
+        view_sp_rect = pygame.Rect(414, self._ACTION_Y, 80, self._ACTION_H)
+        sp_bg = theme.ACCENT if sp_cache else theme.BUTTON_BG
+        sp_tc = theme.BG if sp_cache else theme.TEXT_DIM
+        pygame.draw.rect(surface, sp_bg, view_sp_rect, border_radius=6)
+        surf = f_small.render("VIEW SP", True, sp_tc)
+        surface.blit(surf, surf.get_rect(center=view_sp_rect.center))
         view_rect = pygame.Rect(330, self._ACTION_Y, 100, self._ACTION_H)
         v_bg = theme.YELLOW if p6_mounted else theme.BUTTON_BG
         v_tc = theme.BG if p6_mounted else theme.TEXT_DIM
