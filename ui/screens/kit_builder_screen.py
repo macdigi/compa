@@ -76,8 +76,9 @@ class KitBuilderScreen:
         self._wave_cache_data: np.ndarray | None = None
         self._WAVE_POINTS = 300  # Downsample to this many points
 
-        # Kit mode: "mpc" (4x4, 8 banks, 128 pads) or "p6" (6 pads, ~10 banks, 64 slots)
+        # Kit mode: "mpc" (4x4, 8 banks, 128 pads) or "p6" (6 pads, 8 banks, 48 pads)
         self._kit_mode = "mpc"
+        self._p6_loaded_samples: list[dict] = []  # Samples found on P-6 storage
 
         # Export state
         self._last_export_name: str = ""
@@ -427,13 +428,17 @@ class KitBuilderScreen:
 
         if self._import_btn_rect().collidepoint(mx, my):
             self._import_mode = True
-            # Set correct rect before navigating
             browser_rect = pygame.Rect(
                 16, 78, theme.SCREEN_WIDTH - 32,
                 theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 130)
             self._import_browser.set_rect(browser_rect)
             self._import_browser.navigate_to(self._import_root)
-            print(f"Import mode: browsing {self._import_root}", flush=True)
+            return
+
+        # VIEW P-6 button (next to IMPORT)
+        view_p6_rect = pygame.Rect(330, self._ACTION_Y, 100, self._ACTION_H)
+        if view_p6_rect.collidepoint(mx, my):
+            self._load_from_device()
             return
 
         if self._export_adg_btn_rect().collidepoint(mx, my):
@@ -735,6 +740,92 @@ class KitBuilderScreen:
             surf = f_tiny.render(f"Will scan: {os.path.basename(cur)}/",
                                 True, theme.TEXT_DIM)
             surface.blit(surf, (130, btn_y + 10))
+
+    def _load_from_device(self):
+        """Scan the P-6's USB storage and show what's loaded.
+
+        Reads info.txt for pad assignments and scans IMPORT/BANK_X/PAD_N
+        for importable samples.
+        """
+        from engine.sample_slicer import P6_MOUNT_PATH
+        import_dir = os.path.join(P6_MOUNT_PATH, "IMPORT")
+
+        if not os.path.isdir(import_dir):
+            self._set_status("P-6 not in USB mode — hold SAMPLING + power on")
+            return
+
+        # Read info.txt for current pad contents
+        info_path = os.path.join(P6_MOUNT_PATH, "info.txt")
+        pad_names = {}  # "A-1" -> "sample_name"
+        if os.path.isfile(info_path):
+            try:
+                with open(info_path) as f:
+                    for line in f:
+                        if ":" in line and "\t" in line:
+                            parts = line.strip().split("\t")
+                            if len(parts) >= 2:
+                                pad_id = parts[0].strip().rstrip(":")
+                                name = parts[1].strip()
+                                pad_names[pad_id] = name
+            except Exception:
+                pass
+
+        # Switch to P-6 mode
+        self._kit_mode = "p6"
+        self._pads = [None] * 48
+        loaded = 0
+
+        banks = "ABCDEFGH"
+        for bi, bank in enumerate(banks):
+            for pi in range(6):
+                pad_idx = bi * 6 + pi
+                pad_id = f"{bank}-{pi + 1}"
+                pad_dir = os.path.join(import_dir, f"BANK_{bank}", f"PAD_{pi + 1}")
+
+                # Check if there's a WAV in this pad's import folder
+                wav_path = None
+                if os.path.isdir(pad_dir):
+                    for f in os.listdir(pad_dir):
+                        if f.lower().endswith(".wav"):
+                            wav_path = os.path.join(pad_dir, f)
+                            break
+
+                # Check info.txt for what's currently on the P-6
+                current_name = pad_names.get(pad_id, "")
+
+                if wav_path:
+                    dur = 0.0
+                    try:
+                        import soundfile as sf
+                        info = sf.info(wav_path)
+                        dur = info.duration
+                    except Exception:
+                        pass
+                    self._pads[pad_idx] = {
+                        "path": wav_path,
+                        "filename": os.path.basename(wav_path),
+                        "duration": dur,
+                        "p6_pad": pad_id,
+                    }
+                    loaded += 1
+                elif current_name:
+                    # No WAV in import folder, but P-6 has a sample loaded
+                    self._pads[pad_idx] = {
+                        "path": "",
+                        "filename": current_name,
+                        "duration": 0,
+                        "p6_pad": pad_id,
+                        "on_device": True,  # Already on P-6, not importable
+                    }
+                    loaded += 1
+
+        self._current_bank = 0
+        self._selected_pad = 0
+        self._kit_name = "P-6 Loaded"
+        total_on_device = sum(1 for p in self._pads if p and p.get("on_device"))
+        total_import = sum(1 for p in self._pads if p and not p.get("on_device"))
+        self._set_status(f"P-6: {total_on_device} on device, {total_import} in import")
+        print(f"P-6 storage: {loaded} pads populated", flush=True)
 
     def _import_slice_batch(self, paths: list[str], kit_name: str):
         """Auto-assign a list of sample paths to consecutive pads."""
@@ -1050,6 +1141,16 @@ class KitBuilderScreen:
         import_rect = self._import_btn_rect()
         theme.draw_button(surface, import_rect, "IMPORT", f_small,
                           color=theme.BLUE)
+
+        # VIEW P-6 button
+        from engine.sample_slicer import P6_MOUNT_PATH
+        p6_mounted = os.path.isdir(os.path.join(P6_MOUNT_PATH, "IMPORT"))
+        view_rect = pygame.Rect(330, self._ACTION_Y, 100, self._ACTION_H)
+        v_bg = theme.YELLOW if p6_mounted else theme.BUTTON_BG
+        v_tc = theme.BG if p6_mounted else theme.TEXT_DIM
+        pygame.draw.rect(surface, v_bg, view_rect, border_radius=6)
+        surf = f_small.render("VIEW P-6", True, v_tc)
+        surface.blit(surf, surf.get_rect(center=view_rect.center))
 
         # Kit name display
         name_x = 336
