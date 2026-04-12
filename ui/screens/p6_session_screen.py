@@ -119,14 +119,15 @@ class P6SessionScreen:
                         if dev and dev.audio_hint:
                             self.app.recorder.stop_monitoring()
                             self.app.recorder.switch_device(dev.audio_hint)
-                            # Clear old buffer so we don't show stale audio
                             import numpy as np
                             self.app.recorder._recall_buf[:] = 0
                             self.app.recorder._recall_write_pos = 0
                             self.app.recorder._recall_total_written = 0
                             self.app.recorder.start_monitoring()
-                            # Auto-route this device to monitor output
                             self.app.route_monitor(dev_name)
+                        elif not self.app.recorder._monitoring:
+                            # No audio hint but try to start monitoring anyway
+                            self.app.recorder.start_monitoring()
                         return
 
     def _handle_card_button(self, dev_name: str, action: str):
@@ -303,8 +304,13 @@ class P6SessionScreen:
             meter_h = 6
             # Check if this device is the one being monitored
             rec_hint = self.app.recorder._device_hint
-            is_monitored = (rec_hint and profile.audio_hint and
-                           (profile.audio_hint in rec_hint or rec_hint in profile.audio_hint))
+            # Check if this device is being monitored
+            if num_cards == 1:
+                # Only one device — always monitored
+                is_monitored = self.app.recorder._monitoring
+            else:
+                is_monitored = (rec_hint and profile.audio_hint and
+                               (profile.audio_hint in rec_hint or rec_hint in profile.audio_hint))
             peak_l = self._disp_peak_l if is_monitored else 0.0
             peak_r = self._disp_peak_r if is_monitored else 0.0
 
