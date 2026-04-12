@@ -32,6 +32,7 @@ from engine.p6_recorder import P6Recorder
 from engine.device_profiles import DeviceManager
 from engine.audio_router import AudioRoute, find_device_index
 from engine.midi_lfo import MidiLFO
+from engine.midi_mapper import MidiMapper
 from engine.usb_storage import AkaiStorageManager
 from ui.splash import run_splash
 from ui.wizard import run_wizard
@@ -226,6 +227,9 @@ class P6App:
 
         # ── LFO automation engine ────────────────────────────────────
         self.lfo = MidiLFO()
+
+        # ── MIDI controller mapper ───────────────────────────────────
+        self.midi_mapper = MidiMapper()
 
         # ── Akai USB storage (Computer Mode file transfer) ───────────
         self.akai_storage = AkaiStorageManager()

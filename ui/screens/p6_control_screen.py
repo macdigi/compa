@@ -478,6 +478,64 @@ class P6ControlScreen:
                 )
                 pygame.draw.circle(surface, ring_color, knob.center, knob.radius + 4, 3)
 
+        # ── Bus signal flow bar for SP-404 ────────────────────────────
+        if tab_key in ("bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"):
+            flow_y = 74
+            flow_h = 18
+            f_flow = theme.font("tiny")
+            cx = theme.SCREEN_WIDTH // 2
+
+            # Draw: [PADS] → [B1]+[B2] → [B3] → [B4/MASTER] → [OUT]
+            #                 [INPUT] → [INPUT FX] → [mix]
+            bus_labels = [
+                ("B1", "bus1_fx", 0), ("B2", "bus2_fx", 1),
+                ("B3", "bus3_fx", 2), ("B4", "bus4_fx", 3),
+                ("IN", "input_fx", 4),
+            ]
+            # Positions
+            positions = {
+                "bus1_fx": (cx - 220, flow_y),
+                "bus2_fx": (cx - 130, flow_y),
+                "bus3_fx": (cx - 10, flow_y),
+                "bus4_fx": (cx + 110, flow_y),
+                "input_fx": (cx + 230, flow_y),
+            }
+            for label, key, ch in bus_labels:
+                px, py = positions[key]
+                w = 60
+                rect = pygame.Rect(px, py, w, flow_h)
+                is_current = (key == tab_key)
+                # Check if FX is enabled on this bus
+                fx_on = False
+                for knob, kcc in self._knobs.get(key, []):
+                    if kcc == 19 and knob.value >= 64:
+                        fx_on = True
+                        break
+                if is_current:
+                    bg = theme.ACCENT
+                elif fx_on:
+                    bg = theme.GREEN
+                else:
+                    bg = theme.BUTTON_BG
+                tc = theme.BG if is_current or fx_on else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, rect, border_radius=3)
+                surf = f_flow.render(f"Ch{ch+1} {label}", True, tc)
+                surface.blit(surf, surf.get_rect(center=rect.center))
+
+            # Arrows between buses
+            arrow_color = theme.TEXT_DIM
+            # B1/B2 → B3
+            pygame.draw.line(surface, arrow_color,
+                            (cx - 220 + 65, flow_y + flow_h // 2),
+                            (cx - 10 - 5, flow_y + flow_h // 2))
+            pygame.draw.line(surface, arrow_color,
+                            (cx - 130 + 65, flow_y + flow_h // 2),
+                            (cx - 10 - 5, flow_y + flow_h // 2))
+            # B3 → B4
+            pygame.draw.line(surface, arrow_color,
+                            (cx - 10 + 65, flow_y + flow_h // 2),
+                            (cx + 110 - 5, flow_y + flow_h // 2))
+
         # ── FX name banner for SP-404 bus tabs ────────────────────────
         if tab_key in ("bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"):
             # Find the FX Select knob (CC#83) value

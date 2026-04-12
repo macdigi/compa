@@ -65,6 +65,20 @@ class P6SettingsScreen:
         self.app.config["SKIP_SPLASH"] = new_val
         save_config_key("SKIP_SPLASH", new_val)
 
+    def _connect_controller(self, ctrl: dict):
+        mapper = self.app.midi_mapper
+        if mapper.connect_controller(ctrl["name"].split(":")[0]):
+            mapper.set_target(self.app.p6)
+            mapper.auto_map_sp404()
+            mapper.start()
+            print(f"Controller mapped: {ctrl['name']}", flush=True)
+        else:
+            print(f"Failed to connect: {ctrl['name']}", flush=True)
+
+    def _stop_mapper(self):
+        self.app.midi_mapper.stop()
+        print("Controller mapping stopped", flush=True)
+
     def _cycle_theme(self):
         names = list(theme.THEMES.keys())
         current = theme.active_theme_name()
@@ -151,6 +165,34 @@ class P6SettingsScreen:
 
         if not connected:
             self._rows.append({"label": "  No devices", "type": "info", "value": "—"})
+
+        # MIDI Controller Mapping
+        self._rows.append({"label": "", "type": "section", "value": "MIDI CONTROLLER"})
+        mapper = self.app.midi_mapper
+        if mapper.is_running:
+            self._rows.append({
+                "label": f"  {mapper.controller_name}", "type": "button",
+                "btn_label": "STOP",
+                "action": self._stop_mapper,
+            })
+            self._rows.append({
+                "label": f"  {len(mapper.mappings)} mappings, {len(mapper.macros)} macros",
+                "type": "info", "value": "",
+            })
+        else:
+            controllers = mapper.detect_controllers()
+            if controllers:
+                for ctrl in controllers:
+                    self._rows.append({
+                        "label": f"  {ctrl['name'][:30]}", "type": "button",
+                        "btn_label": "MAP",
+                        "action": lambda c=ctrl: self._connect_controller(c),
+                    })
+            else:
+                self._rows.append({
+                    "label": "  No external controllers found", "type": "info",
+                    "value": "Plug in a MIDI controller",
+                })
 
         # Audio routing (only when multiple devices connected)
         if len(connected) >= 2:
