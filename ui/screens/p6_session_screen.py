@@ -199,7 +199,7 @@ class P6SessionScreen:
     # Device → theme color name for card accent
     _DEVICE_COLORS = {
         "P-6": (255, 230, 0),       # Yellow
-        "SP-404": (0, 200, 180),     # Teal
+        "SP-404MKII": (0, 200, 180), # Teal
         "Force": (220, 50, 50),      # Red
     }
 

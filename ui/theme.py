@@ -138,7 +138,7 @@ def apply_theme(name: str):
 def apply_theme_for_device(device_short_name: str):
     """Auto-apply theme matching a device. Falls back to 'compa'."""
     mapping = {
-        "SP-404": "sp404",
+        "SP-404MKII": "sp404",
         "P-6": "p6",
         "Force": "force",
     }

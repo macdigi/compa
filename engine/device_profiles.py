@@ -202,7 +202,7 @@ def _make_sp404mk2_profile() -> DeviceProfile:
     """
     return DeviceProfile(
         name="Roland SP-404 MK2",
-        short_name="SP-404",
+        short_name="SP-404MKII",
         usb_vendor=0x0582,
         usb_products=[0x02E7, 0x0281],
 

@@ -69,7 +69,7 @@ class DeviceWorkspaceScreen:
 
     @property
     def _bus_bar_h(self) -> int:
-        return 36 if self._device_key == "SP-404" else 0
+        return 36 if self._device_key == "SP-404MKII" else 0
 
     @property
     def _controls_h(self) -> int:
@@ -89,7 +89,7 @@ class DeviceWorkspaceScreen:
         self._device_profile = self.app.device
         self._device_color = {
             "P-6": (255, 230, 0),
-            "SP-404": (0, 200, 180),
+            "SP-404MKII": (0, 200, 180),
             "Force": (220, 50, 50),
         }.get(dev_key, theme.ACCENT)
 
@@ -111,7 +111,7 @@ class DeviceWorkspaceScreen:
 
     def _build_tabs(self):
         key = self._device_key
-        if key == "SP-404":
+        if key == "SP-404MKII":
             self._tabs = [
                 ("control", "CONTROL"),
                 ("looper", "LOOPER"),
@@ -132,7 +132,7 @@ class DeviceWorkspaceScreen:
     def _build_knobs(self):
         """Build knobs for the current device + section."""
         self._knobs = []
-        if self._device_key == "SP-404":
+        if self._device_key == "SP-404MKII":
             self._build_sp404_knobs()
         elif self._device_key == "P-6":
             self._build_p6_knobs()
@@ -229,9 +229,8 @@ class DeviceWorkspaceScreen:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
-            # Back button
-            if pygame.Rect(8, 4, 56, 28).collidepoint(mx, my):
-                # Reset auto-expand flag so session screen shows cards
+            # Back button — large hit area covering top-left corner
+            if mx < 80 and my < 40:
                 session = self.app.screens.get("session")
                 if session:
                     session._auto_expanded = False
@@ -250,12 +249,12 @@ class DeviceWorkspaceScreen:
             tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
 
             if tab_key == "control":
-                if self._device_key == "SP-404":
+                if self._device_key == "SP-404MKII":
                     self._handle_sp404_clicks(mx, my)
                 elif self._device_key == "P-6":
                     self._handle_p6_clicks(mx, my)
 
-        # Knob drag handling (all events)
+        # Knob drag handling (all events, but not if in header area)
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
         if tab_key == "control":
             for knob, cc, ch in self._knobs:
@@ -279,28 +278,19 @@ class DeviceWorkspaceScreen:
                 return
 
         fx_y = self._controls_top + 2
-        row2_y = fx_y + 28
 
-        # Twister FX Page buttons
+        # Twister FX Page buttons (vertical column, right side)
         tw = self.app.twister
         if tw.connected and tw.page_count > 1:
             n_pages = tw.page_count
-            pg_w = min(42, 200 // n_pages)
+            pg_w = 40
+            pg_h = min(36, (self._controls_h - 40) // n_pages - 3)
+            pg_x = theme.SCREEN_WIDTH - pg_w - 8
+            pg_start_y = fx_y + 30
             for p in range(n_pages):
-                r = pygame.Rect(30 + p * (pg_w + 2), row2_y, pg_w, 22)
+                r = pygame.Rect(pg_x, pg_start_y + p * (pg_h + 3), pg_w, pg_h)
                 if r.collidepoint(mx, my):
                     tw.switch_page(p)
-                    return
-
-        # Bank selector buttons
-        sp = self.app.spectra
-        if sp.connected:
-            bk_w = min(28, (theme.SCREEN_WIDTH // 2 - 20) // 10)
-            bk_start = theme.SCREEN_WIDTH - 10 * (bk_w + 2) - 6
-            for b in range(10):
-                r = pygame.Rect(bk_start + b * (bk_w + 2), row2_y, bk_w, 22)
-                if r.collidepoint(mx, my):
-                    sp.switch_bank(b)
                     return
 
         # FX On/Off
@@ -354,7 +344,7 @@ class DeviceWorkspaceScreen:
             self._smooth_r *= 0.95
 
         # Sync SP-404 live CC values into workspace knobs + FX state
-        if self._device_key == "SP-404":
+        if self._device_key == "SP-404MKII":
             live = self.app.live_cc.get(self._active_bus, {})
             # Update FX on/off from CC19
             if 19 in live:
@@ -387,7 +377,7 @@ class DeviceWorkspaceScreen:
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
 
         if tab_key == "control":
-            if self._device_key == "SP-404":
+            if self._device_key == "SP-404MKII":
                 self._draw_sp404_control(surface, f_med, f_small, f_tiny)
             elif self._device_key == "P-6":
                 self._draw_p6_control(surface, f_med, f_small, f_tiny)
@@ -451,9 +441,9 @@ class DeviceWorkspaceScreen:
             hud_y += h + 3
 
     def _draw_header(self, surface, f_large, f_small):
-        # Back button
-        back = pygame.Rect(8, 4, 56, 28)
-        pygame.draw.rect(surface, theme.BUTTON_BG, back, border_radius=5)
+        # Back button (larger for touchscreen)
+        back = pygame.Rect(4, 2, 68, 34)
+        pygame.draw.rect(surface, theme.BUTTON_BG, back, border_radius=6)
         surf = f_small.render("< BACK", True, theme.TEXT)
         surface.blit(surf, surf.get_rect(center=back.center))
 
@@ -633,40 +623,23 @@ class DeviceWorkspaceScreen:
         surf = f_tiny.render(fx_name[:10], True, self._device_color)
         surface.blit(surf, surf.get_rect(center=sel_r.center))
 
-        # ── Twister FX Pages + Spectra Bank selector ────────────────
-        row2_y = fx_y + 28
+        # ── Twister FX Pages (vertical column, right side) ───────────
         tw = self.app.twister
-        sp = self.app.spectra
-
-        # FX Pages (left side)
         if tw.connected and tw.page_count > 1:
             n_pages = tw.page_count
-            pg_w = min(42, 200 // n_pages)
+            pg_w = 40
+            pg_h = min(36, (self._controls_h - 40) // n_pages - 3)
+            pg_x = theme.SCREEN_WIDTH - pg_w - 8
+            pg_start_y = fx_y + 30
             surf = f_tiny.render("FX", True, theme.TEXT_DIM)
-            surface.blit(surf, (10, row2_y + 4))
+            surface.blit(surf, surf.get_rect(centerx=pg_x + pg_w // 2, top=fx_y + 2))
             for p in range(n_pages):
-                r = pygame.Rect(30 + p * (pg_w + 2), row2_y, pg_w, 22)
+                r = pygame.Rect(pg_x, pg_start_y + p * (pg_h + 3), pg_w, pg_h)
                 active = p == tw.current_page
                 bg = self._device_color if active else theme.BUTTON_BG
                 tc = theme.BG if active else theme.TEXT_DIM
-                pygame.draw.rect(surface, bg, r, border_radius=4)
-                surf = f_tiny.render(f"P{p + 1}", True, tc)
-                surface.blit(surf, surf.get_rect(center=r.center))
-
-        # Bank selector (right side)
-        if sp.connected:
-            bank_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
-            bk_w = min(28, (theme.SCREEN_WIDTH // 2 - 20) // 10)
-            bk_start = theme.SCREEN_WIDTH - 10 * (bk_w + 2) - 6
-            surf = f_tiny.render("BANK", True, theme.TEXT_DIM)
-            surface.blit(surf, (bk_start - 40, row2_y + 4))
-            for b in range(10):
-                r = pygame.Rect(bk_start + b * (bk_w + 2), row2_y, bk_w, 22)
-                active = b == sp.bank
-                bg = self._device_color if active else theme.BUTTON_BG
-                tc = theme.BG if active else theme.TEXT_DIM
-                pygame.draw.rect(surface, bg, r, border_radius=4)
-                surf = f_tiny.render(bank_labels[b], True, tc)
+                pygame.draw.rect(surface, bg, r, border_radius=5)
+                surf = f_small.render(f"P{p + 1}", True, tc)
                 surface.blit(surf, surf.get_rect(center=r.center))
 
         # Knobs

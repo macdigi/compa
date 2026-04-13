@@ -95,7 +95,7 @@ class PiSequencer:
 
     def configure_for_device(self, device_short_name: str):
         """Set up row configs for a specific device."""
-        if device_short_name == "SP-404":
+        if "SP-404" in device_short_name:
             self.num_pads = 8
             self.row_configs = [
                 RowConfig(ROW_PAD, "PAD 1"),

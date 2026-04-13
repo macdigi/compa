@@ -372,7 +372,7 @@ class P6App:
             print("ATOM SQ connected but no device found — navigation only")
 
         # Wire SP-404 CC feedback for live parameter tracking
-        sp404_midi = self._midi_connections.get("SP-404")
+        sp404_midi = self._midi_connections.get("SP-404MKII")
         if sp404_midi:
             orig_cc = sp404_midi.on_cc
             def _on_sp404_cc(channel, cc, value, _orig=orig_cc):
