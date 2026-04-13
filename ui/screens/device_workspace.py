@@ -4,14 +4,14 @@ Reached by tapping a card on the session screen. Shows device-specific
 tabs (Control, Looper, DJ, Pattern, Record) with hardware-matching
 layouts. Back button returns to session.
 
-SP-404 Control layout matches the hardware:
-- FX Select dropdown + On/Off toggle at top
-- 3x2 knob grid matching physical knob positions
-- Bus selector (1-4 + Input) at bottom
+Layout (top to bottom):
+- Header: Back + Tabs + Device name (36px)
+- Oscilloscope: Full-width live waveform with BPM/transport overlay (~40% of content area)
+- Controls: Device-specific parameter knobs with section tabs
+- Bus selector (SP-404 only, bottom strip)
 """
 
-import os
-import time
+import numpy as np
 import pygame
 from .. import theme
 from ..components.knob import Knob
@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 class DeviceWorkspaceScreen:
     """Full-screen workspace for a single device."""
 
+    HEADER_H = 36
+
     def __init__(self, app):
         self.app = app
         self._device_key = ""
@@ -32,17 +34,54 @@ class DeviceWorkspaceScreen:
         self._current_tab = 0
 
         # SP-404 control state
-        self._active_bus = 0  # 0=Bus1, 1=Bus2, 2=Bus3, 3=Bus4, 4=InputFX
-        self._bus_knobs: list[tuple[Knob, int]] = []  # (knob, cc)
+        self._active_bus = 0
         self._fx_on = False
         self._fx_select_val = 0
+
+        # P-6 control sections
+        self._p6_section = 0  # 0=granular, 1=filter, 2=envelope, 3=mixer, 4=fx
+
+        # Knobs shared across devices
+        self._knobs: list[tuple[Knob, int, int]] = []  # (knob, cc, midi_channel)
+
+        # Smoothed peak levels
+        self._smooth_l = 0.0
+        self._smooth_r = 0.0
+
+    # ── Layout helpers (adapt to screen size) ────────────────────────
+
+    @property
+    def _content_top(self) -> int:
+        return self.HEADER_H + 2
+
+    @property
+    def _content_h(self) -> int:
+        return theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self._content_top
+
+    @property
+    def _scope_h(self) -> int:
+        """Oscilloscope takes ~40% of content area, min 80, max 160."""
+        return max(80, min(160, int(self._content_h * 0.40)))
+
+    @property
+    def _controls_top(self) -> int:
+        return self._content_top + self._scope_h + 4
+
+    @property
+    def _bus_bar_h(self) -> int:
+        return 36 if self._device_key == "SP-404" else 0
+
+    @property
+    def _controls_h(self) -> int:
+        return self._content_h - self._scope_h - self._bus_bar_h - 8
+
+    # ── Lifecycle ────────────────────────────────────────────────────
 
     def on_enter(self):
         ctx = getattr(self.app, "_screen_context", {})
         dev_key = ctx.get("device", self.app.device_name)
         self.app._screen_context = {}
 
-        # Switch focus to this device
         if dev_key != self.app.device_name:
             self.app.switch_focus(dev_key)
 
@@ -54,7 +93,6 @@ class DeviceWorkspaceScreen:
             "Force": (220, 50, 50),
         }.get(dev_key, theme.ACCENT)
 
-        # Build tabs based on device
         self._build_tabs()
         self._current_tab = 0
 
@@ -65,21 +103,19 @@ class DeviceWorkspaceScreen:
                 self.app.recorder.switch_device(dev.audio_hint)
             self.app.recorder.start_monitoring()
 
-        # Build control knobs for current bus
-        self._build_bus_knobs()
+        self._build_knobs()
 
     def on_exit(self):
         if not self.app.recorder.is_recording:
             self.app.recorder.stop_monitoring()
 
     def _build_tabs(self):
-        """Build device-specific tabs."""
         key = self._device_key
         if key == "SP-404":
             self._tabs = [
                 ("control", "CONTROL"),
                 ("looper", "LOOPER"),
-                ("dj", "DJ MODE"),
+                ("dj", "DJ"),
             ]
         elif key == "P-6":
             self._tabs = [
@@ -87,67 +123,105 @@ class DeviceWorkspaceScreen:
                 ("pattern", "PATTERN"),
             ]
         elif key == "Force":
-            self._tabs = [
-                ("transfer", "TRANSFER"),
-            ]
+            self._tabs = [("transfer", "TRANSFER")]
         else:
             self._tabs = [("control", "CONTROL")]
 
-    def _build_bus_knobs(self):
-        """Build knobs for the active bus (SP-404 control tab)."""
-        self._bus_knobs = []
-        if self._device_key != "SP-404":
-            return
+    # ── Knob Building ────────────────────────────────────────────────
 
+    def _build_knobs(self):
+        """Build knobs for the current device + section."""
+        self._knobs = []
+        if self._device_key == "SP-404":
+            self._build_sp404_knobs()
+        elif self._device_key == "P-6":
+            self._build_p6_knobs()
+
+    def _build_sp404_knobs(self):
+        """SP-404: 3x2 knob grid for active bus FX parameters."""
         from engine.sp404_effects import fx_name_for_tab, fx_count_for_tab
+        from engine.device_profiles import cc_map_to_legacy
 
         bus_tab_keys = ["bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"]
         tab_key = bus_tab_keys[self._active_bus] if self._active_bus < len(bus_tab_keys) else "bus1_fx"
 
-        # CC map from device profile
         dev = self._device_profile
         if not dev or not dev.cc_map:
             return
 
-        from engine.device_profiles import cc_map_to_legacy
         cc_map = cc_map_to_legacy(dev.cc_map)
         params = cc_map.get(tab_key, [])
 
-        # Build 3x2 knob layout matching SP-404 hardware
-        # Row 1: Ctrl 1, 2, 3 (top 3 knobs)
-        # Row 2: Ctrl 4, 5, 6 (bottom 3 knobs)
-        knob_r = 34
-        start_x = 80
-        start_y = 200
-        col_gap = 160
-        row_gap = 130
+        # Layout: fill the control zone with a 3x2 grid
+        ctrl_top = self._controls_top + 32  # room for section header
+        ctrl_h = self._controls_h - 36
+        knob_r = min(30, ctrl_h // 5)
+        cols, rows = 3, 2
+        col_gap = (theme.SCREEN_WIDTH - 40) // cols
+        row_gap = max(knob_r * 3, ctrl_h // rows)
+        start_x = 20 + col_gap // 2
+        start_y = ctrl_top + row_gap // 2
 
-        for idx, (cc, name, lo, hi, default) in enumerate(params):
-            if cc == 19:  # FX On/Off — handled as toggle, skip knob
-                continue
-            if cc == 83:  # FX Select — handled as selector, skip knob
-                continue
+        bus_ch = self._active_bus  # MIDI channel per bus
 
-            # Map remaining params to 3x2 grid
-            knob_idx = len(self._bus_knobs)
-            if knob_idx >= 6:
+        for cc, name, lo, hi, default in params:
+            if cc in (19, 83):  # FX On/Off and FX Select handled separately
+                continue
+            idx = len(self._knobs)
+            if idx >= 6:
                 break
-            row = knob_idx // 3
-            col = knob_idx % 3
-            cx = start_x + col * col_gap
-            cy = start_y + row * row_gap
-
+            r, c = idx // cols, idx % cols
             knob = Knob(
-                center=(cx, cy),
+                center=(start_x + c * col_gap, start_y + r * row_gap),
                 radius=knob_r,
-                min_val=float(lo),
-                max_val=float(hi),
-                value=float(default),
-                label=name,
-                int_mode=True,
+                min_val=float(lo), max_val=float(hi), value=float(default),
+                label=name, int_mode=True,
                 format_func=lambda v: f"{int(v)}",
             )
-            self._bus_knobs.append((knob, cc))
+            self._knobs.append((knob, cc, bus_ch))
+
+    def _build_p6_knobs(self):
+        """P-6: knobs for the selected section (granular/filter/envelope/mixer/fx)."""
+        dev = self._device_profile
+        if not dev or not dev.cc_map:
+            return
+
+        sections = ["granular", "filter", "envelope", "mixer", "fx"]
+        section = sections[self._p6_section] if self._p6_section < len(sections) else "granular"
+        params = dev.cc_map.get(section, [])
+
+        # MIDI channel for granular engine
+        ch = dev.midi_channels.get(section, dev.midi_channels.get("granular", 3))
+
+        # Layout: adaptive grid
+        ctrl_top = self._controls_top + 28  # room for section tabs
+        ctrl_h = self._controls_h - 32
+        n = len(params)
+        if n == 0:
+            return
+
+        # Determine grid size
+        cols = min(4, n) if n <= 8 else min(5, n)
+        rows = (n + cols - 1) // cols
+        knob_r = min(26, (ctrl_h - 10) // (rows * 3))
+        col_gap = (theme.SCREEN_WIDTH - 20) // cols
+        row_gap = max(knob_r * 3, (ctrl_h - 10) // max(1, rows))
+        start_x = 10 + col_gap // 2
+        start_y = ctrl_top + row_gap // 2
+
+        for i, midi_cc in enumerate(params):
+            if i >= cols * rows:
+                break
+            r, c = i // cols, i % cols
+            knob = Knob(
+                center=(start_x + c * col_gap, start_y + r * row_gap),
+                radius=knob_r,
+                min_val=float(midi_cc.min_val), max_val=float(midi_cc.max_val),
+                value=float(midi_cc.default),
+                label=midi_cc.name[:10], int_mode=True,
+                format_func=lambda v: f"{int(v)}",
+            )
+            self._knobs.append((knob, midi_cc.cc, ch))
 
     # ── Event Handling ───────────────────────────────────────────────
 
@@ -156,130 +230,167 @@ class DeviceWorkspaceScreen:
             mx, my = event.pos
 
             # Back button
-            back_rect = pygame.Rect(12, 6, 70, 30)
-            if back_rect.collidepoint(mx, my):
+            if pygame.Rect(8, 4, 56, 28).collidepoint(mx, my):
+                # Reset auto-expand flag so session screen shows cards
+                session = self.app.screens.get("session")
+                if session:
+                    session._auto_expanded = False
                 self.app.switch_screen("session")
                 return
 
             # Tab buttons
             for i, (key, label) in enumerate(self._tabs):
-                rect = self._tab_rect(i)
-                if rect.collidepoint(mx, my):
+                if self._tab_rect(i).collidepoint(mx, my):
                     self._current_tab = i
                     if key == "control":
-                        self._build_bus_knobs()
+                        self._build_knobs()
                     return
 
-            # Tab-specific handling
+            # Tab-specific controls
             tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
 
-            if tab_key == "control" and self._device_key == "SP-404":
-                self._handle_sp404_control(mx, my, event)
-                return
+            if tab_key == "control":
+                if self._device_key == "SP-404":
+                    self._handle_sp404_clicks(mx, my)
+                elif self._device_key == "P-6":
+                    self._handle_p6_clicks(mx, my)
 
-        # Pass all events to knobs for drag handling
-        if self._tabs and self._tabs[self._current_tab][0] == "control":
-            self._handle_knob_events(event)
+        # Knob drag handling (all events)
+        tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
+        if tab_key == "control":
+            for knob, cc, ch in self._knobs:
+                if knob.handle_event(event):
+                    if self.app.p6:
+                        self.app.p6.send_cc(cc, int(knob.value), channel=ch)
 
-    def _handle_sp404_control(self, mx, my, event):
-        """Handle clicks in SP-404 control view."""
+    def _handle_sp404_clicks(self, mx, my):
         from engine.sp404_effects import fx_count_for_tab
 
-        # Bus selector buttons
-        bus_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 50
+        # Bus selector
+        bus_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self._bus_bar_h
         for i in range(5):
-            rect = pygame.Rect(60 + i * 90, bus_y, 80, 30)
-            if rect.collidepoint(mx, my):
+            r = pygame.Rect(40 + i * (theme.SCREEN_WIDTH - 80) // 5, bus_y, (theme.SCREEN_WIDTH - 80) // 5 - 4, 28)
+            if r.collidepoint(mx, my):
                 self._active_bus = i
-                self._build_bus_knobs()
+                self._build_knobs()
+                # Sync Twister bus
+                if hasattr(self.app, 'twister'):
+                    self.app.twister.active_bus = i
                 return
 
-        # FX On/Off toggle
-        toggle_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 80, 120, 40)
-        if toggle_rect.collidepoint(mx, my):
+        fx_y = self._controls_top + 2
+        row2_y = fx_y + 28
+
+        # Twister FX Page buttons
+        tw = self.app.twister
+        if tw.connected and tw.page_count > 1:
+            n_pages = tw.page_count
+            pg_w = min(42, 200 // n_pages)
+            for p in range(n_pages):
+                r = pygame.Rect(30 + p * (pg_w + 2), row2_y, pg_w, 22)
+                if r.collidepoint(mx, my):
+                    tw.switch_page(p)
+                    return
+
+        # Bank selector buttons
+        sp = self.app.spectra
+        if sp.connected:
+            bk_w = min(28, (theme.SCREEN_WIDTH // 2 - 20) // 10)
+            bk_start = theme.SCREEN_WIDTH - 10 * (bk_w + 2) - 6
+            for b in range(10):
+                r = pygame.Rect(bk_start + b * (bk_w + 2), row2_y, bk_w, 22)
+                if r.collidepoint(mx, my):
+                    sp.switch_bank(b)
+                    return
+
+        # FX On/Off
+        toggle_r = pygame.Rect(theme.SCREEN_WIDTH - 160, fx_y, 70, 26)
+        if toggle_r.collidepoint(mx, my):
             self._fx_on = not self._fx_on
             val = 127 if self._fx_on else 0
-            bus_channels = [0, 1, 2, 3, 4]
-            ch = bus_channels[self._active_bus]
             if self.app.p6:
-                self.app.p6.send_cc(19, val, channel=ch)
+                self.app.p6.send_cc(19, val, channel=self._active_bus)
+            self.app.live_cc[self._active_bus][19] = val
             return
 
-        # FX Select — tap to cycle
-        sel_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 130, 120, 30)
-        if sel_rect.collidepoint(mx, my):
+        # FX Select
+        sel_r = pygame.Rect(theme.SCREEN_WIDTH - 82, fx_y, 74, 26)
+        if sel_r.collidepoint(mx, my):
             bus_tab_keys = ["bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"]
             tab_key = bus_tab_keys[self._active_bus]
             max_fx = fx_count_for_tab(tab_key) - 1
             self._fx_select_val = (self._fx_select_val + 1) % (max_fx + 1)
-            ch = [0, 1, 2, 3, 4][self._active_bus]
             if self.app.p6:
-                self.app.p6.send_cc(83, self._fx_select_val, channel=ch)
+                self.app.p6.send_cc(83, self._fx_select_val, channel=self._active_bus)
+            self.app.live_cc[self._active_bus][83] = self._fx_select_val
             return
 
-    def _handle_knob_events(self, event):
-        """Pass events to bus knobs."""
-        for knob, cc in self._bus_knobs:
-            if knob.handle_event(event):
-                bus_channels = [0, 1, 2, 3, 4]
-                ch = bus_channels[self._active_bus]
-                if self.app.p6:
-                    self.app.p6.send_cc(cc, int(knob.value), channel=ch)
+    def _handle_p6_clicks(self, mx, my):
+        # Section tabs (below oscilloscope)
+        sections = ["GRAN", "FLTR", "ENV", "MIX", "FX"]
+        sec_y = self._controls_top + 2
+        sec_w = min(60, (theme.SCREEN_WIDTH - 20) // len(sections))
+        for i, label in enumerate(sections):
+            r = pygame.Rect(10 + i * (sec_w + 3), sec_y, sec_w, 22)
+            if r.collidepoint(mx, my):
+                self._p6_section = i
+                self._build_knobs()
+                return
 
     def _tab_rect(self, idx: int) -> pygame.Rect:
         n = len(self._tabs)
-        tab_w = min(140, (theme.SCREEN_WIDTH - 120) // max(1, n))
-        return pygame.Rect(90 + idx * (tab_w + 4), 6, tab_w, 30)
+        tab_w = min(100, (theme.SCREEN_WIDTH - 80) // max(1, n))
+        return pygame.Rect(70 + idx * (tab_w + 3), 4, tab_w, 28)
 
     def update(self):
-        pass
+        rec = self.app.recorder
+        if rec._monitoring:
+            pl, pr = rec.peak_levels
+            decay = 0.85
+            self._smooth_l = max(pl, self._smooth_l * decay)
+            self._smooth_r = max(pr, self._smooth_r * decay)
+        else:
+            self._smooth_l *= 0.95
+            self._smooth_r *= 0.95
+
+        # Sync SP-404 live CC values into workspace knobs + FX state
+        if self._device_key == "SP-404":
+            live = self.app.live_cc.get(self._active_bus, {})
+            # Update FX on/off from CC19
+            if 19 in live:
+                self._fx_on = live[19] >= 64
+            # Update FX select from CC83
+            if 83 in live:
+                self._fx_select_val = live[83]
+            # Update knob values from live CCs
+            for knob, cc, ch in self._knobs:
+                if cc in live:
+                    knob.value = float(live[cc])
 
     # ── Drawing ──────────────────────────────────────────────────────
 
     def draw(self, surface: pygame.Surface):
-        f_title = theme.font("title")
         f_large = theme.font("large")
         f_hero = theme.font("hero")
         f_med = theme.font("medium")
         f_small = theme.font("small")
         f_tiny = theme.font("tiny")
 
-        # ── Header: Back + Device Name + Tabs ────────────────────────
-        # Back button
-        back_rect = pygame.Rect(12, 6, 70, 30)
-        pygame.draw.rect(surface, theme.BUTTON_BG, back_rect, border_radius=6)
-        surf = f_small.render("< BACK", True, theme.TEXT)
-        surface.blit(surf, surf.get_rect(center=back_rect.center))
+        # ── Header ───────────────────────────────────────────────────
+        self._draw_header(surface, f_large, f_small)
 
-        # Tabs
-        for i, (key, label) in enumerate(self._tabs):
-            rect = self._tab_rect(i)
-            active = i == self._current_tab
-            bg = self._device_color if active else theme.BUTTON_BG
-            tc = theme.BG if active else theme.TEXT_DIM
-            pygame.draw.rect(surface, bg, rect, border_radius=6)
-            surf = f_small.render(label, True, tc)
-            surface.blit(surf, surf.get_rect(center=rect.center))
-
-        # Device name + status (right side)
+        # ── Oscilloscope ─────────────────────────────────────────────
         midi = self.app._midi_connections.get(self._device_key)
-        is_connected = midi and midi.connected
-        conn_color = theme.GREEN if is_connected else theme.RED
-        pygame.draw.circle(surface, conn_color,
-                          (theme.SCREEN_WIDTH - 120, 20), 5)
-        surf = f_large.render(self._device_key, True, self._device_color)
-        surface.blit(surf, (theme.SCREEN_WIDTH - 110, 6))
-
-        # Accent line below header
-        pygame.draw.line(surface, self._device_color,
-                        (0, 40), (theme.SCREEN_WIDTH, 40), 2)
+        self._draw_oscilloscope(surface, f_hero, f_small, f_tiny, midi)
 
         # ── Tab Content ──────────────────────────────────────────────
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
 
         if tab_key == "control":
             if self._device_key == "SP-404":
-                self._draw_sp404_control(surface, f_hero, f_large, f_med, f_small, f_tiny)
+                self._draw_sp404_control(surface, f_med, f_small, f_tiny)
+            elif self._device_key == "P-6":
+                self._draw_p6_control(surface, f_med, f_small, f_tiny)
             else:
                 self._draw_generic_control(surface, f_med, f_small)
         elif tab_key == "looper":
@@ -287,129 +398,362 @@ class DeviceWorkspaceScreen:
         elif tab_key == "dj":
             self._draw_dj(surface, f_large, f_med, f_small)
         else:
-            surf = f_med.render(f"Tab: {tab_key}", True, theme.TEXT_DIM)
-            surface.blit(surf, (40, 100))
+            y = self._controls_top + 20
+            surf = f_med.render(f"{tab_key.upper()}", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
 
-    def _draw_sp404_control(self, surface, f_hero, f_large, f_med, f_small, f_tiny):
-        """Draw SP-404 control layout matching hardware."""
-        from engine.sp404_effects import fx_name_for_tab, fx_count_for_tab
+        # ── HUD Overlay (top-right, fades after 2s) ─────────────────
+        self._draw_hud(surface, f_small)
 
-        bus_tab_keys = ["bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"]
-        tab_key = bus_tab_keys[self._active_bus]
+    def _draw_hud(self, surface, f_small):
+        """Draw HUD notification overlay — recent Twister/MIDI activity."""
+        import time
+        now = time.monotonic()
+        hud_lifetime = 2.0
+        msgs = self.app._hud_messages
 
-        # ── BPM display (top left) ───────────────────────────────────
+        # Prune expired
+        msgs[:] = [(t, c, ts) for t, c, ts in msgs if now - ts < hud_lifetime]
+
+        if not msgs:
+            return
+
+        hud_x = theme.SCREEN_WIDTH - 10
+        hud_y = self.HEADER_H + 6
+
+        for text, color, ts in reversed(msgs):
+            age = now - ts
+            # Fade out in last 0.5s
+            alpha = min(1.0, (hud_lifetime - age) / 0.5)
+            if alpha <= 0:
+                continue
+
+            surf = f_small.render(text, True, color)
+            w = surf.get_width() + 16
+            h = 24
+            x = hud_x - w
+            # Semi-transparent background
+            bg = pygame.Surface((w, h), pygame.SRCALPHA)
+            a = int(180 * alpha)
+            bg.fill((10, 10, 18, a))
+            surface.blit(bg, (x, hud_y))
+            # Accent bar on left edge
+            bar_color = (*color[:3], a) if len(color) >= 3 else (*color, a)
+            bar = pygame.Surface((3, h), pygame.SRCALPHA)
+            bar.fill(bar_color)
+            surface.blit(bar, (x, hud_y))
+            # Text
+            text_surf = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
+            text_surf.blit(surf, (0, 0))
+            text_surf.set_alpha(int(255 * alpha))
+            surface.blit(text_surf, (x + 8, hud_y + 3))
+
+            hud_y += h + 3
+
+    def _draw_header(self, surface, f_large, f_small):
+        # Back button
+        back = pygame.Rect(8, 4, 56, 28)
+        pygame.draw.rect(surface, theme.BUTTON_BG, back, border_radius=5)
+        surf = f_small.render("< BACK", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=back.center))
+
+        # Tabs
+        for i, (key, label) in enumerate(self._tabs):
+            rect = self._tab_rect(i)
+            active = i == self._current_tab
+            bg = self._device_color if active else theme.BUTTON_BG
+            tc = theme.BG if active else theme.TEXT_DIM
+            pygame.draw.rect(surface, bg, rect, border_radius=5)
+            surf = f_small.render(label, True, tc)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+
+        # Device name + connection dot
         midi = self.app._midi_connections.get(self._device_key)
+        connected = midi and midi.connected
+        dot_color = theme.GREEN if connected else theme.RED
+        name_surf = f_large.render(self._device_key, True, self._device_color)
+        nx = theme.SCREEN_WIDTH - name_surf.get_width() - 14
+        surface.blit(name_surf, (nx, 4))
+        pygame.draw.circle(surface, dot_color, (nx - 8, 18), 4)
+
+        # Accent line
+        pygame.draw.line(surface, self._device_color,
+                        (0, self.HEADER_H), (theme.SCREEN_WIDTH, self.HEADER_H), 2)
+
+    def _draw_oscilloscope(self, surface, f_hero, f_small, f_tiny, midi):
+        """Full-width oscilloscope with filled waveform, meters, BPM overlay."""
+        pad = 6
+        scope_y = self._content_top
+        scope_w = theme.SCREEN_WIDTH - pad * 2
+        scope_h = self._scope_h
+        scope_rect = pygame.Rect(pad, scope_y, scope_w, scope_h)
+
+        # Background with subtle gradient feel
+        pygame.draw.rect(surface, (8, 8, 14), scope_rect, border_radius=4)
+
+        center_y = scope_rect.centery
+        half_h = (scope_h - 10) // 2
+
+        # Grid lines (horizontal)
+        for frac in (0.25, 0.75):
+            gy = scope_rect.y + int(scope_h * frac)
+            pygame.draw.line(surface, (18, 18, 26),
+                            (scope_rect.x + 2, gy), (scope_rect.right - 28, gy))
+        # Center line
+        pygame.draw.line(surface, (22, 22, 32),
+                        (scope_rect.x + 2, center_y), (scope_rect.right - 28, center_y))
+
+        # Meter area (right 24px)
+        meter_w = 22
+        wave_w = scope_w - meter_w - 10
+
+        rec = self.app.recorder
+        if rec._monitoring:
+            buf = rec._recall_buf
+            wpos = rec._recall_write_pos
+            display_frames = min(2048, len(buf))
+
+            if wpos >= display_frames:
+                recent = buf[wpos - display_frames:wpos]
+            else:
+                recent = np.concatenate([buf[-(display_frames - wpos):], buf[:wpos]])
+
+            if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
+                mono = recent.mean(axis=1) if recent.ndim > 1 else recent
+
+                step = max(1, len(mono) // wave_w)
+                points = []
+                dc = self._device_color
+
+                for px in range(wave_w):
+                    si = px * step
+                    if si < len(mono):
+                        val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
+                        py = center_y - int(val * half_h)
+                        points.append((scope_rect.x + 4 + px, py))
+
+                if len(points) > 1:
+                    # Filled waveform
+                    dim = (dc[0] // 5, dc[1] // 5, dc[2] // 5)
+                    for px_x, py in points:
+                        if py != center_y:
+                            pygame.draw.line(surface, dim, (px_x, center_y), (px_x, py))
+                    pygame.draw.lines(surface, dc, False, points, 2)
+            else:
+                # Silent — dim center line
+                pygame.draw.line(surface, (35, 35, 48),
+                               (scope_rect.x + 4, center_y),
+                               (scope_rect.x + 4 + wave_w, center_y))
+
+            # Status label (top-right of waveform area)
+            if rec.is_recording:
+                # Blinking REC
+                dur = rec.duration
+                surf = f_tiny.render(f"REC {dur:.0f}s", True, theme.RED)
+            else:
+                recall = rec.recall_seconds_available
+                surf = f_tiny.render(f"buf:{int(recall)}s", True, theme.TEXT_DIM)
+            surface.blit(surf, (scope_rect.x + wave_w - surf.get_width() - 2, scope_rect.y + 3))
+        else:
+            surf = f_small.render("No audio", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=(scope_rect.centerx, center_y)))
+
+        # ── L/R Level Meters ─────────────────────────────────────────
+        mx = scope_rect.right - meter_w - 2
+        mh = scope_h - 16
+        my = scope_rect.y + 4
+
+        for i, (level, label) in enumerate([(self._smooth_l, "L"), (self._smooth_r, "R")]):
+            bar_x = mx + i * (meter_w // 2 + 1)
+            bar_w = meter_w // 2 - 1
+            pygame.draw.rect(surface, (16, 16, 24), (bar_x, my, bar_w, mh))
+            fill = int(level * mh)
+            if fill > 0:
+                color = theme.RED if level > 0.9 else (theme.YELLOW if level > 0.7 else self._device_color)
+                pygame.draw.rect(surface, color, (bar_x, my + mh - fill, bar_w, fill))
+
+        # ── BPM + Transport (bottom-left overlay) ────────────────────
         if midi:
             bpm = midi.state.bpm
-            surf = f_hero.render(f"{bpm:.0f}", True, self._device_color)
-            surface.blit(surf, (20, 50))
-            surf = f_small.render("BPM", True, theme.TEXT_DIM)
-            surface.blit(surf, (20 + surf.get_width() + 60, 74))
+            bpm_y = scope_rect.bottom - 24
+            bpm_surf = f_hero.render(f"{bpm:.0f}", True, self._device_color)
+            surface.blit(bpm_surf, (scope_rect.x + 6, bpm_y - 14))
+            bw = bpm_surf.get_width()
 
-            # Transport state
+            surf = f_tiny.render("BPM", True, theme.TEXT_DIM)
+            surface.blit(surf, (scope_rect.x + bw + 10, bpm_y))
+
+            # Transport indicator
+            tx = scope_rect.x + bw + 40
             if midi.state.playing:
-                surf = f_small.render("PLAYING", True, theme.GREEN)
+                pygame.draw.polygon(surface, theme.GREEN,
+                    [(tx, bpm_y - 4), (tx, bpm_y + 8), (tx + 10, bpm_y + 2)])
             else:
-                surf = f_small.render("STOPPED", True, theme.TEXT_DIM)
-            surface.blit(surf, (20, 90))
+                surf = f_tiny.render("STOP", True, theme.TEXT_DIM)
+                surface.blit(surf, (tx, bpm_y))
 
             # Pattern
             pat = midi.state.active_pattern + 1
             pat_max = getattr(self._device_profile, "pattern_count", 0)
             if pat_max > 0:
-                surf = f_small.render(f"Ptn {pat}/{pat_max}", True, self._device_color)
-                surface.blit(surf, (20, 108))
+                surf = f_tiny.render(f"Ptn {pat}/{pat_max}", True, theme.TEXT_DIM)
+                surface.blit(surf, (tx + 30, bpm_y))
 
-        # ── FX Select + On/Off (top right) ───────────────────────────
+        # Border
+        pygame.draw.rect(surface, (28, 28, 38), scope_rect, 1, border_radius=4)
+
+    # ── SP-404 Control ───────────────────────────────────────────────
+
+    def _draw_sp404_control(self, surface, f_med, f_small, f_tiny):
+        from engine.sp404_effects import fx_name_for_tab
+
+        bus_tab_keys = ["bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"]
+        tab_key = bus_tab_keys[self._active_bus]
+
+        # FX header row
+        fx_y = self._controls_top + 2
+        bus_labels = ["BUS 1", "BUS 2", "BUS 3", "BUS 4", "INPUT"]
+        surf = f_small.render(bus_labels[self._active_bus], True, self._device_color)
+        surface.blit(surf, (10, fx_y + 3))
+
         fx_name = fx_name_for_tab(tab_key, self._fx_select_val)
 
-        # On/Off toggle
-        toggle_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 56, 120, 40)
+        # FX On/Off
+        toggle_r = pygame.Rect(theme.SCREEN_WIDTH - 160, fx_y, 70, 26)
         toggle_bg = theme.GREEN if self._fx_on else theme.BUTTON_BG
         toggle_tc = theme.BG if self._fx_on else theme.TEXT_DIM
-        pygame.draw.rect(surface, toggle_bg, toggle_rect, border_radius=8)
-        surf = f_med.render("FX ON" if self._fx_on else "FX OFF", True, toggle_tc)
-        surface.blit(surf, surf.get_rect(center=toggle_rect.center))
+        pygame.draw.rect(surface, toggle_bg, toggle_r, border_radius=5)
+        surf = f_tiny.render("FX ON" if self._fx_on else "FX OFF", True, toggle_tc)
+        surface.blit(surf, surf.get_rect(center=toggle_r.center))
 
         # FX Select
-        sel_rect = pygame.Rect(theme.SCREEN_WIDTH - 200, 102, 120, 28)
-        pygame.draw.rect(surface, theme.ACCENT_DIM, sel_rect, border_radius=4)
-        pygame.draw.rect(surface, self._device_color, sel_rect, 1, border_radius=4)
-        surf = f_small.render(fx_name[:14], True, self._device_color)
-        surface.blit(surf, surf.get_rect(center=sel_rect.center))
+        sel_r = pygame.Rect(theme.SCREEN_WIDTH - 82, fx_y, 74, 26)
+        pygame.draw.rect(surface, theme.ACCENT_DIM, sel_r, border_radius=5)
+        pygame.draw.rect(surface, self._device_color, sel_r, 1, border_radius=5)
+        surf = f_tiny.render(fx_name[:10], True, self._device_color)
+        surface.blit(surf, surf.get_rect(center=sel_r.center))
 
-        # FX number
-        surf = f_tiny.render(f"#{self._fx_select_val}", True, theme.TEXT_DIM)
-        surface.blit(surf, (theme.SCREEN_WIDTH - 200, 134))
+        # ── Twister FX Pages + Spectra Bank selector ────────────────
+        row2_y = fx_y + 28
+        tw = self.app.twister
+        sp = self.app.spectra
 
-        # ── 3x2 Knob Grid (center, matching hardware) ────────────────
-        for knob, cc in self._bus_knobs:
+        # FX Pages (left side)
+        if tw.connected and tw.page_count > 1:
+            n_pages = tw.page_count
+            pg_w = min(42, 200 // n_pages)
+            surf = f_tiny.render("FX", True, theme.TEXT_DIM)
+            surface.blit(surf, (10, row2_y + 4))
+            for p in range(n_pages):
+                r = pygame.Rect(30 + p * (pg_w + 2), row2_y, pg_w, 22)
+                active = p == tw.current_page
+                bg = self._device_color if active else theme.BUTTON_BG
+                tc = theme.BG if active else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, r, border_radius=4)
+                surf = f_tiny.render(f"P{p + 1}", True, tc)
+                surface.blit(surf, surf.get_rect(center=r.center))
+
+        # Bank selector (right side)
+        if sp.connected:
+            bank_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+            bk_w = min(28, (theme.SCREEN_WIDTH // 2 - 20) // 10)
+            bk_start = theme.SCREEN_WIDTH - 10 * (bk_w + 2) - 6
+            surf = f_tiny.render("BANK", True, theme.TEXT_DIM)
+            surface.blit(surf, (bk_start - 40, row2_y + 4))
+            for b in range(10):
+                r = pygame.Rect(bk_start + b * (bk_w + 2), row2_y, bk_w, 22)
+                active = b == sp.bank
+                bg = self._device_color if active else theme.BUTTON_BG
+                tc = theme.BG if active else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, r, border_radius=4)
+                surf = f_tiny.render(bank_labels[b], True, tc)
+                surface.blit(surf, surf.get_rect(center=r.center))
+
+        # Knobs
+        for knob, cc, ch in self._knobs:
             knob.draw(surface)
 
-        if not self._bus_knobs:
-            surf = f_med.render("No FX parameters", True, theme.TEXT_DIM)
-            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=200))
+        if not self._knobs:
+            y = self._controls_top + 60
+            surf = f_small.render("No FX parameters", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
 
-        # ── Bus Selector (bottom) ────────────────────────────────────
-        bus_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 50
-        bus_labels = ["BUS 1", "BUS 2", "BUS 3", "BUS 4", "INPUT"]
-        bus_channels = [1, 2, 3, 4, 5]  # Display channels
-
-        # Signal flow
-        surf = f_tiny.render("Signal: B1+B2 (parallel) > B3 > B4/Master > OUT",
-                            True, theme.TEXT_DIM)
-        surface.blit(surf, (60, bus_y - 16))
-
-        for i in range(5):
-            rect = pygame.Rect(60 + i * 90, bus_y, 80, 30)
+        # Bus selector bar (bottom)
+        bus_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self._bus_bar_h
+        n_bus = 5
+        btn_w = (theme.SCREEN_WIDTH - 80) // n_bus - 4
+        for i in range(n_bus):
+            r = pygame.Rect(40 + i * (btn_w + 4), bus_y + 2, btn_w, 28)
             active = i == self._active_bus
             bg = self._device_color if active else theme.BUTTON_BG
             tc = theme.BG if active else theme.TEXT_DIM
-            pygame.draw.rect(surface, bg, rect, border_radius=6)
-            surf = f_small.render(f"Ch{bus_channels[i]} {bus_labels[i]}", True, tc)
-            surface.blit(surf, surf.get_rect(center=rect.center))
+            pygame.draw.rect(surface, bg, r, border_radius=5)
+            labels = ["B1", "B2", "B3", "B4", "IN"]
+            surf = f_tiny.render(labels[i], True, tc)
+            surface.blit(surf, surf.get_rect(center=r.center))
+
+    # ── P-6 Control ──────────────────────────────────────────────────
+
+    def _draw_p6_control(self, surface, f_med, f_small, f_tiny):
+        # Section tabs
+        sections = ["GRAN", "FLTR", "ENV", "MIX", "FX"]
+        sec_y = self._controls_top + 2
+        sec_w = min(60, (theme.SCREEN_WIDTH - 20) // len(sections))
+
+        for i, label in enumerate(sections):
+            r = pygame.Rect(10 + i * (sec_w + 3), sec_y, sec_w, 22)
+            active = i == self._p6_section
+            bg = self._device_color if active else theme.BUTTON_BG
+            tc = theme.BG if active else theme.TEXT_DIM
+            pygame.draw.rect(surface, bg, r, border_radius=4)
+            surf = f_tiny.render(label, True, tc)
+            surface.blit(surf, surf.get_rect(center=r.center))
+
+        # Section full name (right of tabs)
+        section_names = ["Granular", "Filter", "Envelope", "Mixer", "Effects"]
+        if self._p6_section < len(section_names):
+            surf = f_small.render(section_names[self._p6_section], True, self._device_color)
+            surface.blit(surf, (10 + len(sections) * (sec_w + 3) + 6, sec_y + 2))
+
+        # Knobs
+        for knob, cc, ch in self._knobs:
+            knob.draw(surface)
+
+        if not self._knobs:
+            y = self._controls_top + 50
+            surf = f_small.render("No parameters", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
+
+    # ── Other tabs ───────────────────────────────────────────────────
 
     def _draw_generic_control(self, surface, f_med, f_small):
-        """Generic control view for P-6 and other devices."""
-        surf = f_med.render(f"{self._device_key} Control", True, self._device_color)
-        surface.blit(surf, (40, 60))
-        surf = f_small.render("Use the CONTROL tab in the main nav for full parameter control",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, (40, 90))
+        y = self._controls_top + 10
+        surf = f_med.render(f"{self._device_key}", True, self._device_color)
+        surface.blit(surf, (20, y))
+        surf = f_small.render("No control parameters available", True, theme.TEXT_DIM)
+        surface.blit(surf, (20, y + 28))
 
     def _draw_looper(self, surface, f_large, f_med, f_small):
-        """SP-404 Looper controls."""
-        surf = f_large.render("LOOPER", True, self._device_color)
-        surface.blit(surf, (40, 60))
+        y = self._controls_top + 6
+        btn_w = min(140, (theme.SCREEN_WIDTH - 60) // 3)
+        btn_h = min(50, self._controls_h // 3)
 
-        # Big looper buttons
-        btn_w = 160
-        btn_h = 60
-        btn_y = 120
         buttons = [
-            ("REC", theme.RED, 88, 127),
-            ("OVERDUB", theme.YELLOW, 89, 127),
-            ("STOP", theme.BUTTON_BG, 85, 127),
-            ("DELETE", (120, 40, 40), 87, 127),
-            ("UNDO", theme.ACCENT_DIM, 91, 127),
-            ("REDO", theme.ACCENT_DIM, 91, 0),
+            ("REC", theme.RED), ("OVERDUB", theme.YELLOW), ("STOP", theme.BUTTON_BG),
+            ("DELETE", (120, 40, 40)), ("UNDO", theme.ACCENT_DIM), ("REDO", theme.ACCENT_DIM),
         ]
-
-        for i, (label, bg, cc, val) in enumerate(buttons):
-            row = i // 3
-            col = i % 3
-            x = 40 + col * (btn_w + 16)
-            y = btn_y + row * (btn_h + 16)
-            rect = pygame.Rect(x, y, btn_w, btn_h)
-            pygame.draw.rect(surface, bg, rect, border_radius=10)
-            pygame.draw.rect(surface, theme.BORDER, rect, 2, border_radius=10)
-            surf = f_large.render(label, True, theme.TEXT_BRIGHT)
+        for i, (label, bg) in enumerate(buttons):
+            r, c = i // 3, i % 3
+            x = 20 + c * (btn_w + 8)
+            rect = pygame.Rect(x, y + r * (btn_h + 8), btn_w, btn_h)
+            pygame.draw.rect(surface, bg, rect, border_radius=8)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
+            surf = f_med.render(label, True, theme.TEXT_BRIGHT)
             surface.blit(surf, surf.get_rect(center=rect.center))
 
     def _draw_dj(self, surface, f_large, f_med, f_small):
-        """SP-404 DJ Mode controls."""
+        y = self._controls_top + 20
         surf = f_large.render("DJ MODE", True, self._device_color)
-        surface.blit(surf, (40, 60))
-        surf = f_small.render("Put SP-404 in DJ Mode to use these controls",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, (40, 90))
+        surface.blit(surf, (20, y))
+        surf = theme.font("tiny").render("Put SP-404 in DJ Mode to use", True, theme.TEXT_DIM)
+        surface.blit(surf, (20, y + 28))

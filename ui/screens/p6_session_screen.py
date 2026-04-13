@@ -73,6 +73,14 @@ class P6SessionScreen:
             pass
 
     def on_enter(self):
+        # Single device auto-expand: skip card view, go straight to workspace
+        connected = self.app.device_manager.connected
+        if len(connected) == 1 and not getattr(self, "_auto_expanded", False):
+            self._auto_expanded = True
+            dev_name = list(connected.keys())[0]
+            self.app.switch_screen("device_workspace", context={"device": dev_name})
+            return
+
         # Start audio monitoring so meters work on this screen
         if not self.app.recorder._monitoring:
             # If recorder doesn't have a valid device, try the focused device

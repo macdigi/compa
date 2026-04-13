@@ -34,6 +34,8 @@ from engine.device_profiles import DeviceManager
 from engine.audio_router import AudioRoute, find_device_index
 from engine.midi_lfo import MidiLFO
 from engine.midi_mapper import MidiMapper
+from engine.twister_genius import TwisterGenius
+from engine.spectra_mapper import SpectraMapper
 from engine.usb_storage import AkaiStorageManager
 from ui.splash import run_splash
 from ui.wizard import run_wizard
@@ -232,6 +234,18 @@ class P6App:
         # ── MIDI controller mapper ───────────────────────────────────
         self.midi_mapper = MidiMapper()
 
+        # ── Twister Genius (auto-detect + connect) ───────────────────
+        self.twister = TwisterGenius()
+
+        # ── Spectra Mapper (auto-detect + connect) ───────────────────
+        self.spectra = SpectraMapper()
+
+        # ── Live CC state (for workspace parameter tracking + HUD) ───
+        # Per-bus dict of {cc: value} updated by incoming SP-404 MIDI
+        self.live_cc: dict[int, dict[int, int]] = {i: {} for i in range(5)}
+        # HUD notification queue: [(text, color, timestamp), ...]
+        self._hud_messages: list[tuple[str, tuple, float]] = []
+
         # ── Akai USB storage (Computer Mode file transfer) ───────────
         self.akai_storage = AkaiStorageManager()
 
@@ -356,6 +370,47 @@ class P6App:
         elif self.atom_sq:
             self.atom_sq.on_button = self._on_atomsq_button_fallback
             print("ATOM SQ connected but no device found — navigation only")
+
+        # Wire SP-404 CC feedback for live parameter tracking
+        sp404_midi = self._midi_connections.get("SP-404")
+        if sp404_midi:
+            orig_cc = sp404_midi.on_cc
+            def _on_sp404_cc(channel, cc, value, _orig=orig_cc):
+                # Store in live state (channel = bus index)
+                if 0 <= channel <= 4:
+                    self.live_cc[channel][cc] = value
+                if _orig:
+                    _orig(channel, cc, value)
+            sp404_midi.on_cc = _on_sp404_cc
+
+        # Twister Genius — auto-detect and connect
+        if self.twister.detect():
+            if self.twister.connect():
+                if sp404_midi:
+                    self.twister.set_target(sp404_midi)
+                self.twister.on_state_changed = self._on_twister_state
+                self.twister.on_param_changed = self._on_twister_param
+                self.twister.on_cc_sent = self._on_twister_cc_sent
+                self.twister.start()
+                print(f"Twister Genius: 16 effects mapped to SP-404")
+            else:
+                print("Twister Genius: detected but connect failed")
+        else:
+            print("Twister Genius: not detected")
+
+        # Spectra Mapper — auto-detect and connect
+        if self.spectra.detect():
+            if self.spectra.connect():
+                if sp404_midi:
+                    self.spectra.set_target(sp404_midi)
+                self.spectra.on_state_changed = self._on_spectra_state
+                self.spectra.on_pad_hit = self._on_spectra_pad
+                self.spectra.start()
+                print(f"Spectra Mapper: 16 buttons mapped (bank {self.spectra.bank_name})")
+            else:
+                print("Spectra Mapper: detected but connect failed")
+        else:
+            print("Spectra Mapper: not detected")
 
     # ── Evdev touch input (for SPI LCD / FB mode) ─────────────────────
 
@@ -674,6 +729,78 @@ class P6App:
                                             pos=(mouse_x, mouse_y), button=3))
             except Exception:
                 pass
+
+    # ── HUD + Twister callbacks ────────────────────────────────────
+
+    def push_hud(self, text: str, color: tuple = None):
+        """Push a notification to the HUD overlay."""
+        import time
+        if color is None:
+            color = theme.ACCENT
+        self._hud_messages.append((text, color, time.monotonic()))
+        # Keep max 3
+        if len(self._hud_messages) > 3:
+            self._hud_messages.pop(0)
+
+    def _on_twister_state(self):
+        """Called when Twister loads/kills an effect."""
+        tw = self.twister
+        bus = tw.active_bus + 1
+        active_knob = tw._bus_fx_state.get(tw.active_bus)
+        if active_knob is not None:
+            slot = tw.slots[active_knob]
+            self.push_hud(f"Bus {bus}: {slot.name}", self._twister_slot_color(slot))
+        else:
+            self.push_hud(f"Bus {bus}: FX OFF", theme.TEXT_DIM)
+
+    def _on_twister_cc_sent(self, channel: int, cc: int, value: int):
+        """Track CCs we send to the SP-404 (it doesn't echo CC83/CC19 back)."""
+        if 0 <= channel <= 4:
+            self.live_cc[channel][cc] = value
+
+    def _on_twister_param(self, knob: int, value: int):
+        """Called when Twister adjusts a parameter."""
+        if knob >= len(self.twister.slots):
+            return
+        slot = self.twister.slots[knob]
+        # Figure out which CC was actually sent (check live_cc for most recent)
+        bus = self.twister.active_bus
+        live = self.live_cc.get(bus, {})
+        # Find which CC just changed to this value
+        cc_names = {16: "Ctrl1", 17: "Ctrl2", 18: "Ctrl3",
+                    80: "Ctrl4", 81: "Ctrl5", 82: "Ctrl6"}
+        label = slot.name
+        for cc_num, name in cc_names.items():
+            if live.get(cc_num) == value:
+                label = f"{slot.name} {name}"
+                break
+        self.push_hud(f"{label}: {value}", self._twister_slot_color(slot))
+
+    def _on_spectra_state(self):
+        """Called when Spectra changes bank, mute, or hold state."""
+        sp = self.spectra
+        if sp._hold_active:
+            self.push_hud("HOLD ON", theme.YELLOW)
+        else:
+            self.push_hud(f"Bank {sp.bank_name}", theme.ACCENT)
+
+    def _on_spectra_pad(self, note: int, velocity: int, bank_name: str):
+        """Called when Spectra triggers a pad."""
+        pad_num = note - 35  # notes 36-51 → pads 1-16
+        self.push_hud(f"{bank_name}:{pad_num}", theme.TEXT_BRIGHT)
+
+    @staticmethod
+    def _twister_slot_color(slot):
+        """Map Twister color wheel value to RGB for HUD display."""
+        from engine.twister_genius import (COLOR_RED, COLOR_ORANGE, COLOR_YELLOW,
+            COLOR_GREEN, COLOR_CYAN, COLOR_BLUE, COLOR_PURPLE, COLOR_PINK)
+        mapping = {
+            COLOR_RED: (220, 50, 50), COLOR_ORANGE: (235, 140, 30),
+            COLOR_YELLOW: (230, 210, 40), COLOR_GREEN: (50, 195, 70),
+            COLOR_CYAN: (50, 200, 200), COLOR_BLUE: (70, 140, 230),
+            COLOR_PURPLE: (160, 80, 200), COLOR_PINK: (220, 80, 160),
+        }
+        return mapping.get(slot.color, theme.ACCENT)
 
     # ── Transport callbacks ──────────────────────────────────────────
 
