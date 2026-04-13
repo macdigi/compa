@@ -112,11 +112,16 @@ class DeviceWorkspaceScreen:
     def _build_tabs(self):
         key = self._device_key
         if key == "SP-404MKII":
-            self._tabs = [
+            tabs = [
                 ("control", "CONTROL"),
+                ("twister", "TWISTER"),
                 ("looper", "LOOPER"),
                 ("dj", "DJ"),
             ]
+            # Only show Twister tab if connected
+            if not self.app.twister.connected:
+                tabs = [t for t in tabs if t[0] != "twister"]
+            self._tabs = tabs
         elif key == "P-6":
             self._tabs = [
                 ("control", "CONTROL"),
@@ -253,6 +258,8 @@ class DeviceWorkspaceScreen:
                     self._handle_sp404_clicks(mx, my)
                 elif self._device_key == "P-6":
                     self._handle_p6_clicks(mx, my)
+            elif tab_key == "twister":
+                self._handle_twister_grid_clicks(mx, my)
 
         # Knob drag handling (all events, but not if in header area)
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
@@ -383,6 +390,8 @@ class DeviceWorkspaceScreen:
                 self._draw_p6_control(surface, f_med, f_small, f_tiny)
             else:
                 self._draw_generic_control(surface, f_med, f_small)
+        elif tab_key == "twister":
+            self._draw_twister_grid(surface, f_med, f_small, f_tiny)
         elif tab_key == "looper":
             self._draw_looper(surface, f_large, f_med, f_small)
         elif tab_key == "dj":
@@ -698,6 +707,146 @@ class DeviceWorkspaceScreen:
             surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
 
     # ── Other tabs ───────────────────────────────────────────────────
+
+    # ── Twister Grid ──────────────────────────────────────────────────
+
+    def _twister_grid_rects(self):
+        """Calculate 4x4 grid cell rects for the Twister assignment view."""
+        from engine.twister_genius import KNOB_CTRL2, KNOB_CTRL3, FX_KNOB_INDICES
+        top = self._controls_top + 6
+        h = self._controls_h - 10
+        cell_w = (theme.SCREEN_WIDTH - 50) // 4
+        cell_h = h // 4
+        rects = {}
+        for row in range(4):
+            for col in range(4):
+                phys = row * 4 + col
+                x = 20 + col * (cell_w + 3)
+                y = top + row * (cell_h + 2)
+                rects[phys] = pygame.Rect(x, y, cell_w, cell_h)
+        return rects
+
+    def _draw_twister_grid(self, surface, f_med, f_small, f_tiny):
+        """Draw the 4x4 Twister knob assignment grid."""
+        from engine.twister_genius import KNOB_CTRL2, KNOB_CTRL3, FX_KNOB_INDICES
+        from engine.sp404_effects import fx_list_for_tab
+        tw = self.app.twister
+
+        rects = self._twister_grid_rects()
+
+        # Page selector (top-right column)
+        if tw.page_count > 1:
+            pg_x = theme.SCREEN_WIDTH - 48
+            pg_start = self._controls_top + 8
+            for p in range(tw.page_count):
+                r = pygame.Rect(pg_x, pg_start + p * 34, 40, 30)
+                active = p == tw.current_page
+                bg = self._device_color if active else theme.BUTTON_BG
+                tc = theme.BG if active else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, r, border_radius=5)
+                surf = f_small.render(f"P{p+1}", True, tc)
+                surface.blit(surf, surf.get_rect(center=r.center))
+
+        for phys, rect in rects.items():
+            if phys == KNOB_CTRL2:
+                # Dynamic Ctrl 2 / SHIFT
+                pygame.draw.rect(surface, (30, 50, 50), rect, border_radius=6)
+                pygame.draw.rect(surface, self._device_color, rect, 1, border_radius=6)
+                surf = f_tiny.render("CTRL 2", True, self._device_color)
+                surface.blit(surf, surf.get_rect(centerx=rect.centerx, top=rect.y + 4))
+                surf = f_tiny.render("+ SHIFT", True, theme.TEXT_DIM)
+                surface.blit(surf, surf.get_rect(centerx=rect.centerx, bottom=rect.bottom - 4))
+            elif phys == KNOB_CTRL3:
+                # Dynamic Ctrl 3
+                pygame.draw.rect(surface, (30, 50, 50), rect, border_radius=6)
+                pygame.draw.rect(surface, self._device_color, rect, 1, border_radius=6)
+                surf = f_tiny.render("CTRL 3", True, self._device_color)
+                surface.blit(surf, surf.get_rect(center=rect.center))
+            elif phys in tw._phys_to_slot:
+                # FX slot
+                slot_idx = tw._phys_to_slot[phys]
+                if slot_idx < len(tw.slots):
+                    slot = tw.slots[slot_idx]
+                    # Color from the slot's LED color (map to RGB approximation)
+                    rgb = self._twister_color_to_rgb(slot.color)
+                    dim_rgb = (rgb[0] // 4, rgb[1] // 4, rgb[2] // 4)
+                    pygame.draw.rect(surface, dim_rgb, rect, border_radius=6)
+                    pygame.draw.rect(surface, rgb, rect, 2, border_radius=6)
+                    # Knob number
+                    surf = f_tiny.render(f"K{phys+1}", True, theme.TEXT_DIM)
+                    surface.blit(surf, (rect.x + 4, rect.y + 3))
+                    # Effect name
+                    name = slot.name
+                    if len(name) > 12:
+                        name = name[:11] + ".."
+                    surf = f_small.render(name, True, rgb)
+                    surface.blit(surf, surf.get_rect(center=rect.center))
+                    # Active indicator
+                    if slot.active:
+                        surf = f_tiny.render("ACTIVE", True, theme.TEXT_BRIGHT)
+                        surface.blit(surf, surf.get_rect(centerx=rect.centerx, bottom=rect.bottom - 3))
+                else:
+                    pygame.draw.rect(surface, theme.BUTTON_BG, rect, border_radius=6)
+            else:
+                pygame.draw.rect(surface, theme.BG_PANEL, rect, border_radius=6)
+
+    def _handle_twister_grid_clicks(self, mx, my):
+        """Handle taps on the Twister grid — cycle effect assignment."""
+        from engine.twister_genius import KNOB_CTRL2, KNOB_CTRL3
+        from engine.sp404_effects import fx_list_for_tab
+        tw = self.app.twister
+
+        # Page selector
+        if tw.page_count > 1:
+            pg_x = theme.SCREEN_WIDTH - 48
+            pg_start = self._controls_top + 8
+            for p in range(tw.page_count):
+                r = pygame.Rect(pg_x, pg_start + p * 34, 40, 30)
+                if r.collidepoint(mx, my):
+                    tw.switch_page(p)
+                    return
+
+        rects = self._twister_grid_rects()
+        for phys, rect in rects.items():
+            if rect.collidepoint(mx, my):
+                if phys in (KNOB_CTRL2, KNOB_CTRL3):
+                    return  # Can't reassign dynamic knobs
+                slot_idx = tw._phys_to_slot.get(phys)
+                if slot_idx is None or slot_idx >= len(tw.slots):
+                    return
+                # Cycle to next effect on this bus
+                fx = fx_list_for_tab(tw.bus_tab)
+                fx_names = [name for _, name in fx if name != "(OFF)"]
+                if not fx_names:
+                    return
+                current = tw.slots[slot_idx].name
+                try:
+                    idx = fx_names.index(current)
+                    next_name = fx_names[(idx + 1) % len(fx_names)]
+                except ValueError:
+                    next_name = fx_names[0]
+                tw.assign_effect(slot_idx, next_name)
+                return
+
+    @staticmethod
+    def _twister_color_to_rgb(color_val: int) -> tuple:
+        """Approximate Twister LED color wheel value (1-127) to RGB."""
+        if color_val <= 0:
+            return (60, 60, 60)
+        # Simple HSV-like mapping: 1=red, ~21=orange, ~42=yellow, ~63=green,
+        # ~84=cyan, ~105=blue, ~126=purple, 127=white
+        if color_val >= 127:
+            return (255, 255, 255)
+        h = (color_val - 1) / 126.0  # 0.0 to 1.0
+        # 6-segment color wheel
+        i = int(h * 6) % 6
+        f = h * 6 - int(h * 6)
+        if i == 0: return (255, int(f * 255), 0)         # red → yellow
+        if i == 1: return (int((1-f) * 255), 255, 0)     # yellow → green
+        if i == 2: return (0, 255, int(f * 255))         # green → cyan
+        if i == 3: return (0, int((1-f) * 255), 255)     # cyan → blue
+        if i == 4: return (int(f * 255), 0, 255)         # blue → purple
+        return (255, 0, int((1-f) * 255))                # purple → red
 
     def _draw_generic_control(self, surface, f_med, f_small):
         y = self._controls_top + 10

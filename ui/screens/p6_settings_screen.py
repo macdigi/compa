@@ -79,6 +79,11 @@ class P6SettingsScreen:
         self.app.midi_mapper.stop()
         print("Controller mapping stopped", flush=True)
 
+    def _toggle_twister_mode(self):
+        tw = self.app.twister
+        tw.mode = "toggle" if tw.mode == "momentary" else "momentary"
+        print(f"Twister mode → {tw.mode}", flush=True)
+
     def _cycle_theme(self):
         names = list(theme.THEMES.keys())
         current = theme.active_theme_name()
@@ -193,6 +198,21 @@ class P6SettingsScreen:
                     "label": "  No external controllers found", "type": "info",
                     "value": "Plug in a MIDI controller",
                 })
+
+        # Twister Genius settings
+        tw = self.app.twister
+        if tw.connected:
+            self._rows.append({"label": "", "type": "section", "value": "TWISTER GENIUS"})
+            self._rows.append({
+                "label": "  FX Mode", "type": "toggle",
+                "value": tw.mode == "momentary",
+                "action": self._toggle_twister_mode,
+                "true_label": "MOMENTARY", "false_label": "TOGGLE",
+            })
+            self._rows.append({
+                "label": f"  FX Page", "type": "info",
+                "value": f"Page {tw.current_page + 1} of {tw.page_count}  ({len(tw.slots)} effects)",
+            })
 
         # Audio routing (only when multiple devices connected)
         if len(connected) >= 2:
@@ -403,16 +423,19 @@ class P6SettingsScreen:
             surface.blit(label_surf, (20, ry + (row_h - label_surf.get_height()) // 2))
 
             if rtype == "toggle":
-                # ON/OFF toggle button
+                # Toggle button (supports custom labels via true_label/false_label)
                 is_on = row["value"]
-                toggle_rect = pygame.Rect(ctrl_x, ry + 4, 60, row_h - 8)
+                on_text = row.get("true_label", "ON")
+                off_text = row.get("false_label", "OFF")
+                tw = max(60, len(on_text if is_on else off_text) * 10 + 16)
+                toggle_rect = pygame.Rect(ctrl_x, ry + 4, tw, row_h - 8)
                 if is_on:
                     pygame.draw.rect(surface, theme.GREEN, toggle_rect, border_radius=6)
-                    lbl = f_small.render("ON", True, theme.BG)
+                    lbl = f_small.render(on_text, True, theme.BG)
                 else:
                     pygame.draw.rect(surface, theme.BG_LIGHTER, toggle_rect, border_radius=6)
                     pygame.draw.rect(surface, theme.BORDER, toggle_rect, 1, border_radius=6)
-                    lbl = f_small.render("OFF", True, theme.TEXT_DIM)
+                    lbl = f_small.render(off_text, True, theme.TEXT_DIM)
                 surface.blit(lbl, lbl.get_rect(center=toggle_rect.center))
 
             elif rtype == "adjust":

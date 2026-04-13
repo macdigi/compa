@@ -759,14 +759,18 @@ class P6App:
             self.live_cc[channel][cc] = value
 
     def _on_twister_param(self, knob: int, value: int):
-        """Called when Twister adjusts a parameter."""
+        """Called when Twister adjusts a parameter. Throttled to avoid spam."""
+        import time
+        now = time.monotonic()
+        if now - getattr(self, "_last_param_hud", 0) < 0.08:
+            return  # Throttle: max ~12 HUD updates/sec
+        self._last_param_hud = now
+
         if knob >= len(self.twister.slots):
             return
         slot = self.twister.slots[knob]
-        # Figure out which CC was actually sent (check live_cc for most recent)
         bus = self.twister.active_bus
         live = self.live_cc.get(bus, {})
-        # Find which CC just changed to this value
         cc_names = {16: "Ctrl1", 17: "Ctrl2", 18: "Ctrl3",
                     80: "Ctrl4", 81: "Ctrl5", 82: "Ctrl6"}
         label = slot.name
@@ -774,7 +778,12 @@ class P6App:
             if live.get(cc_num) == value:
                 label = f"{slot.name} {name}"
                 break
-        self.push_hud(f"{label}: {value}", self._twister_slot_color(slot))
+        # Replace last param message instead of stacking
+        msgs = self._hud_messages
+        if msgs and msgs[-1][0].startswith(slot.name):
+            msgs[-1] = (f"{label}: {value}", self._twister_slot_color(slot), now)
+        else:
+            self.push_hud(f"{label}: {value}", self._twister_slot_color(slot))
 
     def _on_spectra_state(self):
         """Called when Spectra changes bank, mute, or hold state."""

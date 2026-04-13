@@ -425,65 +425,60 @@ class P6SessionScreen:
             pygame.draw.rect(surface, (15, 15, 22), wave_rect, border_radius=3)
 
             if is_monitored:
-                # Oscilloscope — smooth line showing current audio shape
+                # Oscilloscope — filled waveform matching workspace style
                 import numpy as np
-                peak_l, peak_r = self.app.recorder.peak_levels
 
-                # Use the most recent audio from the recall buffer
                 rec = self.app.recorder
                 buf = rec._recall_buf
                 wpos = rec._recall_write_pos
                 display_frames = min(2048, len(buf))
 
-                # Read the most recent chunk from the circular buffer
+                # Center + grid lines
+                center_y = wave_rect.centery
+                half_h = (wave_rect.height - 8) // 2
+                pygame.draw.line(surface, (22, 22, 32),
+                                (wave_rect.x + 2, center_y),
+                                (wave_rect.right - 2, center_y))
+
                 if wpos >= display_frames:
                     recent = buf[wpos - display_frames:wpos]
                 else:
                     recent = np.concatenate([buf[-(display_frames - wpos):], buf[:wpos]])
 
                 if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
-                    # Mono mix
-                    if recent.ndim > 1:
-                        mono = recent.mean(axis=1)
-                    else:
-                        mono = recent
+                    mono = recent.mean(axis=1) if recent.ndim > 1 else recent
 
-                    # Downsample to display width
                     w = wave_rect.width - 4
                     step = max(1, len(mono) // w)
                     points = []
-                    center_y = wave_rect.centery
-                    half_h = (wave_rect.height - 8) // 2
+                    dc = device_color
 
                     for px in range(w):
                         si = px * step
                         if si < len(mono):
-                            val = float(mono[si])
-                            # Clamp and scale
-                            val = max(-1.0, min(1.0, val * 3.0))  # Boost for visibility
+                            val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
                             py = center_y - int(val * half_h)
                             points.append((wave_rect.x + 2 + px, py))
 
                     if len(points) > 1:
-                        pygame.draw.lines(surface, device_color, False, points, 2)
+                        # Filled waveform
+                        dim = (dc[0] // 5, dc[1] // 5, dc[2] // 5)
+                        for px_x, py in points:
+                            if py != center_y:
+                                pygame.draw.line(surface, dim, (px_x, center_y), (px_x, py))
+                        pygame.draw.lines(surface, dc, False, points, 2)
                 else:
-                    # Silent — flat center line
-                    pygame.draw.line(surface, theme.BORDER,
-                                   (wave_rect.x + 2, wave_rect.centery),
-                                   (wave_rect.right - 2, wave_rect.centery))
+                    pygame.draw.line(surface, (35, 35, 48),
+                                   (wave_rect.x + 2, center_y),
+                                   (wave_rect.right - 2, center_y))
 
-                # Center line (faint, behind the waveform)
-                pygame.draw.line(surface, (30, 30, 40),
-                                (wave_rect.x + 2, wave_rect.centery),
-                                (wave_rect.right - 2, wave_rect.centery))
-
-                # Label
+                # Status label
                 if self.app.recorder.is_recording:
                     dur = self.app.recorder.duration
                     surf = f_tiny.render(f"REC {dur:.0f}s", True, theme.RED)
                 else:
                     recall = self.app.recorder.recall_seconds_available
-                    surf = f_tiny.render(f"LIVE  buf:{int(recall)}s", True, device_color)
+                    surf = f_tiny.render(f"buf:{int(recall)}s", True, device_color)
                 surface.blit(surf, (cx + 2, cy + 1))
             else:
                 # Not monitored — show device info or "tap to monitor"
