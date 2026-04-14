@@ -705,8 +705,15 @@ class P6Recorder:
         if was_monitoring:
             self.stop_monitoring()
 
-        # Stop request flag
+        # Playback state flags (accessed from UI thread)
         self._playback_stop = False
+        self._playback_paused = False
+        self._playback_seek_frame: int | None = None  # request to seek
+        self._playback_speed = 1.0  # 0.25 - 4.0
+        self._playback_reverse = False
+        self._playback_position = 0  # current frame (for UI)
+        self._playback_total_frames = 0
+        self._playback_rate = 44100  # source sample rate
 
         def _play_thread():
             stream = None
@@ -744,22 +751,63 @@ class P6Recorder:
                         new_data[:, 1] = np.interp(x_new, x_old, data[:, 1])
                         data = new_data
 
-                # Manual playback: open stream, write blocks, close cleanly
+                # Manual playback with pause/seek/speed/reverse support
                 blocksize = 4096
+                self._playback_total_frames = len(data)
+                self._playback_rate = out_rate
                 stream = sd.OutputStream(device=out_device, samplerate=out_rate,
                                           channels=2, dtype="float32", blocksize=blocksize)
                 stream.start()
                 pos = 0
+
                 while pos < len(data) and not self._playback_stop:
-                    end = min(pos + blocksize, len(data))
-                    chunk = data[pos:end]
+                    # Handle seek request
+                    if self._playback_seek_frame is not None:
+                        pos = max(0, min(self._playback_seek_frame, len(data) - 1))
+                        self._playback_seek_frame = None
+
+                    # Handle pause
+                    if self._playback_paused:
+                        # Write silence while paused so the stream stays alive
+                        silence = np.zeros((blocksize, 2), dtype=np.float32)
+                        stream.write(silence)
+                        time.sleep(0.02)
+                        continue
+
+                    speed = max(0.25, min(4.0, self._playback_speed))
+                    reverse = self._playback_reverse
+
+                    # Read a chunk
+                    if reverse:
+                        start_f = max(0, pos - blocksize)
+                        chunk = data[start_f:pos][::-1].copy()
+                        pos = start_f
+                    else:
+                        end_f = min(pos + blocksize, len(data))
+                        chunk = data[pos:end_f].copy()
+                        pos = end_f
+
+                    # Apply speed change via resampling (if needed)
+                    if speed != 1.0 and _sr is not None and len(chunk) > 0:
+                        try:
+                            # ratio > 1 makes output longer (slower), < 1 shorter (faster)
+                            chunk = _sr.resample(chunk, 1.0 / speed, "sinc_fastest").astype(np.float32)
+                        except Exception:
+                            pass
+
+                    # Pad to blocksize if needed
                     if len(chunk) < blocksize:
-                        # Pad the last chunk
+                        if len(chunk) == 0:
+                            break
                         padded = np.zeros((blocksize, 2), dtype=np.float32)
-                        padded[:len(chunk)] = chunk
+                        padded[:len(chunk)] = chunk[:blocksize]
                         chunk = padded
+                    elif len(chunk) > blocksize:
+                        chunk = chunk[:blocksize]
+
+                    self._playback_position = pos
                     stream.write(chunk)
-                    pos += blocksize
+
                 stream.stop()
                 stream.close()
                 stream = None
@@ -788,8 +836,52 @@ class P6Recorder:
     def stop_playback(self) -> None:
         """Signal playback thread to stop."""
         self._playback_stop = True
-        # Don't call sd.stop() — the thread cleans up its own stream
+        self._playback_paused = False
         self._playback_file = None
+
+    def toggle_playback_pause(self) -> bool:
+        """Toggle pause. Returns new pause state."""
+        self._playback_paused = not getattr(self, "_playback_paused", False)
+        return self._playback_paused
+
+    def seek_playback(self, frame: int) -> None:
+        """Seek to a specific frame position."""
+        self._playback_seek_frame = max(0, int(frame))
+
+    def seek_playback_relative(self, seconds: float) -> None:
+        """Seek relative to current position."""
+        rate = getattr(self, "_playback_rate", 44100)
+        delta = int(seconds * rate)
+        current = getattr(self, "_playback_position", 0)
+        self._playback_seek_frame = max(0, current + delta)
+
+    def set_playback_speed(self, speed: float) -> None:
+        """Set playback speed (0.25 to 4.0)."""
+        self._playback_speed = max(0.25, min(4.0, float(speed)))
+
+    def set_playback_reverse(self, reverse: bool) -> None:
+        """Toggle reverse playback."""
+        self._playback_reverse = bool(reverse)
+
+    @property
+    def playback_progress(self) -> float:
+        """Returns 0.0-1.0 based on current position."""
+        total = getattr(self, "_playback_total_frames", 0)
+        if total <= 0:
+            return 0.0
+        return min(1.0, getattr(self, "_playback_position", 0) / total)
+
+    @property
+    def playback_paused(self) -> bool:
+        return getattr(self, "_playback_paused", False)
+
+    @property
+    def playback_speed(self) -> float:
+        return getattr(self, "_playback_speed", 1.0)
+
+    @property
+    def playback_reverse(self) -> bool:
+        return getattr(self, "_playback_reverse", False)
 
     @property
     def is_playing_back(self) -> bool:

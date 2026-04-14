@@ -252,6 +252,10 @@ class P6App:
         # ── Auto updater ─────────────────────────────────────────────
         self.updater = Updater(PROJECT_ROOT)
 
+        # ── Shared audio player modal ────────────────────────────────
+        from ui.components.audio_player import AudioPlayer
+        self.audio_player = AudioPlayer(self)
+
         # ── Compa-to-Compa network link ──────────────────────────────
         recordings_dir = self.config.get("P6_RECORDING_DIR",
                                           os.path.join(PROJECT_ROOT, "recordings"))
@@ -1419,6 +1423,11 @@ class P6App:
             if nav_handled:
                 continue
 
+            # Audio player modal takes priority when visible
+            if getattr(self, 'audio_player', None) and self.audio_player.visible:
+                if self.audio_player.handle_event(event):
+                    continue
+
             # Current screen
             self.current_screen.handle_event(event)
 
@@ -1460,6 +1469,9 @@ class P6App:
         self.screen.fill(theme.BG)
         self.current_screen.draw(self.screen)
         self._draw_nav()
+        # Audio player overlays everything when visible
+        if getattr(self, 'audio_player', None) and self.audio_player.visible:
+            self.audio_player.draw(self.screen)
         pygame.display.flip()
 
         # Draw software cursor in FB + mouse mode

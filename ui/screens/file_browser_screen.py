@@ -383,9 +383,11 @@ class FileBrowserScreen:
             return
         if not self._selected_file.lower().endswith((".wav", ".mp3", ".flac", ".aif", ".aiff")):
             return
-        if hasattr(self.app, 'recorder'):
+        # Open the full audio player modal
+        if hasattr(self.app, 'audio_player'):
+            self.app.audio_player.show(self._selected_file)
+        elif hasattr(self.app, 'recorder'):
             self.app.recorder.play(self._selected_file)
-            self._flash(f"Playing {os.path.basename(self._selected_file)}")
 
     def _stop_playback(self):
         if hasattr(self.app, 'recorder'):

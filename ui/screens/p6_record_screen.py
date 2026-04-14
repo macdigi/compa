@@ -119,7 +119,10 @@ class P6RecordScreen:
         if self._detail_modal.visible:
             result = self._detail_modal.handle_event(event)
             if result == "PLAY" and self._detail_rec:
-                self.app.recorder.play(self._detail_rec["path"])
+                if hasattr(self.app, 'audio_player'):
+                    self.app.audio_player.show(self._detail_rec["path"])
+                else:
+                    self.app.recorder.play(self._detail_rec["path"])
                 self._detail_modal.hide()
             elif result == "STAR" and self._detail_rec:
                 meta = self.app.recorder.load_metadata(self._detail_rec["path"])
