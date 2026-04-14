@@ -528,7 +528,7 @@ class FileBrowserScreen:
 
         import socket
         my_name = socket.gethostname()
-        surf = f_med.render(f"THIS ({my_name})", True, self._device_color_for_self())
+        surf = f_med.render(f"LOCAL ({my_name})", True, self._device_color_for_self())
         surface.blit(surf, (left.x + 10, left.y + 6))
         # Current path breadcrumb + count
         crumb = "/" + self._net_local_path if self._net_local_path else "/"

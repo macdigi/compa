@@ -266,8 +266,13 @@ class P6App:
         try:
             self.compa_server.start()
             self.compa_browser.start()
+            # Notify on inbound uploads (optional, toggleable in settings)
+            self.compa_server.set_upload_callback(self._on_compa_upload)
         except Exception as e:
             print(f"Compa link init failed: {e}", flush=True)
+
+        # Default: notifications on
+        self.notify_uploads = self.config.get("NOTIFY_UPLOADS", "1") == "1"
 
         # ── Live CC state (for workspace parameter tracking + HUD) ───
         # Per-bus dict of {cc: value} updated by incoming SP-404 MIDI
@@ -778,6 +783,20 @@ class P6App:
         # Keep max 3
         if len(self._hud_messages) > 3:
             self._hud_messages.pop(0)
+
+    def _on_compa_upload(self, category: str, relpath: str, size: int):
+        """Called (on the server thread) when a peer uploads a file to us."""
+        if not getattr(self, "notify_uploads", True):
+            return
+        import os
+        name = os.path.basename(relpath)
+        # Ignore metadata sidecars — just show the main file
+        if name.endswith(".meta.json"):
+            return
+        kb = size / 1024
+        size_str = f"{kb:.0f} KB" if kb < 1024 else f"{kb / 1024:.1f} MB"
+        msg = f"Received: {name[:28]} ({size_str})"
+        self.push_hud(msg, theme.BLUE)
 
     def _on_twister_state(self):
         """Called when Twister loads/kills an effect."""

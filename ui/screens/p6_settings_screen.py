@@ -81,6 +81,11 @@ class P6SettingsScreen:
         self.app.midi_mapper.stop()
         print("Controller mapping stopped", flush=True)
 
+    def _toggle_upload_notifications(self):
+        from ui.p6_app import save_config_key
+        self.app.notify_uploads = not getattr(self.app, "notify_uploads", True)
+        save_config_key("NOTIFY_UPLOADS", "1" if self.app.notify_uploads else "0")
+
     def _open_network_transfer(self):
         """Navigate to the Files tab and select the Network location."""
         files_screen = self.app.screens.get("files")
@@ -292,6 +297,12 @@ class P6SettingsScreen:
                     "label": "  No peers found", "type": "info",
                     "value": "Both Compas must be on same WiFi",
                 })
+            # Upload notification toggle
+            self._rows.append({
+                "label": "  Upload notifications", "type": "toggle",
+                "value": getattr(self.app, "notify_uploads", True),
+                "action": self._toggle_upload_notifications,
+            })
 
         # Twister Genius settings
         tw = self.app.twister

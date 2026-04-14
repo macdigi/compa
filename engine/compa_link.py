@@ -60,6 +60,7 @@ class CompaHandler(BaseHTTPRequestHandler):
     # Set by CompaServer
     base_dirs: dict = {}
     hostname: str = "compa"
+    on_upload = None  # Callable[(category, relpath, size), None]
 
     def log_message(self, format, *args):
         pass  # Quiet
@@ -214,6 +215,12 @@ class CompaHandler(BaseHTTPRequestHandler):
                     f.write(chunk)
                     remaining -= len(chunk)
             self._send_json({"ok": True, "bytes": length})
+            # Notify listener (e.g. app HUD)
+            if CompaHandler.on_upload is not None:
+                try:
+                    CompaHandler.on_upload(category, rest, length)
+                except Exception:
+                    pass
         except Exception as e:
             self.send_error(500, str(e))
 
@@ -240,6 +247,10 @@ class CompaServer:
 
         CompaHandler.base_dirs = base_dirs
         CompaHandler.hostname = socket.gethostname()
+
+    def set_upload_callback(self, callback):
+        """Set callback(category, relpath, size_bytes) fired after each upload."""
+        CompaHandler.on_upload = callback
 
     def start(self) -> bool:
         """Start the HTTP server and mDNS advertisement."""
