@@ -18,6 +18,7 @@ class P6SettingsScreen:
         self._rows = []  # rebuilt each frame
         self._content_height = 0
         self._update_status = ""
+        self._button_flash: dict | None = None
 
     def on_enter(self):
         self._scroll_y = 0
@@ -478,9 +479,12 @@ class P6SettingsScreen:
                     return
 
                 elif rtype == "button":
-                    btn_rect = pygame.Rect(ctrl_x, ry + 4, 90, row_h - 8)
-                    if btn_rect.collidepoint(mx, my):
+                    # Whole-row clickable for accessibility (touchscreen friendly)
+                    try:
                         row["action"]()
+                        self._button_flash = {"idx": i, "until": pygame.time.get_ticks() + 150}
+                    except Exception as e:
+                        print(f"Settings button action error: {e}", flush=True)
                     return
 
     def update(self):
@@ -598,10 +602,20 @@ class P6SettingsScreen:
                         pygame.draw.rect(surface, theme.TEXT_BRIGHT, sr, 2, border_radius=4)
 
             elif rtype == "button":
+                # Flash on recent press for visual feedback
+                flashing = (self._button_flash and self._button_flash["idx"] == i
+                            and pygame.time.get_ticks() < self._button_flash["until"])
                 btn_rect = pygame.Rect(ctrl_x, ry + 4, 90, row_h - 8)
-                pygame.draw.rect(surface, theme.ACCENT_DIM, btn_rect, border_radius=6)
+                btn_bg = theme.ACCENT if flashing else theme.ACCENT_DIM
+                pygame.draw.rect(surface, btn_bg, btn_rect, border_radius=6)
                 lbl = f_small.render(row["btn_label"], True, theme.TEXT_BRIGHT)
                 surface.blit(lbl, lbl.get_rect(center=btn_rect.center))
+                # Show value (status message) between label and button
+                val = row.get("value")
+                if val:
+                    val_surf = f_tiny.render(str(val)[:40], True, theme.TEXT_DIM)
+                    val_x = btn_rect.x - val_surf.get_width() - 8
+                    surface.blit(val_surf, (val_x, ry + (row_h - val_surf.get_height()) // 2))
 
             elif rtype == "info":
                 # Display value text on right side
