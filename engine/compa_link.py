@@ -181,6 +181,42 @@ class CompaHandler(BaseHTTPRequestHandler):
 
         self.send_error(404, "Unknown action")
 
+    def do_PUT(self):
+        """Accept file uploads: PUT /{category}/{path...}/{filename}
+
+        Body is the raw file bytes. Creates intermediate directories.
+        """
+        path = unquote(self.path).lstrip("/")
+        parts = path.split("/", 1)
+        if len(parts) < 2:
+            self.send_error(400, "Bad path")
+            return
+        category, rest = parts[0], parts[1]
+        if category not in self.base_dirs:
+            self.send_error(404, "Unknown category")
+            return
+        base = self.base_dirs[category]
+
+        target = os.path.normpath(os.path.join(base, rest))
+        if not target.startswith(os.path.abspath(base)):
+            self.send_error(403, "Forbidden")
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            self._send_json({"ok": True, "bytes": length})
+        except Exception as e:
+            self.send_error(500, str(e))
+
 
 class CompaServer:
     """HTTP file server + mDNS advertiser."""
@@ -343,6 +379,37 @@ def list_peer_files(peer: dict, category: str = "recordings",
     except Exception as e:
         log.warning("list_peer_files failed: %s", e)
         return []
+
+
+def upload_to_peer(peer: dict, category: str, local_path: str,
+                   subpath: str = "", filename: str | None = None,
+                   timeout: float = 60.0) -> bool:
+    """Upload a local file to a peer at the given subpath.
+
+    Returns True on success.
+    """
+    if not os.path.isfile(local_path):
+        return False
+    name = filename or os.path.basename(local_path)
+    sub = quote(subpath.strip("/"), safe="/") if subpath else ""
+    safe_name = quote(name)
+    if sub:
+        url = f"http://{peer['ip']}:{peer['port']}/{category}/{sub}/{safe_name}"
+    else:
+        url = f"http://{peer['ip']}:{peer['port']}/{category}/{safe_name}"
+
+    try:
+        size = os.path.getsize(local_path)
+        with open(local_path, "rb") as f:
+            req = Request(url, data=f.read(), method="PUT")
+            req.add_header("Content-Type", "application/octet-stream")
+            req.add_header("Content-Length", str(size))
+            with urlopen(req, timeout=timeout) as resp:
+                resp.read()
+        return True
+    except Exception as e:
+        log.warning("upload_to_peer failed: %s", e)
+        return False
 
 
 def download_peer_file(peer: dict, category: str, filename: str,

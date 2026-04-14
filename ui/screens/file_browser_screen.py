@@ -954,12 +954,46 @@ class FileBrowserScreen:
         threading.Thread(target=_do, daemon=True).start()
 
     def _send_selected_to_peer(self):
-        """Send locally-selected files to the peer via HTTP upload.
+        """Upload locally-selected files to the peer's current path."""
+        if not self._net_selected_peer or not self._net_local_selected:
+            self._net_status = "No files selected locally"
+            return
+        from engine.compa_link import upload_to_peer
+        peer = self._net_selected_peer
+        files = [f for f in self._net_local_files
+                 if f["name"] in self._net_local_selected and f.get("type") != "dir"]
+        local_abs = self._net_local_abs_path()
+        peer_sub = self._net_peer_path
 
-        Requires a server-side upload endpoint. For now, shows a message
-        that this direction requires the peer to pull.
-        """
-        self._net_status = "Send requires upload endpoint (use PULL from peer instead)"
+        def _send():
+            self._transfer_active = True
+            total = len(files)
+            ok = 0
+            for i, f in enumerate(files):
+                self._transfer_msg = f"[{i+1}/{total}] {f['name'][:30]}"
+                self._transfer_progress = i / total
+                try:
+                    src = os.path.join(local_abs, f["name"])
+                    if upload_to_peer(peer, "recordings", src, subpath=peer_sub):
+                        ok += 1
+                        # Also send metadata sidecar if it exists
+                        meta = src + ".meta.json"
+                        if os.path.exists(meta):
+                            upload_to_peer(peer, "recordings", meta,
+                                           subpath=peer_sub, timeout=5)
+                except Exception as e:
+                    print(f"  {f['name']}: {e}", flush=True)
+            self._transfer_progress = 1.0
+            self._transfer_msg = f"Done — {ok}/{total} files"
+            import time
+            time.sleep(1.5)
+            self._transfer_active = False
+            self._net_local_selected.clear()
+            self._load_network_peer()  # refresh peer list
+            self._net_status = f"Sent {ok} files to {peer['name']}"
+
+        import threading
+        threading.Thread(target=_send, daemon=True).start()
 
     def _pull_selected_from_peer(self):
         """Pull selected files from the peer's current path to local current path."""
