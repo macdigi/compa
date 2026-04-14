@@ -107,16 +107,17 @@ class AudioPlayer:
         # Time display below seek
         time_rect = pygame.Rect(seek.x, seek.bottom + 4, seek.width, 16)
 
-        # Transport buttons (big, centered)
+        # Transport buttons (big, centered) — RWND | PAUSE/PLAY | FFWD | REV
         btn_y = time_rect.bottom + 24
         btn_size = 56
         btn_gap = 14
-        total_btn_w = 5 * btn_size + 4 * btn_gap  # rwnd | pause | play/stop | ff | rev
+        num_btns = 4
+        total_btn_w = num_btns * btn_size + (num_btns - 1) * btn_gap
         btn_start_x = modal.centerx - total_btn_w // 2
         btns = {}
-        labels = ["RWND", "PAUSE", "STOP", "FFWD", "REV"]
+        labels = ["rwnd", "pause", "ffwd", "rev"]
         for i, label in enumerate(labels):
-            btns[label.lower()] = pygame.Rect(
+            btns[label] = pygame.Rect(
                 btn_start_x + i * (btn_size + btn_gap), btn_y, btn_size, btn_size
             )
 
@@ -164,9 +165,6 @@ class AudioPlayer:
             btns = lay["buttons"]
             if btns["pause"].collidepoint(mx, my):
                 self.app.recorder.toggle_playback_pause()
-                return True
-            if btns["stop"].collidepoint(mx, my):
-                self.hide()
                 return True
             if btns["rwnd"].collidepoint(mx, my):
                 self.app.recorder.seek_playback_relative(-5.0)
@@ -312,26 +310,63 @@ class AudioPlayer:
             surf = f_small.render(time_text, True, theme.TEXT_DIM)
             surface.blit(surf, surf.get_rect(centerx=lay["time"].centerx, top=lay["time"].y))
 
-        # Transport buttons
+        # Transport buttons with drawn shape icons
         btns = lay["buttons"]
         paused = self.app.recorder.playback_paused if hasattr(self.app, 'recorder') else False
         reverse = self.app.recorder.playback_reverse if hasattr(self.app, 'recorder') else False
 
-        button_info = [
-            ("rwnd", "<<", theme.BUTTON_BG, theme.TEXT),
-            ("pause", ">" if paused else "||", theme.ACCENT if paused else theme.BUTTON_BG,
-             theme.BG if paused else theme.TEXT),
-            ("stop", "[]", theme.RED, theme.TEXT_BRIGHT),
-            ("ffwd", ">>", theme.BUTTON_BG, theme.TEXT),
-            ("rev", "REV", theme.ACCENT if reverse else theme.BUTTON_BG,
-             theme.BG if reverse else theme.TEXT),
-        ]
-        for key, label, bg, fg in button_info:
-            r = btns[key]
-            pygame.draw.rect(surface, bg, r, border_radius=28)
-            pygame.draw.rect(surface, theme.BORDER, r, 1, border_radius=28)
-            surf = f_med.render(label, True, fg)
-            surface.blit(surf, surf.get_rect(center=r.center))
+        for key, r in btns.items():
+            if key == "pause":
+                bg = theme.ACCENT if paused else theme.BUTTON_BG
+                fg = theme.BG if paused else theme.TEXT_BRIGHT
+            elif key == "rev" and reverse:
+                bg = theme.ACCENT
+                fg = theme.BG
+            else:
+                bg = theme.BUTTON_BG
+                fg = theme.TEXT_BRIGHT
+
+            pygame.draw.circle(surface, bg, r.center, r.width // 2)
+            pygame.draw.circle(surface, theme.BORDER_LIGHT, r.center, r.width // 2, 1)
+
+            cx, cy = r.center
+            s = 10  # icon half-size
+
+            if key == "rwnd":
+                # Two left-pointing triangles
+                for offset in (-8, 4):
+                    pygame.draw.polygon(surface, fg, [
+                        (cx + offset + s, cy - s),
+                        (cx + offset - s, cy),
+                        (cx + offset + s, cy + s),
+                    ])
+            elif key == "ffwd":
+                # Two right-pointing triangles
+                for offset in (-4, 8):
+                    pygame.draw.polygon(surface, fg, [
+                        (cx + offset - s, cy - s),
+                        (cx + offset + s, cy),
+                        (cx + offset - s, cy + s),
+                    ])
+            elif key == "pause":
+                if paused:
+                    # Show play triangle
+                    pygame.draw.polygon(surface, fg, [
+                        (cx - s + 2, cy - s - 2),
+                        (cx + s + 2, cy),
+                        (cx - s + 2, cy + s + 2),
+                    ])
+                else:
+                    # Two vertical bars
+                    bar_w = 5
+                    pygame.draw.rect(surface, fg,
+                                     (cx - 9, cy - s - 1, bar_w, (s + 1) * 2))
+                    pygame.draw.rect(surface, fg,
+                                     (cx + 4, cy - s - 1, bar_w, (s + 1) * 2))
+            elif key == "rev":
+                # Circular arrow (simplified — "REV" text for clarity)
+                surf = f_small.render("REV", True, fg)
+                surface.blit(surf, surf.get_rect(center=(cx, cy)))
 
         # Speed slider — styled with tick marks + center-fill
         slider = lay["slider"]
