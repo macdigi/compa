@@ -37,6 +37,10 @@ class AudioPlayer:
         self._duration: float = 0.0
         self._sample_rate: int = 44100
         self._dragging_seek = False
+        self._dragging_speed = False
+        # Double-tap detection
+        self._last_slider_tap_ms = 0
+        self._double_tap_window_ms = 400
 
     def show(self, filepath: str):
         """Show the player and start playback."""
@@ -175,19 +179,35 @@ class AudioPlayer:
                     not self.app.recorder.playback_reverse)
                 return True
 
-            # Speed slider
-            if lay["slider"].collidepoint(mx, my):
-                self._set_speed_from_x(mx, lay["slider"])
+            # Speed slider — support drag + double-tap to reset
+            # Use an expanded hit area for touch friendliness
+            slider = lay["slider"]
+            slider_hit = slider.inflate(0, 40)
+            if slider_hit.collidepoint(mx, my):
+                now_ms = pygame.time.get_ticks()
+                if (now_ms - self._last_slider_tap_ms) < self._double_tap_window_ms:
+                    # Double-tap → reset to 1.0x
+                    self.app.recorder.set_playback_speed(1.0)
+                    self._dragging_speed = False
+                else:
+                    self._dragging_speed = True
+                    self._set_speed_from_x(mx, slider)
+                self._last_slider_tap_ms = now_ms
                 return True
 
             return True  # Consume all clicks when visible
 
-        if event.type == pygame.MOUSEMOTION and self._dragging_seek:
-            self._do_seek(event.pos[0], lay["seek"])
-            return True
+        if event.type == pygame.MOUSEMOTION:
+            if self._dragging_seek:
+                self._do_seek(event.pos[0], lay["seek"])
+                return True
+            if self._dragging_speed:
+                self._set_speed_from_x(event.pos[0], lay["slider"])
+                return True
 
         if event.type == pygame.MOUSEBUTTONUP:
             self._dragging_seek = False
+            self._dragging_speed = False
 
         # Swallow all events when visible
         return True
@@ -313,24 +333,64 @@ class AudioPlayer:
             surf = f_med.render(label, True, fg)
             surface.blit(surf, surf.get_rect(center=r.center))
 
-        # Speed slider
+        # Speed slider — styled with tick marks + center-fill
         slider = lay["slider"]
-        pygame.draw.rect(surface, theme.BG_LIGHTER, slider, border_radius=4)
+        track_h = 8
+        track_y = slider.centery - track_h // 2
+        track_rect = pygame.Rect(slider.x, track_y, slider.width, track_h)
+        pygame.draw.rect(surface, theme.BG_INPUT, track_rect, border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER, track_rect, 1, border_radius=4)
+
+        # Tick marks at 0.25, 0.5, 1.0, 1.5, 2.0
+        tick_values = [0.25, 0.5, 1.0, 1.5, 2.0]
+        tick_labels = {0.25: "¼", 0.5: "½", 1.0: "1x", 1.5: "1½", 2.0: "2x"}
+        for tv in tick_values:
+            if tv <= 1.0:
+                tf = (tv - 0.25) / 1.5
+            else:
+                tf = 0.5 + (tv - 1.0) / 2.0
+            tx = slider.x + int(tf * slider.width)
+            is_major = tv in (0.25, 1.0, 2.0)
+            tick_top = slider.y - (10 if is_major else 6)
+            tick_bot = slider.bottom + (10 if is_major else 6)
+            pygame.draw.line(surface, theme.BORDER_LIGHT if is_major else theme.BORDER,
+                             (tx, tick_top), (tx, tick_bot), 2 if is_major else 1)
+            if is_major:
+                lbl = f_tiny.render(tick_labels[tv], True, theme.TEXT_DIM)
+                surface.blit(lbl, lbl.get_rect(centerx=tx, top=tick_bot + 2))
+
         if hasattr(self.app, 'recorder'):
             speed = self.app.recorder.playback_speed
-            # Map 0.25-1.0-2.0 → 0.0-0.5-1.0
             if speed <= 1.0:
                 frac = (speed - 0.25) / 1.5
             else:
                 frac = 0.5 + (speed - 1.0) / 2.0
             frac = max(0.0, min(1.0, frac))
             hx = slider.x + int(frac * slider.width)
-            # Center line
-            pygame.draw.line(surface, theme.BORDER,
-                             (slider.centerx, slider.y - 4),
-                             (slider.centerx, slider.bottom + 4))
-            # Handle
-            pygame.draw.circle(surface, theme.ACCENT, (hx, slider.centery), 11)
-            # Label
-            surf = f_tiny.render(f"SPEED  {speed:.2f}x", True, theme.TEXT_DIM)
-            surface.blit(surf, surf.get_rect(centerx=slider.centerx, top=slider.bottom + 6))
+            center_x = slider.x + int(0.5 * slider.width)
+
+            # Fill from center to handle (shows deviation from 1.0x)
+            if speed != 1.0:
+                if speed > 1.0:
+                    fill_rect = pygame.Rect(center_x, track_y + 1, hx - center_x, track_h - 2)
+                    color = theme.RED if speed > 1.5 else theme.YELLOW
+                else:
+                    fill_rect = pygame.Rect(hx, track_y + 1, center_x - hx, track_h - 2)
+                    color = theme.BLUE
+                if fill_rect.width > 0:
+                    pygame.draw.rect(surface, color, fill_rect)
+
+            # Handle — big, double-ringed
+            pygame.draw.circle(surface, theme.BG_PANEL, (hx, slider.centery), 16)
+            pygame.draw.circle(surface, theme.ACCENT, (hx, slider.centery), 14)
+            pygame.draw.circle(surface, theme.BG, (hx, slider.centery), 5)
+
+            # Current speed label (bold, centered above handle)
+            speed_text = f"{speed:.2f}x" if speed != 1.0 else "1.00x"
+            lbl_color = theme.ACCENT if speed != 1.0 else theme.TEXT_DIM
+            surf = f_small.render(speed_text, True, lbl_color)
+            surface.blit(surf, surf.get_rect(centerx=hx, bottom=slider.y - 14))
+
+            # Hint below
+            hint = f_tiny.render("drag to adjust · double-tap to reset", True, theme.TEXT_DIM)
+            surface.blit(hint, hint.get_rect(centerx=slider.centerx, top=slider.bottom + 26))
