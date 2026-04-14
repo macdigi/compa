@@ -24,6 +24,7 @@ class FileBrowserScreen:
         ("Samples",    "samples"),
         ("Kits",       "kits"),
         ("Sessions",   "sessions"),
+        ("Network",    "network"),
     ]
 
     def __init__(self, app):
@@ -49,6 +50,16 @@ class FileBrowserScreen:
 
         # Now-playing tracking
         self._playing_file: str | None = None
+
+        # Network dual-pane state
+        self._net_selected_peer: dict | None = None
+        self._net_local_files: list[dict] = []
+        self._net_peer_files: list[dict] = []
+        self._net_local_selected: set[str] = set()
+        self._net_peer_selected: set[str] = set()
+        self._net_local_scroll = 0
+        self._net_peer_scroll = 0
+        self._net_status = ""
 
         self._build_browser()
 
@@ -80,9 +91,60 @@ class FileBrowserScreen:
     def _switch_location(self, loc: str):
         self._current_loc = loc
         self._viewing_peer = None
-        self._build_browser()
         self._selected_file = None
         self._selected_peer_file = None
+
+        if loc == "network":
+            # Load local files for the left pane
+            self._load_network_local()
+            # Auto-connect to first peer if available
+            if hasattr(self.app, 'compa_browser'):
+                peers = self.app.compa_browser.peers
+                if peers:
+                    self._net_selected_peer = peers[0]
+                    self._load_network_peer()
+        else:
+            self._build_browser()
+
+    def _load_network_local(self):
+        """Load local recordings for the network dual-pane left side."""
+        local_dir = self.app.config.get("P6_RECORDING_DIR")
+        files = []
+        if local_dir and os.path.isdir(local_dir):
+            for fn in sorted(os.listdir(local_dir)):
+                if fn.startswith(".") or fn.endswith(".meta.json"):
+                    continue
+                fp = os.path.join(local_dir, fn)
+                if os.path.isfile(fp):
+                    files.append({
+                        "name": fn,
+                        "size": os.path.getsize(fp),
+                        "path": fp,
+                    })
+        self._net_local_files = files
+        self._net_local_selected.clear()
+        self._net_local_scroll = 0
+
+    def _load_network_peer(self):
+        """Load peer files in the background for the network right pane."""
+        if not self._net_selected_peer:
+            return
+        from engine.compa_link import list_peer_files
+        peer = self._net_selected_peer
+
+        def _load():
+            try:
+                self._net_status = f"Connecting to {peer['name']}..."
+                files = list_peer_files(peer, "recordings")
+                self._net_peer_files = [f for f in files
+                                        if not f["name"].startswith(".")
+                                        and not f["name"].endswith(".meta.json")]
+                self._net_status = f"Connected — {len(self._net_peer_files)} files"
+            except Exception as e:
+                self._net_status = f"Connection failed: {e}"
+
+        import threading
+        threading.Thread(target=_load, daemon=True).start()
 
     def _switch_to_peer(self, peer: dict):
         """Switch to viewing a peer's files."""
@@ -125,6 +187,11 @@ class FileBrowserScreen:
                 if r.collidepoint(mx, my):
                     self._switch_location(key)
                     return
+
+            # Network pane clicks
+            if self._current_loc == "network":
+                self._handle_network_clicks(mx, my)
+                return
 
             # Sidebar peer entries (below local locations)
             peer_y = 44 + len(self.LOCATIONS) * 44 + 12
@@ -292,7 +359,9 @@ class FileBrowserScreen:
                 surface.blit(surf, surf.get_rect(centery=np_rect.centery, left=np_rect.x + 8))
 
         # Content area
-        if self._viewing_peer:
+        if self._current_loc == "network":
+            self._draw_network_panes(surface, f_med, f_small, f_tiny)
+        elif self._viewing_peer:
             self._draw_peer_files(surface, f_small, f_tiny)
         elif self._browser:
             # Adjust browser rect if now-playing bar is showing
@@ -345,6 +414,143 @@ class FileBrowserScreen:
             surface.blit(surf, surf.get_rect(top=row.y + 9, right=row.right - 8))
             y += item_h
         surface.set_clip(clip)
+
+    def _network_pane_rects(self):
+        """Return (left_pane_rect, right_pane_rect) for the dual-pane view."""
+        content_top = 44 + self._toolbar_h + 4
+        content_bottom = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 4
+        content_left = self._sidebar_w + 4
+        content_right = theme.SCREEN_WIDTH - 4
+        pane_w = (content_right - content_left - 100) // 2  # room for 100px center buttons
+        left = pygame.Rect(content_left, content_top, pane_w, content_bottom - content_top)
+        right = pygame.Rect(content_right - pane_w, content_top, pane_w, content_bottom - content_top)
+        return left, right
+
+    def _draw_network_panes(self, surface, f_med, f_small, f_tiny):
+        """Dual-pane file transfer between local and peer Compa."""
+        left, right = self._network_pane_rects()
+        item_h = 28
+        header_h = 28
+
+        # Status bar (above panes)
+        if self._net_status:
+            surf = f_small.render(self._net_status, True, theme.ACCENT)
+            surface.blit(surf, (left.x, left.y - 18))
+
+        # ── LEFT PANE: This Compa ──────────────────────────────────
+        pygame.draw.rect(surface, theme.BG_PANEL, left, border_radius=6)
+        pygame.draw.rect(surface, self._device_color_for_self(), left, 2, border_radius=6)
+
+        import socket
+        my_name = socket.gethostname()
+        surf = f_med.render(f"THIS ({my_name})", True, self._device_color_for_self())
+        surface.blit(surf, (left.x + 10, left.y + 6))
+        surf = f_tiny.render(f"{len(self._net_local_files)} files", True, theme.TEXT_DIM)
+        surface.blit(surf, (left.x + 10, left.y + header_h))
+
+        list_rect = pygame.Rect(left.x + 4, left.y + header_h + 20, left.width - 8,
+                                 left.height - header_h - 24)
+        clip = surface.get_clip()
+        surface.set_clip(list_rect)
+        y = list_rect.y - self._net_local_scroll
+        for i, f in enumerate(self._net_local_files):
+            row = pygame.Rect(list_rect.x, y, list_rect.width, item_h)
+            if row.bottom >= list_rect.y and row.y <= list_rect.bottom:
+                selected = f["name"] in self._net_local_selected
+                bg = (60, 90, 140) if selected else ((20, 20, 28) if i % 2 == 0 else (15, 15, 22))
+                pygame.draw.rect(surface, bg, row)
+                name = f["name"]
+                if len(name) > 38:
+                    name = name[:35] + "..."
+                txt_color = theme.TEXT_BRIGHT if selected else theme.TEXT
+                surf = f_tiny.render(name, True, txt_color)
+                surface.blit(surf, (row.x + 6, row.y + 8))
+                size_kb = f["size"] / 1024
+                size_str = f"{size_kb:.0f}K" if size_kb < 1024 else f"{size_kb / 1024:.1f}M"
+                surf = f_tiny.render(size_str, True, theme.TEXT_DIM)
+                surface.blit(surf, surf.get_rect(top=row.y + 8, right=row.right - 6))
+            y += item_h
+        surface.set_clip(clip)
+
+        # ── CENTER: Transfer buttons ───────────────────────────────
+        center_x = left.right + 8
+        center_w = right.x - center_x - 8
+        btn_h = 50
+
+        has_peer = self._net_selected_peer is not None
+
+        # Send right (local → peer)
+        send_r_rect = pygame.Rect(center_x, left.centery - btn_h - 12, center_w, btn_h)
+        can_send_r = bool(self._net_local_selected) and has_peer
+        bg = theme.ACCENT if can_send_r else theme.BUTTON_BG
+        pygame.draw.rect(surface, bg, send_r_rect, border_radius=8)
+        surf = f_tiny.render("SEND >>", True, theme.BG if can_send_r else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=send_r_rect.center))
+
+        # Pull left (peer → local)
+        pull_l_rect = pygame.Rect(center_x, left.centery + 12, center_w, btn_h)
+        can_pull = bool(self._net_peer_selected) and has_peer
+        bg = theme.BLUE if can_pull else theme.BUTTON_BG
+        pygame.draw.rect(surface, bg, pull_l_rect, border_radius=8)
+        surf = f_tiny.render("<< PULL", True, theme.BG if can_pull else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=pull_l_rect.center))
+
+        # ── RIGHT PANE: Peer Compa ─────────────────────────────────
+        pygame.draw.rect(surface, theme.BG_PANEL, right, border_radius=6)
+        pygame.draw.rect(surface, theme.BLUE if has_peer else theme.BORDER, right, 2, border_radius=6)
+
+        if has_peer:
+            peer_name = self._net_selected_peer["name"]
+            surf = f_med.render(f"PEER ({peer_name})", True, theme.BLUE)
+            surface.blit(surf, (right.x + 10, right.y + 6))
+            surf = f_tiny.render(f"{len(self._net_peer_files)} files · {self._net_selected_peer['ip']}",
+                                 True, theme.TEXT_DIM)
+            surface.blit(surf, (right.x + 10, right.y + header_h))
+
+            rlist_rect = pygame.Rect(right.x + 4, right.y + header_h + 20, right.width - 8,
+                                     right.height - header_h - 24)
+            surface.set_clip(rlist_rect)
+            y = rlist_rect.y - self._net_peer_scroll
+            for i, f in enumerate(self._net_peer_files):
+                row = pygame.Rect(rlist_rect.x, y, rlist_rect.width, item_h)
+                if row.bottom >= rlist_rect.y and row.y <= rlist_rect.bottom:
+                    selected = f["name"] in self._net_peer_selected
+                    bg = (60, 90, 140) if selected else ((20, 20, 28) if i % 2 == 0 else (15, 15, 22))
+                    pygame.draw.rect(surface, bg, row)
+                    name = f["name"]
+                    if len(name) > 38:
+                        name = name[:35] + "..."
+                    txt_color = theme.TEXT_BRIGHT if selected else theme.TEXT
+                    surf = f_tiny.render(name, True, txt_color)
+                    surface.blit(surf, (row.x + 6, row.y + 8))
+                    size_kb = f["size"] / 1024
+                    size_str = f"{size_kb:.0f}K" if size_kb < 1024 else f"{size_kb / 1024:.1f}M"
+                    surf = f_tiny.render(size_str, True, theme.TEXT_DIM)
+                    surface.blit(surf, surf.get_rect(top=row.y + 8, right=row.right - 6))
+                y += item_h
+            surface.set_clip(clip)
+        else:
+            msg = "No peer selected" if not hasattr(self.app, 'compa_browser') or not self.app.compa_browser.peers else "Tap a peer button below"
+            surf = f_small.render(msg, True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=right.center))
+
+        # Peer selector buttons (bottom of right pane)
+        if hasattr(self.app, 'compa_browser'):
+            peers = self.app.compa_browser.peers
+            if peers:
+                peer_btn_y = right.bottom + 4
+                pbw = 90
+                for i, peer in enumerate(peers):
+                    r = pygame.Rect(right.x + i * (pbw + 4), peer_btn_y, pbw, 20)
+                    active = self._net_selected_peer and self._net_selected_peer["name"] == peer["name"]
+                    bg = theme.BLUE if active else theme.BUTTON_BG
+                    pygame.draw.rect(surface, bg, r, border_radius=4)
+                    tc = theme.BG if active else theme.TEXT
+                    surf = f_tiny.render(peer["name"][:10], True, tc)
+                    surface.blit(surf, surf.get_rect(center=r.center))
+
+    def _device_color_for_self(self) -> tuple:
+        return theme.ACCENT
 
     def _draw_progress_overlay(self, surface, f_med, f_small):
         """Centered progress modal during transfers."""
@@ -485,6 +691,114 @@ class FileBrowserScreen:
             self._action_msg = f"Pulled {ok} files from {peer['name']}"
             self._action_flash = 120
 
+        threading.Thread(target=_pull, daemon=True).start()
+
+    def _handle_network_clicks(self, mx, my):
+        """Handle clicks in the dual-pane network transfer view."""
+        left, right = self._network_pane_rects()
+        item_h = 28
+        header_h = 28
+
+        # Peer selector buttons (bottom of right pane)
+        if hasattr(self.app, 'compa_browser'):
+            peers = self.app.compa_browser.peers
+            if peers:
+                peer_btn_y = right.bottom + 4
+                pbw = 90
+                for i, peer in enumerate(peers):
+                    r = pygame.Rect(right.x + i * (pbw + 4), peer_btn_y, pbw, 20)
+                    if r.collidepoint(mx, my):
+                        self._net_selected_peer = peer
+                        self._net_peer_selected.clear()
+                        self._load_network_peer()
+                        return
+
+        # Transfer buttons
+        center_x = left.right + 8
+        center_w = right.x - center_x - 8
+        btn_h = 50
+
+        send_r_rect = pygame.Rect(center_x, left.centery - btn_h - 12, center_w, btn_h)
+        if send_r_rect.collidepoint(mx, my):
+            self._send_selected_to_peer()
+            return
+
+        pull_l_rect = pygame.Rect(center_x, left.centery + 12, center_w, btn_h)
+        if pull_l_rect.collidepoint(mx, my):
+            self._pull_selected_from_peer()
+            return
+
+        # Left pane — toggle local file selection
+        list_rect = pygame.Rect(left.x + 4, left.y + header_h + 20, left.width - 8,
+                                 left.height - header_h - 24)
+        if list_rect.collidepoint(mx, my):
+            idx = (my - list_rect.y + self._net_local_scroll) // item_h
+            if 0 <= idx < len(self._net_local_files):
+                name = self._net_local_files[idx]["name"]
+                if name in self._net_local_selected:
+                    self._net_local_selected.discard(name)
+                else:
+                    self._net_local_selected.add(name)
+            return
+
+        # Right pane — toggle peer file selection
+        if self._net_selected_peer:
+            rlist_rect = pygame.Rect(right.x + 4, right.y + header_h + 20, right.width - 8,
+                                     right.height - header_h - 24)
+            if rlist_rect.collidepoint(mx, my):
+                idx = (my - rlist_rect.y + self._net_peer_scroll) // item_h
+                if 0 <= idx < len(self._net_peer_files):
+                    name = self._net_peer_files[idx]["name"]
+                    if name in self._net_peer_selected:
+                        self._net_peer_selected.discard(name)
+                    else:
+                        self._net_peer_selected.add(name)
+                return
+
+    def _send_selected_to_peer(self):
+        """Send locally-selected files to the peer via HTTP upload.
+
+        Requires a server-side upload endpoint. For now, shows a message
+        that this direction requires the peer to pull.
+        """
+        self._net_status = "Send requires upload endpoint (use PULL from peer instead)"
+
+    def _pull_selected_from_peer(self):
+        """Pull selected files from the peer to local."""
+        if not self._net_selected_peer or not self._net_peer_selected:
+            self._net_status = "No files selected on peer"
+            return
+        from engine.compa_link import download_peer_file
+        peer = self._net_selected_peer
+        files = [f for f in self._net_peer_files if f["name"] in self._net_peer_selected]
+        local_dir = self.app.config.get("P6_RECORDING_DIR")
+
+        def _pull():
+            self._transfer_active = True
+            total = len(files)
+            ok = 0
+            for i, f in enumerate(files):
+                self._transfer_msg = f"[{i+1}/{total}] {f['name'][:30]}"
+                self._transfer_progress = i / total
+                try:
+                    path = download_peer_file(peer, "recordings", f["name"], local_dir)
+                    if path:
+                        ok += 1
+                        # Also fetch metadata sidecar
+                        download_peer_file(peer, "recordings", f["name"] + ".meta.json",
+                                           local_dir, timeout=5)
+                except Exception as e:
+                    print(f"  {f['name']}: {e}", flush=True)
+            self._transfer_progress = 1.0
+            self._transfer_msg = f"Done — {ok}/{total} files"
+            import time
+            time.sleep(1.5)
+            self._transfer_active = False
+            self._net_peer_selected.clear()
+            self._load_network_local()  # refresh local list
+            self._net_status = f"Pulled {ok} files from {peer['name']}"
+
+        import threading
         threading.Thread(target=_pull, daemon=True).start()
 
     def _flash(self, msg: str):
