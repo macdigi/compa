@@ -53,13 +53,22 @@ class FileBrowserScreen:
 
         # Network dual-pane state
         self._net_selected_peer: dict | None = None
-        self._net_local_files: list[dict] = []
+        self._net_local_files: list[dict] = []  # entries with name, type, size
         self._net_peer_files: list[dict] = []
         self._net_local_selected: set[str] = set()
         self._net_peer_selected: set[str] = set()
         self._net_local_scroll = 0
         self._net_peer_scroll = 0
         self._net_status = ""
+        # Current subpath (relative to recordings/) for each pane
+        self._net_local_path = ""
+        self._net_peer_path = ""
+
+        # Touch drag scroll tracking
+        self._drag_pane: str | None = None  # "local" or "peer"
+        self._drag_start_y = 0
+        self._drag_start_scroll = 0
+        self._drag_moved = False
 
         self._build_browser()
 
@@ -106,40 +115,67 @@ class FileBrowserScreen:
         else:
             self._build_browser()
 
+    def _net_local_root(self) -> str:
+        return self.app.config.get("P6_RECORDING_DIR",
+                                    os.path.join(PROJECT_ROOT, "recordings"))
+
+    def _net_local_abs_path(self) -> str:
+        root = self._net_local_root()
+        return os.path.normpath(os.path.join(root, self._net_local_path))
+
     def _load_network_local(self):
-        """Load local recordings for the network dual-pane left side."""
-        local_dir = self.app.config.get("P6_RECORDING_DIR")
-        files = []
-        if local_dir and os.path.isdir(local_dir):
-            for fn in sorted(os.listdir(local_dir)):
+        """Load entries (folders + files) from the current local subpath."""
+        abs_path = self._net_local_abs_path()
+        entries = []
+        if os.path.isdir(abs_path):
+            # Parent nav entry
+            if self._net_local_path:
+                entries.append({"name": "..", "type": "parent", "size": 0})
+            dirs, files = [], []
+            for fn in sorted(os.listdir(abs_path)):
                 if fn.startswith(".") or fn.endswith(".meta.json"):
                     continue
-                fp = os.path.join(local_dir, fn)
-                if os.path.isfile(fp):
+                fp = os.path.join(abs_path, fn)
+                if os.path.isdir(fp):
+                    dirs.append({"name": fn, "type": "dir", "size": 0})
+                elif os.path.isfile(fp):
                     files.append({
-                        "name": fn,
+                        "name": fn, "type": "file",
                         "size": os.path.getsize(fp),
-                        "path": fp,
                     })
-        self._net_local_files = files
+            entries.extend(dirs)
+            entries.extend(files)
+        self._net_local_files = entries
         self._net_local_selected.clear()
         self._net_local_scroll = 0
 
     def _load_network_peer(self):
-        """Load peer files in the background for the network right pane."""
+        """Load entries from the peer's current subpath."""
         if not self._net_selected_peer:
             return
         from engine.compa_link import list_peer_files
         peer = self._net_selected_peer
+        subpath = self._net_peer_path
 
         def _load():
             try:
                 self._net_status = f"Connecting to {peer['name']}..."
-                files = list_peer_files(peer, "recordings")
-                self._net_peer_files = [f for f in files
-                                        if not f["name"].startswith(".")
-                                        and not f["name"].endswith(".meta.json")]
-                self._net_status = f"Connected — {len(self._net_peer_files)} files"
+                files = list_peer_files(peer, "recordings", subpath)
+                entries = [f for f in files
+                           if not f["name"].startswith(".")
+                           and not f["name"].endswith(".meta.json")]
+                # Sort: parent first, then dirs, then files
+                dirs = [e for e in entries if e.get("type") == "dir"]
+                regular = [e for e in entries if e.get("type") != "dir"]
+                result = []
+                if subpath:
+                    result.append({"name": "..", "type": "parent", "size": 0})
+                result.extend(dirs)
+                result.extend(regular)
+                self._net_peer_files = result
+                self._net_peer_selected.clear()
+                self._net_peer_scroll = 0
+                self._net_status = f"Connected — {len(entries)} items"
             except Exception as e:
                 self._net_status = f"Connection failed: {e}"
 
@@ -178,6 +214,55 @@ class FileBrowserScreen:
         )
 
     def handle_event(self, event):
+        # ── Mouse wheel scroll on network panes ──────────────────────
+        if (self._current_loc == "network" and event.type == pygame.MOUSEBUTTONDOWN
+                and event.button in (4, 5)):
+            left, right = self._network_pane_rects()
+            mx, my = event.pos
+            delta = -30 if event.button == 4 else 30
+            if left.collidepoint(mx, my):
+                self._net_local_scroll = max(0, self._net_local_scroll + delta)
+            elif right.collidepoint(mx, my):
+                self._net_peer_scroll = max(0, self._net_peer_scroll + delta)
+            return
+
+        # ── Touch drag scroll vs tap (network panes) ─────────────────
+        if self._current_loc == "network":
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                left, right = self._network_pane_rects()
+                mx, my = event.pos
+                if left.collidepoint(mx, my):
+                    self._drag_pane = "local"
+                    self._drag_start_y = my
+                    self._drag_start_scroll = self._net_local_scroll
+                    self._drag_moved = False
+                    return  # wait for MOUSEBUTTONUP to decide tap vs drag
+                elif right.collidepoint(mx, my):
+                    self._drag_pane = "peer"
+                    self._drag_start_y = my
+                    self._drag_start_scroll = self._net_peer_scroll
+                    self._drag_moved = False
+                    return
+                # Fall through — not on a list pane (could be buttons/sidebar)
+
+            elif event.type == pygame.MOUSEMOTION and self._drag_pane is not None:
+                dy = event.pos[1] - self._drag_start_y
+                if abs(dy) > 6:
+                    self._drag_moved = True
+                if self._drag_pane == "local":
+                    self._net_local_scroll = max(0, self._drag_start_scroll - dy)
+                else:
+                    self._net_peer_scroll = max(0, self._drag_start_scroll - dy)
+                return
+
+            elif event.type == pygame.MOUSEBUTTONUP and self._drag_pane is not None:
+                # Tap (no drag) → toggle file selection at this position
+                if not self._drag_moved:
+                    self._handle_network_tap(event.pos[0], event.pos[1])
+                self._drag_pane = None
+                self._drag_moved = False
+                return
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
@@ -188,7 +273,7 @@ class FileBrowserScreen:
                     self._switch_location(key)
                     return
 
-            # Network pane clicks
+            # Network non-list clicks (buttons, peer selectors)
             if self._current_loc == "network":
                 self._handle_network_clicks(mx, my)
                 return
@@ -445,7 +530,14 @@ class FileBrowserScreen:
         my_name = socket.gethostname()
         surf = f_med.render(f"THIS ({my_name})", True, self._device_color_for_self())
         surface.blit(surf, (left.x + 10, left.y + 6))
-        surf = f_tiny.render(f"{len(self._net_local_files)} files", True, theme.TEXT_DIM)
+        # Current path breadcrumb + count
+        crumb = "/" + self._net_local_path if self._net_local_path else "/"
+        if len(crumb) > 40:
+            crumb = "..." + crumb[-37:]
+        file_count = sum(1 for e in self._net_local_files if e.get("type") == "file")
+        dir_count = sum(1 for e in self._net_local_files if e.get("type") == "dir")
+        surf = f_tiny.render(f"{crumb}  ·  {dir_count}d {file_count}f",
+                             True, theme.TEXT_DIM)
         surface.blit(surf, (left.x + 10, left.y + header_h))
 
         list_rect = pygame.Rect(left.x + 4, left.y + header_h + 20, left.width - 8,
@@ -456,44 +548,66 @@ class FileBrowserScreen:
         for i, f in enumerate(self._net_local_files):
             row = pygame.Rect(list_rect.x, y, list_rect.width, item_h)
             if row.bottom >= list_rect.y and row.y <= list_rect.bottom:
-                selected = f["name"] in self._net_local_selected
+                is_dir = f.get("type") == "dir"
+                is_parent = f.get("type") == "parent"
+                selected = f["name"] in self._net_local_selected and not (is_dir or is_parent)
                 bg = (60, 90, 140) if selected else ((20, 20, 28) if i % 2 == 0 else (15, 15, 22))
                 pygame.draw.rect(surface, bg, row)
-                name = f["name"]
-                if len(name) > 38:
-                    name = name[:35] + "..."
-                txt_color = theme.TEXT_BRIGHT if selected else theme.TEXT
-                surf = f_tiny.render(name, True, txt_color)
-                surface.blit(surf, (row.x + 6, row.y + 8))
-                size_kb = f["size"] / 1024
-                size_str = f"{size_kb:.0f}K" if size_kb < 1024 else f"{size_kb / 1024:.1f}M"
-                surf = f_tiny.render(size_str, True, theme.TEXT_DIM)
-                surface.blit(surf, surf.get_rect(top=row.y + 8, right=row.right - 6))
+                # Icon prefix
+                if is_parent:
+                    icon, name_prefix = "^", ".."
+                elif is_dir:
+                    icon, name_prefix = "D", f["name"] + "/"
+                else:
+                    icon, name_prefix = " ", f["name"]
+                name = name_prefix
+                if len(name) > 36:
+                    name = name[:33] + "..."
+                txt_color = theme.TEXT_BRIGHT if selected else (
+                    theme.ACCENT if (is_dir or is_parent) else theme.TEXT)
+                if is_dir:
+                    icon_surf = f_tiny.render("[D]", True, theme.ACCENT)
+                    surface.blit(icon_surf, (row.x + 4, row.y + 8))
+                    surf = f_tiny.render(name, True, txt_color)
+                    surface.blit(surf, (row.x + 26, row.y + 8))
+                elif is_parent:
+                    icon_surf = f_tiny.render("^", True, theme.ACCENT)
+                    surface.blit(icon_surf, (row.x + 8, row.y + 8))
+                    surf = f_tiny.render(name, True, txt_color)
+                    surface.blit(surf, (row.x + 26, row.y + 8))
+                else:
+                    surf = f_tiny.render(name, True, txt_color)
+                    surface.blit(surf, (row.x + 6, row.y + 8))
+                    size_kb = f["size"] / 1024
+                    size_str = f"{size_kb:.0f}K" if size_kb < 1024 else f"{size_kb / 1024:.1f}M"
+                    surf = f_tiny.render(size_str, True, theme.TEXT_DIM)
+                    surface.blit(surf, surf.get_rect(top=row.y + 8, right=row.right - 6))
             y += item_h
         surface.set_clip(clip)
 
         # ── CENTER: Transfer buttons ───────────────────────────────
         center_x = left.right + 8
         center_w = right.x - center_x - 8
-        btn_h = 50
+        btn_h = 42
 
         has_peer = self._net_selected_peer is not None
 
-        # Send right (local → peer)
-        send_r_rect = pygame.Rect(center_x, left.centery - btn_h - 12, center_w, btn_h)
-        can_send_r = bool(self._net_local_selected) and has_peer
-        bg = theme.ACCENT if can_send_r else theme.BUTTON_BG
-        pygame.draw.rect(surface, bg, send_r_rect, border_radius=8)
-        surf = f_tiny.render("SEND >>", True, theme.BG if can_send_r else theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(center=send_r_rect.center))
-
-        # Pull left (peer → local)
-        pull_l_rect = pygame.Rect(center_x, left.centery + 12, center_w, btn_h)
-        can_pull = bool(self._net_peer_selected) and has_peer
-        bg = theme.BLUE if can_pull else theme.BUTTON_BG
-        pygame.draw.rect(surface, bg, pull_l_rect, border_radius=8)
-        surf = f_tiny.render("<< PULL", True, theme.BG if can_pull else theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(center=pull_l_rect.center))
+        # Stacked: SEND | PULL | NEW DIR (local) | NEW DIR (peer)
+        btn_cy = left.centery
+        buttons_cfg = [
+            ("send", "SEND >>", btn_cy - btn_h * 2 - 16, theme.ACCENT,
+             bool(self._net_local_selected) and has_peer),
+            ("pull", "<< PULL", btn_cy - btn_h - 8, theme.BLUE,
+             bool(self._net_peer_selected) and has_peer),
+            ("mkdir_local", "+DIR (L)", btn_cy + 8, theme.ACCENT_DIM, True),
+            ("mkdir_peer", "+DIR (R)", btn_cy + btn_h + 16, theme.ACCENT_DIM, has_peer),
+        ]
+        for key, label, btn_y, color, enabled in buttons_cfg:
+            r = pygame.Rect(center_x, btn_y, center_w, btn_h)
+            bg = color if enabled else theme.BUTTON_BG
+            pygame.draw.rect(surface, bg, r, border_radius=8)
+            surf = f_tiny.render(label, True, theme.BG if enabled else theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=r.center))
 
         # ── RIGHT PANE: Peer Compa ─────────────────────────────────
         pygame.draw.rect(surface, theme.BG_PANEL, right, border_radius=6)
@@ -503,7 +617,12 @@ class FileBrowserScreen:
             peer_name = self._net_selected_peer["name"]
             surf = f_med.render(f"PEER ({peer_name})", True, theme.BLUE)
             surface.blit(surf, (right.x + 10, right.y + 6))
-            surf = f_tiny.render(f"{len(self._net_peer_files)} files · {self._net_selected_peer['ip']}",
+            crumb = "/" + self._net_peer_path if self._net_peer_path else "/"
+            if len(crumb) > 30:
+                crumb = "..." + crumb[-27:]
+            file_count = sum(1 for e in self._net_peer_files if e.get("type") == "file")
+            dir_count = sum(1 for e in self._net_peer_files if e.get("type") == "dir")
+            surf = f_tiny.render(f"{crumb}  ·  {dir_count}d {file_count}f",
                                  True, theme.TEXT_DIM)
             surface.blit(surf, (right.x + 10, right.y + header_h))
 
@@ -514,19 +633,35 @@ class FileBrowserScreen:
             for i, f in enumerate(self._net_peer_files):
                 row = pygame.Rect(rlist_rect.x, y, rlist_rect.width, item_h)
                 if row.bottom >= rlist_rect.y and row.y <= rlist_rect.bottom:
-                    selected = f["name"] in self._net_peer_selected
+                    is_dir = f.get("type") == "dir"
+                    is_parent = f.get("type") == "parent"
+                    selected = f["name"] in self._net_peer_selected and not (is_dir or is_parent)
                     bg = (60, 90, 140) if selected else ((20, 20, 28) if i % 2 == 0 else (15, 15, 22))
                     pygame.draw.rect(surface, bg, row)
-                    name = f["name"]
-                    if len(name) > 38:
-                        name = name[:35] + "..."
-                    txt_color = theme.TEXT_BRIGHT if selected else theme.TEXT
-                    surf = f_tiny.render(name, True, txt_color)
-                    surface.blit(surf, (row.x + 6, row.y + 8))
-                    size_kb = f["size"] / 1024
-                    size_str = f"{size_kb:.0f}K" if size_kb < 1024 else f"{size_kb / 1024:.1f}M"
-                    surf = f_tiny.render(size_str, True, theme.TEXT_DIM)
-                    surface.blit(surf, surf.get_rect(top=row.y + 8, right=row.right - 6))
+                    if is_dir:
+                        icon_surf = f_tiny.render("[D]", True, theme.BLUE)
+                        surface.blit(icon_surf, (row.x + 4, row.y + 8))
+                        name = f["name"] + "/"
+                        if len(name) > 34:
+                            name = name[:31] + "..."
+                        surf = f_tiny.render(name, True, theme.BLUE)
+                        surface.blit(surf, (row.x + 26, row.y + 8))
+                    elif is_parent:
+                        icon_surf = f_tiny.render("^", True, theme.BLUE)
+                        surface.blit(icon_surf, (row.x + 8, row.y + 8))
+                        surf = f_tiny.render("..", True, theme.BLUE)
+                        surface.blit(surf, (row.x + 26, row.y + 8))
+                    else:
+                        name = f["name"]
+                        if len(name) > 38:
+                            name = name[:35] + "..."
+                        txt_color = theme.TEXT_BRIGHT if selected else theme.TEXT
+                        surf = f_tiny.render(name, True, txt_color)
+                        surface.blit(surf, (row.x + 6, row.y + 8))
+                        size_kb = f["size"] / 1024
+                        size_str = f"{size_kb:.0f}K" if size_kb < 1024 else f"{size_kb / 1024:.1f}M"
+                        surf = f_tiny.render(size_str, True, theme.TEXT_DIM)
+                        surface.blit(surf, surf.get_rect(top=row.y + 8, right=row.right - 6))
                 y += item_h
             surface.set_clip(clip)
         else:
@@ -694,10 +829,8 @@ class FileBrowserScreen:
         threading.Thread(target=_pull, daemon=True).start()
 
     def _handle_network_clicks(self, mx, my):
-        """Handle clicks in the dual-pane network transfer view."""
+        """Handle non-list clicks (buttons, peer selectors) in network view."""
         left, right = self._network_pane_rects()
-        item_h = 28
-        header_h = 28
 
         # Peer selector buttons (bottom of right pane)
         if hasattr(self.app, 'compa_browser'):
@@ -713,47 +846,112 @@ class FileBrowserScreen:
                         self._load_network_peer()
                         return
 
-        # Transfer buttons
+        # Transfer + mkdir buttons (match draw layout)
         center_x = left.right + 8
         center_w = right.x - center_x - 8
-        btn_h = 50
+        btn_h = 42
+        btn_cy = left.centery
 
-        send_r_rect = pygame.Rect(center_x, left.centery - btn_h - 12, center_w, btn_h)
-        if send_r_rect.collidepoint(mx, my):
-            self._send_selected_to_peer()
-            return
+        mappings = [
+            (btn_cy - btn_h * 2 - 16, self._send_selected_to_peer),
+            (btn_cy - btn_h - 8, self._pull_selected_from_peer),
+            (btn_cy + 8, self._create_local_folder),
+            (btn_cy + btn_h + 16, self._create_peer_folder),
+        ]
+        for btn_y, action in mappings:
+            r = pygame.Rect(center_x, btn_y, center_w, btn_h)
+            if r.collidepoint(mx, my):
+                action()
+                return
 
-        pull_l_rect = pygame.Rect(center_x, left.centery + 12, center_w, btn_h)
-        if pull_l_rect.collidepoint(mx, my):
-            self._pull_selected_from_peer()
-            return
+    def _handle_network_tap(self, mx, my):
+        """Handle a tap (not drag) on a list pane.
 
-        # Left pane — toggle local file selection
+        Folders/parent nav → navigate. Files → toggle selection.
+        """
+        left, right = self._network_pane_rects()
+        item_h = 28
+        header_h = 28
+
         list_rect = pygame.Rect(left.x + 4, left.y + header_h + 20, left.width - 8,
                                  left.height - header_h - 24)
         if list_rect.collidepoint(mx, my):
             idx = (my - list_rect.y + self._net_local_scroll) // item_h
             if 0 <= idx < len(self._net_local_files):
-                name = self._net_local_files[idx]["name"]
-                if name in self._net_local_selected:
-                    self._net_local_selected.discard(name)
+                entry = self._net_local_files[idx]
+                if entry["type"] == "parent":
+                    self._net_local_path = os.path.dirname(self._net_local_path).strip("/")
+                    self._load_network_local()
+                elif entry["type"] == "dir":
+                    self._net_local_path = (self._net_local_path + "/" + entry["name"]).strip("/")
+                    self._load_network_local()
                 else:
-                    self._net_local_selected.add(name)
+                    # File — toggle selection
+                    name = entry["name"]
+                    if name in self._net_local_selected:
+                        self._net_local_selected.discard(name)
+                    else:
+                        self._net_local_selected.add(name)
             return
 
-        # Right pane — toggle peer file selection
         if self._net_selected_peer:
             rlist_rect = pygame.Rect(right.x + 4, right.y + header_h + 20, right.width - 8,
                                      right.height - header_h - 24)
             if rlist_rect.collidepoint(mx, my):
                 idx = (my - rlist_rect.y + self._net_peer_scroll) // item_h
                 if 0 <= idx < len(self._net_peer_files):
-                    name = self._net_peer_files[idx]["name"]
-                    if name in self._net_peer_selected:
-                        self._net_peer_selected.discard(name)
+                    entry = self._net_peer_files[idx]
+                    if entry["type"] == "parent":
+                        self._net_peer_path = os.path.dirname(self._net_peer_path).strip("/")
+                        self._load_network_peer()
+                    elif entry["type"] == "dir":
+                        self._net_peer_path = (self._net_peer_path + "/" + entry["name"]).strip("/")
+                        self._load_network_peer()
                     else:
-                        self._net_peer_selected.add(name)
+                        name = entry["name"]
+                        if name in self._net_peer_selected:
+                            self._net_peer_selected.discard(name)
+                        else:
+                            self._net_peer_selected.add(name)
                 return
+
+    def _create_local_folder(self):
+        """Create a new folder in the current local subpath."""
+        from datetime import datetime
+        name = f"folder_{datetime.now().strftime('%H%M%S')}"
+        target = os.path.join(self._net_local_abs_path(), name)
+        try:
+            os.makedirs(target, exist_ok=False)
+            self._net_status = f"Created local {name}"
+            self._load_network_local()
+        except Exception as e:
+            self._net_status = f"mkdir failed: {e}"
+
+    def _create_peer_folder(self):
+        """Create a new folder on the peer's current subpath via POST."""
+        if not self._net_selected_peer:
+            return
+        from datetime import datetime
+        from urllib.request import Request, urlopen
+        import json as _json
+        peer = self._net_selected_peer
+        name = f"folder_{datetime.now().strftime('%H%M%S')}"
+        rel_path = (self._net_peer_path + "/" + name).strip("/")
+        url = f"http://{peer['ip']}:{peer['port']}/recordings/mkdir"
+        body = _json.dumps({"path": rel_path}).encode()
+
+        def _do():
+            try:
+                req = Request(url, data=body, headers={"Content-Type": "application/json"})
+                with urlopen(req, timeout=5) as resp:
+                    resp.read()
+                self._net_status = f"Created peer {name}"
+                self._load_network_peer()
+            except Exception as e:
+                self._net_status = f"Peer mkdir failed: {e}"
+
+        import threading
+        threading.Thread(target=_do, daemon=True).start()
 
     def _send_selected_to_peer(self):
         """Send locally-selected files to the peer via HTTP upload.
@@ -764,14 +962,17 @@ class FileBrowserScreen:
         self._net_status = "Send requires upload endpoint (use PULL from peer instead)"
 
     def _pull_selected_from_peer(self):
-        """Pull selected files from the peer to local."""
+        """Pull selected files from the peer's current path to local current path."""
         if not self._net_selected_peer or not self._net_peer_selected:
             self._net_status = "No files selected on peer"
             return
         from engine.compa_link import download_peer_file
         peer = self._net_selected_peer
-        files = [f for f in self._net_peer_files if f["name"] in self._net_peer_selected]
-        local_dir = self.app.config.get("P6_RECORDING_DIR")
+        files = [f for f in self._net_peer_files
+                 if f["name"] in self._net_peer_selected and f.get("type") != "dir"]
+        peer_sub = self._net_peer_path
+        local_dest = self._net_local_abs_path()
+        os.makedirs(local_dest, exist_ok=True)
 
         def _pull():
             self._transfer_active = True
@@ -781,12 +982,12 @@ class FileBrowserScreen:
                 self._transfer_msg = f"[{i+1}/{total}] {f['name'][:30]}"
                 self._transfer_progress = i / total
                 try:
-                    path = download_peer_file(peer, "recordings", f["name"], local_dir)
+                    path = download_peer_file(peer, "recordings", f["name"],
+                                              local_dest, subpath=peer_sub)
                     if path:
                         ok += 1
-                        # Also fetch metadata sidecar
                         download_peer_file(peer, "recordings", f["name"] + ".meta.json",
-                                           local_dir, timeout=5)
+                                           local_dest, subpath=peer_sub, timeout=5)
                 except Exception as e:
                     print(f"  {f['name']}: {e}", flush=True)
             self._transfer_progress = 1.0
@@ -795,7 +996,7 @@ class FileBrowserScreen:
             time.sleep(1.5)
             self._transfer_active = False
             self._net_peer_selected.clear()
-            self._load_network_local()  # refresh local list
+            self._load_network_local()
             self._net_status = f"Pulled {ok} files from {peer['name']}"
 
         import threading

@@ -111,29 +111,75 @@ class CompaHandler(BaseHTTPRequestHandler):
 
         base = self.base_dirs[category]
 
-        if not rest:
-            # List files in the directory
+        # Resolve target path (prevent traversal)
+        target = os.path.normpath(os.path.join(base, rest))
+        if not target.startswith(os.path.abspath(base)):
+            self.send_error(403, "Forbidden")
+            return
+
+        # Directory listing (base dir or any subdir)
+        if os.path.isdir(target):
             try:
-                files = []
-                for fn in sorted(os.listdir(base)):
-                    fp = os.path.join(base, fn)
-                    if os.path.isfile(fp):
-                        files.append({
-                            "name": fn,
-                            "size": os.path.getsize(fp),
-                            "mtime": os.path.getmtime(fp),
-                        })
-                self._send_json({"category": category, "files": files})
+                entries = []
+                for fn in sorted(os.listdir(target)):
+                    fp = os.path.join(target, fn)
+                    is_dir = os.path.isdir(fp)
+                    entries.append({
+                        "name": fn,
+                        "type": "dir" if is_dir else "file",
+                        "size": 0 if is_dir else os.path.getsize(fp),
+                        "mtime": os.path.getmtime(fp),
+                    })
+                self._send_json({
+                    "category": category,
+                    "path": rest,
+                    "files": entries,  # kept as "files" for backward compat
+                })
             except Exception as e:
                 self.send_error(500, str(e))
             return
 
-        # Serve a specific file (prevent path traversal)
-        safe = os.path.normpath(os.path.join(base, rest))
-        if not safe.startswith(os.path.abspath(base)):
-            self.send_error(403, "Forbidden")
+        # File serving
+        if os.path.isfile(target):
+            self._send_file(target)
             return
-        self._send_file(safe)
+
+        self.send_error(404, "Not found")
+
+    def do_POST(self):
+        """Accept mkdir requests: POST /{category}/mkdir with path in body."""
+        path = unquote(self.path).lstrip("/")
+        parts = path.split("/", 1)
+        if len(parts) < 2:
+            self.send_error(400, "Bad path")
+            return
+        category, action = parts[0], parts[1]
+        if category not in self.base_dirs:
+            self.send_error(404, "Unknown category")
+            return
+        base = self.base_dirs[category]
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode() if length else ""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            data = {}
+
+        if action == "mkdir":
+            rel = data.get("path", "").strip("/")
+            target = os.path.normpath(os.path.join(base, rel))
+            if not target.startswith(os.path.abspath(base)):
+                self.send_error(403, "Forbidden")
+                return
+            try:
+                os.makedirs(target, exist_ok=True)
+                self._send_json({"ok": True, "path": rel})
+            except Exception as e:
+                self.send_error(500, str(e))
+            return
+
+        self.send_error(404, "Unknown action")
 
 
 class CompaServer:
@@ -283,9 +329,13 @@ class CompaBrowser:
 # ── Client (download files from a peer) ──────────────────────────────
 
 
-def list_peer_files(peer: dict, category: str = "recordings", timeout: float = 5.0) -> list[dict]:
-    """Get a file listing from a peer Compa."""
+def list_peer_files(peer: dict, category: str = "recordings",
+                    subpath: str = "", timeout: float = 5.0) -> list[dict]:
+    """Get a file/dir listing from a peer Compa at the given subpath."""
+    sub = quote(subpath.strip("/")) if subpath else ""
     url = f"http://{peer['ip']}:{peer['port']}/{category}"
+    if sub:
+        url += f"/{sub}"
     try:
         with urlopen(url, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
@@ -296,14 +346,19 @@ def list_peer_files(peer: dict, category: str = "recordings", timeout: float = 5
 
 
 def download_peer_file(peer: dict, category: str, filename: str,
-                       dest_dir: str, timeout: float = 30.0) -> Optional[str]:
+                       dest_dir: str, subpath: str = "",
+                       timeout: float = 30.0) -> Optional[str]:
     """Download a file from a peer to a local directory.
 
     Returns the local path on success, None on failure.
     """
-    # URL-encode the filename to handle spaces and special characters
+    # URL-encode handles spaces and special characters; keep / for nested
+    sub = quote(subpath.strip("/"), safe="/") if subpath else ""
     safe_name = quote(filename)
-    url = f"http://{peer['ip']}:{peer['port']}/{category}/{safe_name}"
+    if sub:
+        url = f"http://{peer['ip']}:{peer['port']}/{category}/{sub}/{safe_name}"
+    else:
+        url = f"http://{peer['ip']}:{peer['port']}/{category}/{safe_name}"
     dest_path = os.path.join(dest_dir, filename)
     try:
         os.makedirs(dest_dir, exist_ok=True)
