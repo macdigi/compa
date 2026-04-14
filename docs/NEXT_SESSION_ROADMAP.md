@@ -1,47 +1,44 @@
 # Next Session Roadmap
 
-## Device Workspace Enhancements
+## Known Issues
+- P-6 does not receive MIDI CC over USB (may need TRS MIDI adapter)
+- Audio playback crashes on sample rate mismatch (recorded at different rate than output)
+- Twister LED yellow color needs calibration (currently shows as minty green)
 
-### 1. Oscilloscope in Workspace
-- Full-width oscilloscope at top of expanded card (like session card but bigger)
-- Shows live audio from that device
-- BPM + transport overlay on the oscilloscope
-- Fills the empty space above the control knobs
+## Compa 2 Setup
+- Compa 2 online at 192.168.4.191 (Pi 3B, 7" 1024x600)
+- Same codebase as Compa 1 (192.168.4.188)
+- Deploy to both: rsync to .188 AND .191
 
-### 2. Midi Fighter Twister Deep Integration
-- **Knob press = load effect**: Each knob press (CC on ch2) loads a specific effect on the active bus
-  - Knob 1 press → Downer
-  - Knob 2 press → Lo-fi
-  - Knob 3 press → Isolator
-  - Knob 4 press → 303 VinylSim
-  - etc. (user-configurable)
-- **Knob turn = main parameter**: While pressed, the knob controls Ctrl 1 of that effect
-- **Release = keep effect or bypass**: Configurable behavior
-- **LED colors**: Each knob lights up with the effect's color when active
-- **Auto-map genius mode**: Detects Twister, maps all 16 knobs intelligently across 2 buses
+## Pending Features
 
-### 3. P-6 Control Buildout
-- Granular engine knobs matching P-6 layout
-- Filter, Envelope, Mixer sections
-- Sample select with pad preview
-- Pattern grid (6 pads visible)
+### 1. P-6 MIDI CC via TRS
+- Test CC control through 3.5mm TRS MIDI jack instead of USB
+- Need USB-to-TRS MIDI adapter
+- Firmware 1.02 confirmed to support CC receive on Auto Ch (15) and Granular Ch (4)
 
-### 4. Empty Space → Useful Content
-- Oscilloscope takes top third
-- Control knobs take middle
-- Bus selector + signal flow at bottom
-- No dead black space
+### 2. Spectra Improvements
+- Color calibration (current palette is guesswork)
+- Hold function doesn't cut audio (SP-404 one-shot limitation)
+- Bank switching is cosmetic only (SP-404 doesn't support via MIDI)
 
-### 5. Control Tab Scoping
-- When in workspace, Control tab is locked to that device
-- No need to switch focus — workspace IS the focus
-- Remove the old Control screen from nav bar? Or keep as fallback
+### 3. Twister Polish
+- LED color calibration (yellow shows as green, red shows as off on some values)
+- Effect assignment persistence (save custom assignments to config)
+- Visual feedback when cycling pages (flash LEDs)
 
-### 6. Single Device Auto-Expand
-- When only one device connected, skip card view
-- Go straight to expanded workspace on boot
+### 4. Recording / Playback
+- Fix sample rate mismatch crash when playing back recordings
+- Add waveform preview for recorded files
+- Playback through connected device (SP-404 or P-6)
 
-## SP-404 Protocol (Ongoing)
+### 5. Settings Expansion
+- Twister effect assignment editor (tap slot to pick from effect list)
+- Spectra button assignment editor
+- Network info display (show IP address on settings screen)
+- Startup delay configuration
+
+### 6. SP-404 Protocol Research
 - Captured handshake bytes: 12 60 e0 05 fe 67 00 6d 33 31 31 03
 - Local cache at ~/SP404 User/ROLAND/SP-404MKII_LOCAL/
 - Need to capture more traffic to understand full protocol
