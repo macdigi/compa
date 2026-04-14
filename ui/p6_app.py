@@ -784,18 +784,63 @@ class P6App:
         if len(self._hud_messages) > 3:
             self._hud_messages.pop(0)
 
+    def _draw_hud(self, surface):
+        """Draw HUD notification overlay — works on any screen."""
+        import time
+        f_small = theme.font("small")
+        now = time.monotonic()
+        hud_lifetime = 2.5
+        msgs = self._hud_messages
+
+        # Prune expired
+        msgs[:] = [(t, c, ts) for t, c, ts in msgs if now - ts < hud_lifetime]
+
+        if not msgs:
+            return
+
+        hud_x = theme.SCREEN_WIDTH - 10
+        hud_y = 46  # Below header
+
+        for text, color, ts in reversed(msgs):
+            age = now - ts
+            alpha = min(1.0, (hud_lifetime - age) / 0.5)
+            if alpha <= 0:
+                continue
+
+            surf = f_small.render(text, True, color)
+            w = surf.get_width() + 16
+            h = 26
+            x = hud_x - w
+            bg = pygame.Surface((w, h), pygame.SRCALPHA)
+            a = int(200 * alpha)
+            bg.fill((10, 10, 18, a))
+            surface.blit(bg, (x, hud_y))
+            bar_color = (*color[:3], a) if len(color) >= 3 else (*color, a)
+            bar = pygame.Surface((3, h), pygame.SRCALPHA)
+            bar.fill(bar_color)
+            surface.blit(bar, (x, hud_y))
+            text_surf = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
+            text_surf.blit(surf, (0, 0))
+            text_surf.set_alpha(int(255 * alpha))
+            surface.blit(text_surf, (x + 8, hud_y + 4))
+
+            hud_y += h + 4
+
     def _on_compa_upload(self, category: str, relpath: str, size: int):
         """Called (on the server thread) when a peer uploads a file to us."""
+        print(f"_on_compa_upload: {category}/{relpath} ({size} bytes)", flush=True)
         if not getattr(self, "notify_uploads", True):
+            print("  notify_uploads disabled", flush=True)
             return
         import os
         name = os.path.basename(relpath)
-        # Ignore metadata sidecars — just show the main file
         if name.endswith(".meta.json"):
+            print(f"  skipping sidecar {name}", flush=True)
             return
         kb = size / 1024
         size_str = f"{kb:.0f} KB" if kb < 1024 else f"{kb / 1024:.1f} MB"
         msg = f"Received: {name[:28]} ({size_str})"
+        print(f"  pushing HUD: {msg}", flush=True)
         self.push_hud(msg, theme.BLUE)
 
     def _on_twister_state(self):
@@ -1488,6 +1533,8 @@ class P6App:
         self.screen.fill(theme.BG)
         self.current_screen.draw(self.screen)
         self._draw_nav()
+        # HUD overlay — visible on ALL screens
+        self._draw_hud(self.screen)
         # Audio player overlays everything when visible
         if getattr(self, 'audio_player', None) and self.audio_player.visible:
             self.audio_player.draw(self.screen)
