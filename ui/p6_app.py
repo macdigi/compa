@@ -25,6 +25,7 @@ from ui.screens.p6_radio_screen import P6RadioScreen
 from ui.screens.p6_settings_screen import P6SettingsScreen
 from ui.screens.kit_builder_screen import KitBuilderScreen
 from ui.screens.transfer_screen import TransferScreen
+from ui.screens.file_browser_screen import FileBrowserScreen
 from ui.screens.device_workspace import DeviceWorkspaceScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
@@ -36,6 +37,7 @@ from engine.midi_lfo import MidiLFO
 from engine.midi_mapper import MidiMapper
 from engine.twister_genius import TwisterGenius
 from engine.spectra_mapper import SpectraMapper
+from engine.compa_link import CompaServer, CompaBrowser
 from engine.usb_storage import AkaiStorageManager
 from ui.splash import run_splash
 from ui.wizard import run_wizard
@@ -246,6 +248,19 @@ class P6App:
         # ── Spectra Mapper (auto-detect + connect) ───────────────────
         self.spectra = SpectraMapper()
 
+        # ── Compa-to-Compa network link ──────────────────────────────
+        recordings_dir = self.config.get("P6_RECORDING_DIR",
+                                          os.path.join(PROJECT_ROOT, "recordings"))
+        samples_dir = os.path.join(PROJECT_ROOT, "samples")
+        kits_dir = os.path.join(PROJECT_ROOT, "kits")
+        self.compa_server = CompaServer(recordings_dir, samples_dir, kits_dir)
+        self.compa_browser = CompaBrowser()
+        try:
+            self.compa_server.start()
+            self.compa_browser.start()
+        except Exception as e:
+            print(f"Compa link init failed: {e}", flush=True)
+
         # ── Live CC state (for workspace parameter tracking + HUD) ───
         # Per-bus dict of {cc: value} updated by incoming SP-404 MIDI
         self.live_cc: dict[int, dict[int, int]] = {i: {} for i in range(16)}
@@ -277,6 +292,7 @@ class P6App:
             "kit": KitBuilderScreen(self),
             "transfer": TransferScreen(self),
             "device_workspace": DeviceWorkspaceScreen(self),
+            "files": FileBrowserScreen(self),
         }
         self.current_screen_name = "session"
 
@@ -285,27 +301,33 @@ class P6App:
         if theme.SCREEN_WIDTH >= 700:
             # Wide screen: full labels
             nav_labels = [
-                ("SESSION", "session"), ("CONTROL", "control"),
-                ("PATTERN", "pattern"), ("RECORD",  "record"),
-                ("SAMPLE",  "sample"),  ("RADIO",   "radio"),
+                ("SESSION", "session"),
+                ("RECORD",  "record"),
+                ("SAMPLE",  "sample"),
+                ("RADIO",   "radio"),
+                ("FILES",   "files"),
                 ("XFER",    "transfer"),
             ]
             font_name = "small"
         elif theme.SCREEN_WIDTH >= 400:
             # Medium screen: short labels
             nav_labels = [
-                ("SES", "session"), ("CTL", "control"),
-                ("PAT", "pattern"), ("REC", "record"),
-                ("SMP", "sample"),  ("RAD", "radio"),
+                ("SES", "session"),
+                ("REC", "record"),
+                ("SMP", "sample"),
+                ("RAD", "radio"),
+                ("FIL", "files"),
                 ("XFR", "transfer"),
             ]
             font_name = "tiny"
         else:
             # Tiny screen: icons/minimal
             nav_labels = [
-                ("S", "session"), ("C", "control"),
-                ("P", "pattern"), ("R", "record"),
-                ("F", "sample"),  ("~", "radio"),
+                ("S", "session"),
+                ("R", "record"),
+                ("F", "sample"),
+                ("~", "radio"),
+                ("FB", "files"),
                 ("X", "transfer"),
             ]
             font_name = "tiny"
@@ -391,8 +413,10 @@ class P6App:
         # Twister Genius — auto-detect and connect
         if self.twister.detect():
             if self.twister.connect():
-                if sp404_midi:
-                    self.twister.set_target(sp404_midi)
+                # Target the FOCUSED device, not always SP-404
+                focused_midi = self._midi_connections.get(self.device_name) or sp404_midi
+                if focused_midi:
+                    self.twister.set_target(focused_midi)
                 self.twister.on_state_changed = self._on_twister_state
                 self.twister.on_param_changed = self._on_twister_param
                 self.twister.on_cc_sent = self._on_twister_cc_sent

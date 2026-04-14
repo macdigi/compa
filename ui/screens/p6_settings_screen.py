@@ -79,6 +79,38 @@ class P6SettingsScreen:
         self.app.midi_mapper.stop()
         print("Controller mapping stopped", flush=True)
 
+    def _pull_from_peer(self, peer: dict):
+        """Pull all recordings from a peer Compa that we don't already have."""
+        from engine.compa_link import list_peer_files, download_peer_file
+        import threading
+        print(f"_pull_from_peer({peer['name']}) called", flush=True)
+
+        def _pull():
+            try:
+                print(f"  Listing files from {peer['ip']}:{peer['port']}", flush=True)
+                files = list_peer_files(peer, "recordings")
+                print(f"  Got {len(files)} files", flush=True)
+                if not files:
+                    print(f"No files on {peer['name']}", flush=True)
+                    return
+                local_dir = self.app.config.get("P6_RECORDING_DIR")
+                existing = set(os.listdir(local_dir)) if os.path.isdir(local_dir) else set()
+                downloaded = 0
+                for f in files:
+                    name = f["name"]
+                    if name in existing or name.startswith("."):
+                        continue
+                    if name.endswith(".wav") or name.endswith(".json"):
+                        path = download_peer_file(peer, "recordings", name, local_dir)
+                        if path:
+                            downloaded += 1
+                print(f"Pulled {downloaded} files from {peer['name']}", flush=True)
+            except Exception as e:
+                print(f"Pull error: {e}", flush=True)
+
+        t = threading.Thread(target=_pull, daemon=True)
+        t.start()
+
     def _toggle_twister_mode(self):
         tw = self.app.twister
         tw.mode = "toggle" if tw.mode == "momentary" else "momentary"
@@ -202,6 +234,24 @@ class P6SettingsScreen:
                 self._rows.append({
                     "label": "  No external controllers found", "type": "info",
                     "value": "Plug in a MIDI controller",
+                })
+
+        # Compa-to-Compa Network Link
+        if hasattr(self.app, 'compa_browser'):
+            self._rows.append({"label": "", "type": "section", "value": "COMPA NETWORK"})
+            peers = self.app.compa_browser.peers
+            if peers:
+                for peer in peers:
+                    self._rows.append({
+                        "label": f"  {peer['name']}", "type": "button",
+                        "btn_label": "PULL",
+                        "action": lambda p=peer: self._pull_from_peer(p),
+                        "value": f"{peer['ip']}:{peer['port']}",
+                    })
+            else:
+                self._rows.append({
+                    "label": "  No peers found", "type": "info",
+                    "value": "Both Compas must be on same WiFi",
                 })
 
         # Twister Genius settings

@@ -89,6 +89,13 @@ class DeviceWorkspaceScreen:
 
         if dev_key != self.app.device_name:
             self.app.switch_focus(dev_key)
+        else:
+            # Already focused — but Twister/recorder may not be retargeted yet
+            # (happens on first boot when default focus matches dev_key)
+            focused_midi = self.app._midi_connections.get(dev_key)
+            if self.app.twister.connected and focused_midi:
+                self.app.twister.set_target(focused_midi)
+                self.app.twister._rebuild_pages()
 
         self._device_key = dev_key
         self._device_profile = self.app.device
@@ -116,10 +123,10 @@ class DeviceWorkspaceScreen:
             tabs = [
                 ("control", "CONTROL"),
                 ("twister", "TWISTER"),
+                ("sequence", "SEQUENCE"),
                 ("looper", "LOOPER"),
                 ("dj", "DJ"),
             ]
-            # Only show Twister tab if connected
             if not self.app.twister.connected:
                 tabs = [t for t in tabs if t[0] != "twister"]
             self._tabs = tabs
@@ -289,6 +296,8 @@ class DeviceWorkspaceScreen:
                     self._handle_p6_clicks(mx, my)
             elif tab_key == "twister":
                 self._handle_twister_grid_clicks(mx, my)
+            elif tab_key in ("pattern", "sequence"):
+                self._handle_pattern_clicks(mx, my)
             elif tab_key == "dj":
                 self._handle_dj_clicks(mx, my)
 
@@ -432,6 +441,8 @@ class DeviceWorkspaceScreen:
                 self._draw_generic_control(surface, f_med, f_small)
         elif tab_key == "twister":
             self._draw_twister_grid(surface, f_med, f_small, f_tiny)
+        elif tab_key in ("pattern", "sequence"):
+            self._draw_pattern_grid(surface, f_med, f_small, f_tiny)
         elif tab_key == "looper":
             self._draw_looper(surface, f_large, f_med, f_small)
         elif tab_key == "dj":
@@ -825,6 +836,117 @@ class DeviceWorkspaceScreen:
                 surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
 
     # ── Other tabs ───────────────────────────────────────────────────
+
+    # ── Pattern / Sequence Grid ──────────────────────────────────────
+
+    def _pattern_grid_layout(self):
+        """Returns (cols, rows, cell_w, cell_h, start_x, start_y, pattern_count)."""
+        dev = self._device_profile
+        count = getattr(dev, "pattern_count", 16) if dev else 16
+        if count <= 0:
+            count = 16
+
+        # Layout: 4x4 for ≤16, 8x4 for ≤32, 8x8 for 64
+        if count <= 16:
+            cols, rows = 4, 4
+        elif count <= 32:
+            cols, rows = 8, 4
+        else:
+            cols, rows = 8, 8
+
+        top = self._controls_top + 36  # space for header
+        avail_h = self._content_h - 36 - self._bus_bar_h - 4
+        avail_w = theme.SCREEN_WIDTH - 20
+
+        cell_w = (avail_w - (cols - 1) * 4) // cols
+        cell_h = (avail_h - (rows - 1) * 4) // rows
+        start_x = 10
+        start_y = top
+        return cols, rows, cell_w, cell_h, start_x, start_y, count
+
+    def _draw_pattern_grid(self, surface, f_med, f_small, f_tiny):
+        """Draw pattern launch grid for the focused device."""
+        dev = self._device_profile
+        if not dev:
+            return
+
+        # Header
+        midi = self.app._midi_connections.get(self._device_key)
+        current = midi.state.active_pattern + 1 if midi else 1
+        max_pat = getattr(dev, "pattern_count", 0)
+        title = "PATTERNS" if self._device_key == "P-6" else "SEQUENCES"
+
+        hdr_y = self._controls_top + 4
+        surf = f_med.render(title, True, self._device_color)
+        surface.blit(surf, (10, hdr_y))
+
+        if max_pat:
+            surf = f_small.render(f"Active: {current}/{max_pat}", True, theme.TEXT_DIM)
+            surface.blit(surf, (140, hdr_y + 4))
+
+        # Transport buttons (right of header)
+        if midi:
+            playing = midi.state.playing
+            play_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, hdr_y, 60, 26)
+            stop_rect = pygame.Rect(theme.SCREEN_WIDTH - 155, hdr_y, 60, 26)
+            pygame.draw.rect(surface, theme.GREEN if playing else theme.BUTTON_BG, play_rect, border_radius=5)
+            surf = f_tiny.render("PLAY", True, theme.BG if playing else theme.TEXT)
+            surface.blit(surf, surf.get_rect(center=play_rect.center))
+            pygame.draw.rect(surface, theme.BUTTON_BG, stop_rect, border_radius=5)
+            surf = f_tiny.render("STOP", True, theme.TEXT)
+            surface.blit(surf, surf.get_rect(center=stop_rect.center))
+
+        # Grid
+        cols, rows, cell_w, cell_h, sx, sy, count = self._pattern_grid_layout()
+        for i in range(count):
+            r, c = i // cols, i % cols
+            x = sx + c * (cell_w + 4)
+            y = sy + r * (cell_h + 4)
+            rect = pygame.Rect(x, y, cell_w, cell_h)
+            active = (i == (current - 1))
+            bg = self._device_color if active else theme.BG_PANEL
+            tc = theme.BG if active else theme.TEXT
+            pygame.draw.rect(surface, bg, rect, border_radius=4)
+            if not active:
+                pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=4)
+            # Number
+            label = str(i + 1)
+            f = f_med if cell_h >= 50 else f_small
+            surf = f.render(label, True, tc)
+            surface.blit(surf, surf.get_rect(center=rect.center))
+
+    def _handle_pattern_clicks(self, mx, my):
+        midi = self.app._midi_connections.get(self._device_key)
+        if not midi:
+            return
+
+        hdr_y = self._controls_top + 4
+        # Play/Stop buttons
+        play_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, hdr_y, 60, 26)
+        if play_rect.collidepoint(mx, my):
+            if midi.state.playing:
+                midi.send_stop()
+            else:
+                midi.send_start()
+            return
+        stop_rect = pygame.Rect(theme.SCREEN_WIDTH - 155, hdr_y, 60, 26)
+        if stop_rect.collidepoint(mx, my):
+            midi.send_stop()
+            return
+
+        # Grid
+        cols, rows, cell_w, cell_h, sx, sy, count = self._pattern_grid_layout()
+        for i in range(count):
+            r, c = i // cols, i % cols
+            x = sx + c * (cell_w + 4)
+            y = sy + r * (cell_h + 4)
+            rect = pygame.Rect(x, y, cell_w, cell_h)
+            if rect.collidepoint(mx, my):
+                # Send Program Change to switch pattern
+                pc_channel = getattr(self._device_profile, "pattern_pc_channel", 0)
+                midi.send_program_change(i, channel=pc_channel)
+                self.app.push_hud(f"Pattern {i + 1}", self._device_color)
+                return
 
     def _handle_dj_clicks(self, mx, my):
         """Handle DJ mode button taps — send CCs to SP-404."""
