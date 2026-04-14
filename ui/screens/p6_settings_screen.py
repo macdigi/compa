@@ -81,6 +81,14 @@ class P6SettingsScreen:
         self.app.midi_mapper.stop()
         print("Controller mapping stopped", flush=True)
 
+    def _open_network_transfer(self):
+        """Navigate to the Files tab and select the Network location."""
+        files_screen = self.app.screens.get("files")
+        if files_screen:
+            files_screen._current_loc = "network"
+            files_screen._switch_location("network")
+        self.app.switch_screen("files")
+
     def _pull_from_peer(self, peer: dict):
         """Pull all recordings from a peer Compa that we don't already have."""
         from engine.compa_link import list_peer_files, download_peer_file
@@ -268,18 +276,17 @@ class P6SettingsScreen:
                     "value": "Plug in a MIDI controller",
                 })
 
-        # Compa-to-Compa Network Link
+        # Compa-to-Compa Network Link — points to Files → Network tab
         if hasattr(self.app, 'compa_browser'):
             self._rows.append({"label": "", "type": "section", "value": "COMPA NETWORK"})
             peers = self.app.compa_browser.peers
             if peers:
-                for peer in peers:
-                    self._rows.append({
-                        "label": f"  {peer['name']}", "type": "button",
-                        "btn_label": "PULL",
-                        "action": lambda p=peer: self._pull_from_peer(p),
-                        "value": f"{peer['ip']}:{peer['port']}",
-                    })
+                self._rows.append({
+                    "label": f"  {len(peers)} peer{'s' if len(peers) != 1 else ''} online",
+                    "type": "button", "btn_label": "OPEN",
+                    "action": self._open_network_transfer,
+                    "value": ", ".join(p["name"] for p in peers)[:40],
+                })
             else:
                 self._rows.append({
                     "label": "  No peers found", "type": "info",
