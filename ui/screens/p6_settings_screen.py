@@ -17,6 +17,7 @@ class P6SettingsScreen:
         self._row_height = 36
         self._rows = []  # rebuilt each frame
         self._content_height = 0
+        self._update_status = ""
 
     def on_enter(self):
         self._scroll_y = 0
@@ -110,6 +111,36 @@ class P6SettingsScreen:
 
         t = threading.Thread(target=_pull, daemon=True)
         t.start()
+
+    def _check_updates(self):
+        """Check for Compa updates in the background."""
+        if not hasattr(self.app, 'updater'):
+            return
+        self._update_status = "Checking..."
+
+        def _on_check(result):
+            if result.get("error"):
+                self._update_status = f"Error: {result['error'][:40]}"
+            elif result.get("update_available"):
+                behind = result["behind"]
+                self._update_status = f"Update available: {behind} commit{'s' if behind != 1 else ''} behind"
+            else:
+                self._update_status = "Up to date"
+
+        self.app.updater.check_async(_on_check)
+
+    def _apply_update(self):
+        """Pull and restart."""
+        if not hasattr(self.app, 'updater'):
+            return
+        self._update_status = "Updating..."
+        import threading
+
+        def _do():
+            result = self.app.updater.apply(restart=True)
+            self._update_status = result.get("message", "Update done")[:50]
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def _toggle_twister_mode(self):
         tw = self.app.twister
@@ -267,6 +298,27 @@ class P6SettingsScreen:
             self._rows.append({
                 "label": f"  FX Page", "type": "info",
                 "value": f"Page {tw.current_page + 1} of {tw.page_count}  ({len(tw.slots)} effects)",
+            })
+
+        # Compa Updater
+        if hasattr(self.app, 'updater') and self.app.updater.is_git_repo:
+            self._rows.append({"label": "", "type": "section", "value": "COMPA UPDATER"})
+            current = self.app.updater.current_commit()
+            branch = self.app.updater.current_branch()
+            self._rows.append({
+                "label": f"  Version", "type": "info",
+                "value": f"{branch} @ {current}",
+            })
+            self._rows.append({
+                "label": f"  Check for updates", "type": "button",
+                "btn_label": "CHECK",
+                "action": self._check_updates,
+                "value": self._update_status,
+            })
+            self._rows.append({
+                "label": f"  Apply update", "type": "button",
+                "btn_label": "UPDATE",
+                "action": self._apply_update,
             })
 
         # Audio routing (only when multiple devices connected)

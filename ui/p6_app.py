@@ -38,6 +38,7 @@ from engine.midi_mapper import MidiMapper
 from engine.twister_genius import TwisterGenius
 from engine.spectra_mapper import SpectraMapper
 from engine.compa_link import CompaServer, CompaBrowser
+from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
 from ui.splash import run_splash
 from ui.wizard import run_wizard
@@ -247,6 +248,9 @@ class P6App:
 
         # ── Spectra Mapper (auto-detect + connect) ───────────────────
         self.spectra = SpectraMapper()
+
+        # ── Auto updater ─────────────────────────────────────────────
+        self.updater = Updater(PROJECT_ROOT)
 
         # ── Compa-to-Compa network link ──────────────────────────────
         recordings_dir = self.config.get("P6_RECORDING_DIR",
