@@ -35,9 +35,9 @@ log = logging.getLogger(__name__)
 #   52-68=green→cyan, 69-85=cyan→blue, 86-102=blue→purple,
 #   103-119=purple→pink, 120-126=pink→red, 127=white
 
-COLOR_RED = 1
-COLOR_ORANGE = 15
-COLOR_YELLOW = 22
+COLOR_RED = 70
+COLOR_ORANGE = 60
+COLOR_YELLOW = 63
 COLOR_GREEN = 50
 COLOR_CYAN = 57
 COLOR_BLUE = 73

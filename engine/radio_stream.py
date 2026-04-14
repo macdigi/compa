@@ -92,21 +92,26 @@ class RadioStream:
         self._silence_start = 0.0
         self._threshold_mode = False  # True = auto threshold recording
 
-    def _find_output_device(self):
-        """Find a working output device. Tries the focused device first,
-        then ALSA plugins, then any USB audio with output channels."""
+    def _find_output_device(self, prefer_hint: str = ""):
+        """Find a working output device. Tries prefer_hint first if given,
+        then falls back to other USB devices and ALSA plugins."""
         if sd is None:
             return
 
         devices = sd.query_devices()
 
-        # Priority order: SP-404, P-6, USB audio, ALSA plugins, headphones, HDMI
-        for hint in ["SP-404", "P-6", "USB Audio", "dmix", "front", "spdif",
-                      "sysdefault", "Headphones", "hdmi", "vc4"]:
+        hints = []
+        if prefer_hint:
+            hints.append(prefer_hint)
+        for h in ["SP-404", "P-6", "USB Audio", "dmix", "front", "spdif",
+                  "sysdefault", "Headphones", "hdmi", "vc4"]:
+            if h not in hints:
+                hints.append(h)
+
+        for hint in hints:
             for i, dev in enumerate(devices):
                 name = dev.get("name", "")
                 if hint.lower() in name.lower() and dev.get("max_output_channels", 0) >= 2:
-                    # Try the device's native sample rate first, then 44100
                     native_rate = int(dev.get("default_samplerate", 44100))
                     for rate in [native_rate, SAMPLE_RATE, 48000]:
                         try:
@@ -124,6 +129,18 @@ class RadioStream:
 
         log.warning("No working audio output found for radio")
         print("No working audio output found for radio", flush=True)
+
+    def retarget(self, prefer_hint: str):
+        """Re-find output device when focus changes."""
+        was_playing = self._playing
+        url = self._url
+        name = self._station_name
+        if was_playing:
+            self.stop()
+        self._output_device = None
+        self._find_output_device(prefer_hint)
+        if was_playing and url:
+            self.play(url, name)
 
     @property
     def is_playing(self) -> bool:

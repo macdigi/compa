@@ -23,6 +23,11 @@ except ImportError:
     sd = None
     sf = None
 
+try:
+    import samplerate as _sr
+except ImportError:
+    _sr = None
+
 log = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_RATE = 44100  # P-6 on Pi ALSA only supports 44.1kHz
@@ -266,7 +271,8 @@ class P6Recorder:
                 samplerate=self._sample_rate,
                 channels=P6_CHANNELS,
                 dtype="float32",
-                blocksize=2048,
+                blocksize=4096,  # Larger buffer reduces glitches on Pi 3B USB bus
+                latency="high",
                 callback=self._audio_callback,
             )
             self._stream.start()
@@ -643,29 +649,135 @@ class P6Recorder:
 
     # ── Playback ─────────────────────────────────────────────────────────
 
+    def _find_playback_device(self, prefer_hint: str = "") -> tuple:
+        """Find a working output device matching prefer_hint first.
+
+        Returns (index, sample_rate) or (None, None).
+        Cache is keyed on prefer_hint so focus changes invalidate it.
+        """
+        cache_key = prefer_hint
+        cached = getattr(self, "_cached_play_devices", {}).get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Build hint priority: focused device first, then fallbacks
+        hints = []
+        if prefer_hint:
+            hints.append(prefer_hint)
+        for h in ["SP-404", "P-6", "USB Audio", "Headphones"]:
+            if h not in hints:
+                hints.append(h)
+
+        devices = sd.query_devices()
+        for hint in hints:
+            for i, dev in enumerate(devices):
+                name = dev.get("name", "")
+                if hint.lower() in name.lower() and dev.get("max_output_channels", 0) >= 2:
+                    native = int(dev.get("default_samplerate", 44100))
+                    try:
+                        s = sd.OutputStream(device=i, samplerate=native,
+                                            channels=2, dtype="float32", blocksize=4096)
+                        s.start(); s.stop(); s.close()
+                        log.info("Playback device: %s @ %dHz", name, native)
+                        print(f"Playback device: {name} @ {native}Hz (prefer={prefer_hint})", flush=True)
+                        if not hasattr(self, "_cached_play_devices"):
+                            self._cached_play_devices = {}
+                        self._cached_play_devices[cache_key] = (i, native)
+                        return (i, native)
+                    except Exception:
+                        continue
+        return (None, None)
+
+    def clear_playback_cache(self):
+        """Clear cached playback devices — call when focus or devices change."""
+        self._cached_play_devices = {}
+
     def play(self, filepath: str) -> None:
-        """Play a WAV file through the audio output device."""
+        """Play a WAV file through the best available output device."""
+        print(f"recorder.play({filepath!r}) called", flush=True)
         if sd is None or sf is None:
+            print("  sd or sf is None — aborting", flush=True)
             return
         self.stop_playback()
 
+        # Pause monitoring so we don't fight for USB bandwidth
+        was_monitoring = self._monitoring
+        if was_monitoring:
+            self.stop_monitoring()
+
+        # Stop request flag
+        self._playback_stop = False
+
         def _play_thread():
+            stream = None
             try:
                 data, rate = sf.read(filepath, dtype="float32")
-                # Normalize so peak reaches -1 dB (P-6 USB audio is very quiet)
+                if len(data) == 0:
+                    return
+                if data.ndim == 1:
+                    data = np.column_stack([data, data])
                 peak = float(np.max(np.abs(data)))
                 if peak > 0:
-                    data *= 0.9 / peak
-                    log.info("Playback normalized: peak %.4f -> 0.9 (%.1f dB gain)",
-                             peak, 20 * np.log10(0.9 / peak))
-                # Find output device (same device or default)
-                out_device = self._device_index
-                sd.play(data, samplerate=rate, device=out_device)
-                sd.wait()
+                    data = data * (0.9 / peak)
+
+                # Use focused device as the playback target
+                out_device, out_rate = self._find_playback_device(self._device_hint)
+                if out_device is None:
+                    log.warning("No working playback device found")
+                    print("Playback: no working device", flush=True)
+                    return
+                if out_rate is None:
+                    out_rate = rate
+
+                # Resample if needed (use libsamplerate for quality, fall back to linear)
+                if out_rate != rate:
+                    ratio = out_rate / rate
+                    if _sr is not None:
+                        # High-quality SRC (sinc interpolation)
+                        data = _sr.resample(data, ratio, "sinc_medium").astype(np.float32)
+                    else:
+                        new_len = int(len(data) * ratio)
+                        new_data = np.zeros((new_len, 2), dtype=np.float32)
+                        x_old = np.arange(len(data))
+                        x_new = np.linspace(0, len(data), new_len)
+                        new_data[:, 0] = np.interp(x_new, x_old, data[:, 0])
+                        new_data[:, 1] = np.interp(x_new, x_old, data[:, 1])
+                        data = new_data
+
+                # Manual playback: open stream, write blocks, close cleanly
+                blocksize = 4096
+                stream = sd.OutputStream(device=out_device, samplerate=out_rate,
+                                          channels=2, dtype="float32", blocksize=blocksize)
+                stream.start()
+                pos = 0
+                while pos < len(data) and not self._playback_stop:
+                    end = min(pos + blocksize, len(data))
+                    chunk = data[pos:end]
+                    if len(chunk) < blocksize:
+                        # Pad the last chunk
+                        padded = np.zeros((blocksize, 2), dtype=np.float32)
+                        padded[:len(chunk)] = chunk
+                        chunk = padded
+                    stream.write(chunk)
+                    pos += blocksize
+                stream.stop()
+                stream.close()
+                stream = None
             except Exception as e:
                 log.error("Playback error: %s", e)
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:
+                        pass
             finally:
                 self._playing_back = False
+                if was_monitoring:
+                    try:
+                        self.start_monitoring()
+                    except Exception:
+                        pass
 
         self._playing_back = True
         self._playback_file = filepath
@@ -674,12 +786,9 @@ class P6Recorder:
         t.start()
 
     def stop_playback(self) -> None:
-        """Stop any active playback."""
-        try:
-            sd.stop()
-        except Exception:
-            pass
-        self._playing_back = False
+        """Signal playback thread to stop."""
+        self._playback_stop = True
+        # Don't call sd.stop() — the thread cleans up its own stream
         self._playback_file = None
 
     @property

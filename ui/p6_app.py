@@ -945,6 +945,14 @@ class P6App:
         dev = self.device_manager.active
         if dev and dev.audio_hint:
             self.recorder.switch_device(dev.audio_hint)
+            # Clear playback device cache so next play() retargets to new focus
+            if hasattr(self.recorder, 'clear_playback_cache'):
+                self.recorder.clear_playback_cache()
+            # Retarget radio output to follow focus
+            radio_screen = self.screens.get("radio")
+            if radio_screen and hasattr(radio_screen, '_radio'):
+                if hasattr(radio_screen._radio, 'retarget'):
+                    radio_screen._radio.retarget(dev.audio_hint)
             if not self.recorder._monitoring:
                 self.recorder.start_monitoring()
 

@@ -3,7 +3,12 @@
 ## Known Issues
 - P-6 does not receive MIDI CC over USB (may need TRS MIDI adapter)
 - Audio playback crashes on sample rate mismatch (recorded at different rate than output)
-- Twister LED yellow color needs calibration (currently shows as minty green)
+- P-6 Twister LED "yellow" still shows as light blue (value 22 too low on this wheel)
+- P-6 audio recording is glitchy (may be sample rate, buffer size, or USB bandwidth)
+
+## New Feature Requests
+- **Compa-to-Compa network link**: sync files between Compa 1 (.188) and Compa 2 (.191), control link
+- **Auto updater**: optional update checker that pulls latest from git and restarts
 
 ## Compa 2 Setup
 - Compa 2 online at 192.168.4.191 (Pi 3B, 7" 1024x600)
