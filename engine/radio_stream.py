@@ -55,6 +55,7 @@ class RadioStream:
         # Audio output
         self._output_device: Optional[int] = None
         self._output_stream: Optional[sd.OutputStream] = None
+        self._output_rate: int = SAMPLE_RATE  # May change to device's native rate
         self._find_output_device()
 
         # Playback buffer — fed by decode thread, consumed by output callback
@@ -92,31 +93,37 @@ class RadioStream:
         self._threshold_mode = False  # True = auto threshold recording
 
     def _find_output_device(self):
-        """Find a working output device. Uses ALSA dmix/front plugins first
-        (they allow sharing with the recorder's input stream), then falls back."""
+        """Find a working output device. Tries the focused device first,
+        then ALSA plugins, then any USB audio with output channels."""
         if sd is None:
             return
 
         devices = sd.query_devices()
 
-        # Priority: ALSA plugins that support mixing (dmix/front/spdif),
-        # then P-6 direct (only works when recorder isn't monitoring)
-        for hint in ["dmix", "front", "spdif", "sysdefault", "P-6", "USB Audio"]:
+        # Priority order: SP-404, P-6, USB audio, ALSA plugins, headphones, HDMI
+        for hint in ["SP-404", "P-6", "USB Audio", "dmix", "front", "spdif",
+                      "sysdefault", "Headphones", "hdmi", "vc4"]:
             for i, dev in enumerate(devices):
                 name = dev.get("name", "")
                 if hint.lower() in name.lower() and dev.get("max_output_channels", 0) >= 2:
-                    try:
-                        s = sd.OutputStream(device=i, samplerate=SAMPLE_RATE,
-                                           channels=CHANNELS, dtype="float32",
-                                           blocksize=BLOCK_SIZE)
-                        s.start(); s.stop(); s.close()
-                        self._output_device = i
-                        log.info("Radio output: device %d '%s'", i, name)
-                        return
-                    except Exception:
-                        continue
+                    # Try the device's native sample rate first, then 44100
+                    native_rate = int(dev.get("default_samplerate", 44100))
+                    for rate in [native_rate, SAMPLE_RATE, 48000]:
+                        try:
+                            s = sd.OutputStream(device=i, samplerate=rate,
+                                               channels=CHANNELS, dtype="float32",
+                                               blocksize=BLOCK_SIZE)
+                            s.start(); s.stop(); s.close()
+                            self._output_device = i
+                            self._output_rate = rate
+                            log.info("Radio output: device %d '%s' @ %dHz", i, name, rate)
+                            print(f"Radio output: {name} @ {rate}Hz", flush=True)
+                            return
+                        except Exception:
+                            continue
 
         log.warning("No working audio output found for radio")
+        print("No working audio output found for radio", flush=True)
 
     @property
     def is_playing(self) -> bool:
@@ -244,7 +251,7 @@ class RadioStream:
                     "-af", "aresample=async=1",
                     "-f", "s16le",
                     "-acodec", "pcm_s16le",
-                    "-ar", str(SAMPLE_RATE),
+                    "-ar", str(self._output_rate),
                     "-ac", str(CHANNELS),
                     "-bufsize", "512k",
                     "pipe:1",
@@ -390,7 +397,7 @@ class RadioStream:
                     try:
                         self._output_stream = sd.OutputStream(
                             device=self._output_device,
-                            samplerate=SAMPLE_RATE,
+                            samplerate=self._output_rate,
                             channels=CHANNELS,
                             dtype="float32",
                             blocksize=BLOCK_SIZE,

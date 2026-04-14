@@ -48,6 +48,9 @@ class DeviceWorkspaceScreen:
         self._smooth_l = 0.0
         self._smooth_r = 0.0
 
+        # Fullscreen oscilloscope toggle
+        self._scope_fullscreen = False
+
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
     @property
@@ -60,7 +63,9 @@ class DeviceWorkspaceScreen:
 
     @property
     def _scope_h(self) -> int:
-        """Oscilloscope takes ~40% of content area, min 80, max 160."""
+        """Oscilloscope height. Fullscreen = entire content area, normal = ~40%."""
+        if self._scope_fullscreen:
+            return self._content_h - 4
         return max(80, min(160, int(self._content_h * 0.40)))
 
     @property
@@ -87,11 +92,7 @@ class DeviceWorkspaceScreen:
 
         self._device_key = dev_key
         self._device_profile = self.app.device
-        self._device_color = {
-            "P-6": (255, 230, 0),
-            "SP-404MKII": (0, 200, 180),
-            "Force": (220, 50, 50),
-        }.get(dev_key, theme.ACCENT)
+        self._device_color = theme.get_device_color(dev_key)
 
         self._build_tabs()
         self._current_tab = 0
@@ -242,7 +243,35 @@ class DeviceWorkspaceScreen:
                 self.app.switch_screen("session")
                 return
 
-            # Tab buttons
+            # Oscilloscope tap → toggle fullscreen
+            scope_rect = pygame.Rect(6, self._content_top, theme.SCREEN_WIDTH - 12, self._scope_h)
+            if scope_rect.collidepoint(mx, my):
+                self._scope_fullscreen = not self._scope_fullscreen
+                return
+
+            # REC button (top-right, next to device name)
+            rec_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, 4, 50, 28)
+            if rec_rect.collidepoint(mx, my):
+                if self.app.recorder.is_recording:
+                    self.app.recorder.stop_recording()
+                else:
+                    meta = {}
+                    if self.app.p6:
+                        meta["bpm_at_record"] = self.app.p6.state.bpm
+                    self.app.recorder.start_recording(metadata=meta)
+                return
+
+            # RECALL button
+            recall_rect = pygame.Rect(theme.SCREEN_WIDTH - 165, 4, 55, 28)
+            if recall_rect.collidepoint(mx, my):
+                if self.app.recorder.recall_seconds_available >= 1:
+                    self.app.recorder.save_recall()
+                    self.app.push_hud("Recall saved", theme.ACCENT)
+                return
+
+            # Tab buttons (skip if fullscreen scope)
+            if self._scope_fullscreen:
+                return
             for i, (key, label) in enumerate(self._tabs):
                 if self._tab_rect(i).collidepoint(mx, my):
                     self._current_tab = i
@@ -260,6 +289,8 @@ class DeviceWorkspaceScreen:
                     self._handle_p6_clicks(mx, my)
             elif tab_key == "twister":
                 self._handle_twister_grid_clicks(mx, my)
+            elif tab_key == "dj":
+                self._handle_dj_clicks(mx, my)
 
         # Knob drag handling (all events, but not if in header area)
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
@@ -323,16 +354,20 @@ class DeviceWorkspaceScreen:
             return
 
     def _handle_p6_clicks(self, mx, my):
-        # Section tabs (below oscilloscope)
-        sections = ["GRAN", "FLTR", "ENV", "MIX", "FX"]
-        sec_y = self._controls_top + 2
-        sec_w = min(60, (theme.SCREEN_WIDTH - 20) // len(sections))
-        for i, label in enumerate(sections):
-            r = pygame.Rect(10 + i * (sec_w + 3), sec_y, sec_w, 22)
-            if r.collidepoint(mx, my):
-                self._p6_section = i
-                self._build_knobs()
-                return
+        # Twister page selector (vertical column, right side)
+        tw = self.app.twister
+        if tw.connected and tw.page_count > 1:
+            fx_y = self._controls_top + 2
+            n_pages = tw.page_count
+            pg_w = 40
+            pg_h = min(36, (self._controls_h - 40) // n_pages - 3)
+            pg_x = theme.SCREEN_WIDTH - pg_w - 8
+            pg_start_y = fx_y + 28
+            for p in range(n_pages):
+                r = pygame.Rect(pg_x, pg_start_y + p * (pg_h + 3), pg_w, pg_h)
+                if r.collidepoint(mx, my):
+                    tw.switch_page(p)
+                    return
 
     def _tab_rect(self, idx: int) -> pygame.Rect:
         n = len(self._tabs)
@@ -380,7 +415,12 @@ class DeviceWorkspaceScreen:
         midi = self.app._midi_connections.get(self._device_key)
         self._draw_oscilloscope(surface, f_hero, f_small, f_tiny, midi)
 
-        # ── Tab Content ──────────────────────────────────────────────
+        # ── Tab Content (hidden when scope is fullscreen) ────────────
+        if self._scope_fullscreen:
+            # Just show HUD over fullscreen scope
+            self._draw_hud(surface, f_small)
+            return
+
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
 
         if tab_key == "control":
@@ -466,14 +506,32 @@ class DeviceWorkspaceScreen:
             surf = f_small.render(label, True, tc)
             surface.blit(surf, surf.get_rect(center=rect.center))
 
+        # REC button
+        is_rec = self.app.recorder.is_recording
+        rec_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, 4, 50, 28)
+        rec_bg = theme.RED if is_rec else theme.BUTTON_BG
+        pygame.draw.rect(surface, rec_bg, rec_rect, border_radius=5)
+        rec_label = f"REC" if not is_rec else f"{self.app.recorder.duration:.0f}s"
+        surf = theme.font("tiny").render(rec_label, True, theme.TEXT_BRIGHT if is_rec else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=rec_rect.center))
+
+        # RECALL button
+        recall_secs = self.app.recorder.recall_seconds_available
+        recall_rect = pygame.Rect(theme.SCREEN_WIDTH - 165, 4, 55, 28)
+        recall_bg = theme.ACCENT if recall_secs >= 1 else theme.BUTTON_BG
+        pygame.draw.rect(surface, recall_bg, recall_rect, border_radius=5)
+        surf = theme.font("tiny").render(f"RCL {int(recall_secs)}s", True,
+                                          theme.BG if recall_secs >= 1 else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=recall_rect.center))
+
         # Device name + connection dot
         midi = self.app._midi_connections.get(self._device_key)
         connected = midi and midi.connected
         dot_color = theme.GREEN if connected else theme.RED
-        name_surf = f_large.render(self._device_key, True, self._device_color)
-        nx = theme.SCREEN_WIDTH - name_surf.get_width() - 14
-        surface.blit(name_surf, (nx, 4))
-        pygame.draw.circle(surface, dot_color, (nx - 8, 18), 4)
+        name_surf = f_small.render(self._device_key, True, self._device_color)
+        nx = theme.SCREEN_WIDTH - name_surf.get_width() - 8
+        surface.blit(name_surf, (nx, 10))
+        pygame.draw.circle(surface, dot_color, (nx - 6, 18), 3)
 
         # Accent line
         pygame.draw.line(surface, self._device_color,
@@ -677,36 +735,123 @@ class DeviceWorkspaceScreen:
     # ── P-6 Control ──────────────────────────────────────────────────
 
     def _draw_p6_control(self, surface, f_med, f_small, f_tiny):
-        # Section tabs
-        sections = ["GRAN", "FLTR", "ENV", "MIX", "FX"]
-        sec_y = self._controls_top + 2
-        sec_w = min(60, (theme.SCREEN_WIDTH - 20) // len(sections))
+        """P-6 control: shows Twister-mapped parameters with live knob feedback."""
+        tw = self.app.twister
 
-        for i, label in enumerate(sections):
-            r = pygame.Rect(10 + i * (sec_w + 3), sec_y, sec_w, 22)
-            active = i == self._p6_section
-            bg = self._device_color if active else theme.BUTTON_BG
-            tc = theme.BG if active else theme.TEXT_DIM
-            pygame.draw.rect(surface, bg, r, border_radius=4)
-            surf = f_tiny.render(label, True, tc)
-            surface.blit(surf, surf.get_rect(center=r.center))
+        # ── Page header ─────────────────────────────────────────────
+        fx_y = self._controls_top + 2
 
-        # Section full name (right of tabs)
-        section_names = ["Granular", "Filter", "Envelope", "Mixer", "Effects"]
-        if self._p6_section < len(section_names):
-            surf = f_small.render(section_names[self._p6_section], True, self._device_color)
-            surface.blit(surf, (10 + len(sections) * (sec_w + 3) + 6, sec_y + 2))
+        # Page label
+        if tw.connected:
+            page_label = f"Page {tw.current_page + 1}/{tw.page_count}"
+        else:
+            page_label = "P-6 Control"
+        surf = f_small.render(page_label, True, self._device_color)
+        surface.blit(surf, (10, fx_y + 3))
 
-        # Knobs
-        for knob, cc, ch in self._knobs:
-            knob.draw(surface)
+        # ── Page selector (vertical column, right side) ──────────────
+        if tw.connected and tw.page_count > 1:
+            n_pages = tw.page_count
+            pg_w = 40
+            pg_h = min(36, (self._controls_h - 40) // n_pages - 3)
+            pg_x = theme.SCREEN_WIDTH - pg_w - 8
+            pg_start_y = fx_y + 28
+            surf = f_tiny.render("PAGE", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(centerx=pg_x + pg_w // 2, top=fx_y + 2))
+            for p in range(n_pages):
+                r = pygame.Rect(pg_x, pg_start_y + p * (pg_h + 3), pg_w, pg_h)
+                active = p == tw.current_page
+                bg = self._device_color if active else theme.BUTTON_BG
+                tc = theme.BG if active else theme.TEXT_DIM
+                pygame.draw.rect(surface, bg, r, border_radius=5)
+                surf = f_small.render(f"P{p + 1}", True, tc)
+                surface.blit(surf, surf.get_rect(center=r.center))
 
-        if not self._knobs:
-            y = self._controls_top + 50
-            surf = f_small.render("No parameters", True, theme.TEXT_DIM)
-            surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
+        # ── 4x4 Parameter knobs (from Twister's current P-6 page) ────
+        if tw.connected and tw.is_p6_mode and tw.slots:
+            slots = tw.slots
+            n = min(16, len(slots))
+            live = self.app.live_cc.get(14, {})  # P-6 auto channel (ch15, idx 14)
+
+            # 4x4 grid layout
+            cols, rows = 4, 4
+            ctrl_top = fx_y + 26
+            ctrl_h = self._controls_h - 30
+            knob_r = min(24, ctrl_h // (rows * 3))
+            col_gap = (theme.SCREEN_WIDTH - 70) // cols  # room for page column
+            row_gap = ctrl_h // rows
+            start_x = 10 + col_gap // 2
+            start_y = ctrl_top + row_gap // 2
+
+            import math
+            for i in range(n):
+                slot = slots[i]
+                r, c = i // cols, i % cols
+                cx = start_x + c * col_gap
+                cy = start_y + r * row_gap
+
+                cc = getattr(slot, "_p6_cc", None)
+                if cc is None:
+                    continue
+
+                val = float(live.get(cc, 64))
+
+                # Knob background
+                pygame.draw.circle(surface, theme.BG_LIGHTER, (cx, cy), knob_r)
+                # Value arc
+                filled = val / 127.0
+                angle_start = 135
+                end_angle = angle_start + filled * 270
+                for a in range(int(angle_start), int(end_angle)):
+                    rad = math.radians(a)
+                    px = cx + int((knob_r - 3) * math.cos(rad))
+                    py = cy + int((knob_r - 3) * math.sin(rad))
+                    pygame.draw.circle(surface, self._device_color, (px, py), 2)
+
+                # Value text
+                surf = f_tiny.render(f"{int(val)}", True, self._device_color)
+                surface.blit(surf, surf.get_rect(center=(cx, cy)))
+
+                # Label below
+                surf = f_tiny.render(slot.name[:8], True, theme.TEXT_DIM)
+                surface.blit(surf, surf.get_rect(centerx=cx, top=cy + knob_r + 2))
+        else:
+            # Fallback: old section-based knobs
+            for knob, cc, ch in self._knobs:
+                knob.draw(surface)
+            if not self._knobs:
+                y = self._controls_top + 50
+                surf = f_small.render("No parameters", True, theme.TEXT_DIM)
+                surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=y))
 
     # ── Other tabs ───────────────────────────────────────────────────
+
+    def _handle_dj_clicks(self, mx, my):
+        """Handle DJ mode button taps — send CCs to SP-404."""
+        top = self._controls_top + 4
+        ctrl_h = self._controls_h - 8
+        half_w = (theme.SCREEN_WIDTH - 30) // 2
+        btn_h = min(38, (ctrl_h - 60) // 3)
+        btn_w = min(120, half_w // 2 - 8)
+
+        for deck, ch in enumerate([0, 1]):
+            dx = 14 + deck * (half_w + 6)
+            by = top + 26
+            buttons = [
+                ("PLAY", 20, 127), ("CUE", 23, 127), ("SYNC", 22, 127),
+                ("BEND+", 24, 127), ("BEND-", 25, 127),
+            ]
+            for i, (label, cc, val) in enumerate(buttons):
+                col = i % 2
+                row = i // 2
+                x = dx + col * (btn_w + 6)
+                y = by + row * (btn_h + 4)
+                r = pygame.Rect(x, y, btn_w, btn_h)
+                if r.collidepoint(mx, my):
+                    if self.app.p6:
+                        self.app.p6.send_cc(cc, val, channel=ch)
+                    self.app.push_hud(f"DJ {label} Ch{ch+1}", self._device_color)
+                    return
 
     # ── Twister Grid ──────────────────────────────────────────────────
 
@@ -874,8 +1019,55 @@ class DeviceWorkspaceScreen:
             surface.blit(surf, surf.get_rect(center=rect.center))
 
     def _draw_dj(self, surface, f_large, f_med, f_small):
-        y = self._controls_top + 20
-        surf = f_large.render("DJ MODE", True, self._device_color)
-        surface.blit(surf, (20, y))
-        surf = theme.font("tiny").render("Put SP-404 in DJ Mode to use", True, theme.TEXT_DIM)
-        surface.blit(surf, (20, y + 28))
+        """SP-404 DJ Mode — dual deck controls with crossfader."""
+        f_tiny = theme.font("tiny")
+        top = self._controls_top + 4
+        ctrl_h = self._controls_h - 8
+        half_w = (theme.SCREEN_WIDTH - 30) // 2
+
+        # ── Deck labels ─────────────────────────────────────────────
+        surf = f_med.render("DECK A (Ch1)", True, self._device_color)
+        surface.blit(surf, (14, top))
+        surf = f_med.render("DECK B (Ch2)", True, self._device_color)
+        surface.blit(surf, (half_w + 20, top))
+
+        # ── Buttons per deck ────────────────────────────────────────
+        btn_h = min(38, (ctrl_h - 60) // 3)
+        btn_w = min(120, half_w // 2 - 8)
+
+        for deck, ch in enumerate([0, 1]):
+            dx = 14 + deck * (half_w + 6)
+            by = top + 26
+
+            buttons = [
+                ("PLAY / PAUSE", 20, 127, theme.GREEN),
+                ("CUE",          23, 127, theme.YELLOW),
+                ("SYNC",         22, 127, theme.BLUE),
+                ("BEND +",       24, 127, theme.ACCENT_DIM),
+                ("BEND -",       25, 127, theme.ACCENT_DIM),
+            ]
+            for i, (label, cc, val, color) in enumerate(buttons):
+                col = i % 2
+                row = i // 2
+                x = dx + col * (btn_w + 6)
+                y = by + row * (btn_h + 4)
+                r = pygame.Rect(x, y, btn_w, btn_h)
+                pygame.draw.rect(surface, color, r, border_radius=6)
+                surf = f_tiny.render(label, True, theme.BG)
+                surface.blit(surf, surf.get_rect(center=r.center))
+
+        # ── Crossfader (bottom, full width) ─────────────────────────
+        xf_y = top + ctrl_h - 30
+        xf_rect = pygame.Rect(14, xf_y, theme.SCREEN_WIDTH - 28, 24)
+        pygame.draw.rect(surface, theme.BG_LIGHTER, xf_rect, border_radius=4)
+        # Crossfade position from live CC
+        xf_val = self.app.live_cc.get(0, {}).get(8, 64)
+        xf_pos = int((xf_val / 127.0) * (xf_rect.width - 20))
+        handle = pygame.Rect(xf_rect.x + xf_pos, xf_y - 2, 20, 28)
+        pygame.draw.rect(surface, self._device_color, handle, border_radius=4)
+        surf = f_tiny.render("A", True, theme.TEXT_DIM)
+        surface.blit(surf, (xf_rect.x + 4, xf_y + 4))
+        surf = f_tiny.render("CROSSFADE", True, theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(centerx=xf_rect.centerx, top=xf_y + 4))
+        surf = f_tiny.render("B", True, theme.TEXT_DIM)
+        surface.blit(surf, (xf_rect.right - 14, xf_y + 4))

@@ -207,6 +207,12 @@ class P6App:
         else:
             print("No USB device detected — running in offline mode", flush=True)
 
+        # Load saved device color preferences
+        for short_name in self.device_manager.connected:
+            saved_color = self.config.get(f"COLOR_{short_name}")
+            if saved_color:
+                theme.set_device_color(short_name, saved_color)
+
         # Apply hardware theme for focused device
         if self.device_name != "---":
             theme.apply_theme_for_device(self.device_name)
@@ -242,7 +248,7 @@ class P6App:
 
         # ── Live CC state (for workspace parameter tracking + HUD) ───
         # Per-bus dict of {cc: value} updated by incoming SP-404 MIDI
-        self.live_cc: dict[int, dict[int, int]] = {i: {} for i in range(5)}
+        self.live_cc: dict[int, dict[int, int]] = {i: {} for i in range(16)}
         # HUD notification queue: [(text, color, timestamp), ...]
         self._hud_messages: list[tuple[str, tuple, float]] = []
 
@@ -354,7 +360,6 @@ class P6App:
                 midi_in, midi_out = find_p6_ports(hint)
                 if midi_in is not None or midi_out is not None:
                     conn = P6Midi(midi_in, midi_out, profile=profile)
-                    # Wire transport for auto-record on ALL devices
                     conn.on_transport = self._on_p6_transport
                     self._midi_connections[short_name] = conn
                     print(f"{profile.name} MIDI connected")
@@ -377,7 +382,7 @@ class P6App:
             orig_cc = sp404_midi.on_cc
             def _on_sp404_cc(channel, cc, value, _orig=orig_cc):
                 # Store in live state (channel = bus index)
-                if 0 <= channel <= 4:
+                if 0 <= channel <= 15:
                     self.live_cc[channel][cc] = value
                 if _orig:
                     _orig(channel, cc, value)
@@ -755,7 +760,7 @@ class P6App:
 
     def _on_twister_cc_sent(self, channel: int, cc: int, value: int):
         """Track CCs we send to the SP-404 (it doesn't echo CC83/CC19 back)."""
-        if 0 <= channel <= 4:
+        if 0 <= channel <= 15:
             self.live_cc[channel][cc] = value
 
     def _on_twister_param(self, knob: int, value: int):
@@ -925,8 +930,8 @@ class P6App:
     def switch_focus(self, short_name: str) -> bool:
         """Switch which device the UI controls.
 
-        Updates DeviceManager focus, rebuilds MIDI router, and notifies
-        the current screen via ``on_focus_changed()`` if it supports it.
+        Updates DeviceManager focus, rebuilds MIDI router, switches
+        audio monitoring, and retargets Twister to the new device.
         """
         if not self.device_manager.set_focus(short_name):
             return False
@@ -935,6 +940,20 @@ class P6App:
 
         # Auto-apply hardware theme
         theme.apply_theme_for_device(short_name)
+
+        # Switch audio monitoring to the focused device
+        dev = self.device_manager.active
+        if dev and dev.audio_hint:
+            self.recorder.switch_device(dev.audio_hint)
+            if not self.recorder._monitoring:
+                self.recorder.start_monitoring()
+
+        # Retarget Twister to the focused device's MIDI
+        focused_midi = self._midi_connections.get(short_name)
+        if self.twister.connected and focused_midi:
+            self.twister.set_target(focused_midi)
+            self.twister._rebuild_pages()
+            print(f"Twister → {short_name}", flush=True)
 
         # Rewire MIDI router to focused device
         if self.atom_sq and self.p6:

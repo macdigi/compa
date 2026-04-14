@@ -351,6 +351,100 @@ class P6Midi:
             self._out.send_message([0xFB])
         self.state.playing = True
 
+    # ── Device Identity (firmware version) ────────────────────────────
+
+    def query_identity(self, timeout: float = 1.0) -> dict:
+        """Send MIDI Universal Identity Request and parse the response.
+
+        Returns dict with manufacturer, family, model, firmware version.
+        Empty dict if device doesn't respond.
+
+        Protocol: Send F0 7E 7F 06 01 F7
+        Expect:   F0 7E xx 06 02 [mfr...] [family_lo] [family_hi]
+                  [model_lo] [model_hi] [ver1] [ver2] [ver3] [ver4] F7
+        """
+        if not self._out or not self._in:
+            return {}
+
+        import rtmidi
+        # Temporarily create a new input that accepts SysEx
+        try:
+            syx_in = rtmidi.MidiIn()
+            # Find the same port
+            port_name = self._in.get_port_name(0) if self._in.is_port_open() else ""
+            syx_port = None
+            for i in range(syx_in.get_port_count()):
+                if self._profile and self._profile.midi_hint in syx_in.get_port_name(i):
+                    syx_port = i
+                    break
+            if syx_port is None:
+                del syx_in
+                return {}
+
+            syx_in.open_port(syx_port)
+            syx_in.ignore_types(sysex=False, timing=True, active_sense=True)
+
+            # Send Identity Request
+            self._out.send_message([0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7])
+
+            # Wait for response
+            import time
+            deadline = time.monotonic() + timeout
+            result = {}
+            while time.monotonic() < deadline:
+                msg = syx_in.get_message()
+                if msg:
+                    data, _ = msg
+                    if (len(data) >= 15 and data[0] == 0xF0 and
+                            data[1] == 0x7E and data[3] == 0x06 and data[4] == 0x02):
+                        # Parse identity response
+                        mfr = data[5]
+                        if mfr == 0:
+                            # Extended manufacturer ID (3 bytes)
+                            mfr_id = (data[5], data[6], data[7])
+                            family = data[8] | (data[9] << 8)
+                            model = data[10] | (data[11] << 8)
+                            v = data[12:16] if len(data) >= 16 else data[12:]
+                        else:
+                            mfr_id = mfr
+                            family = data[6] | (data[7] << 8)
+                            model = data[8] | (data[9] << 8)
+                            v = data[10:14] if len(data) >= 14 else data[10:]
+
+                        # Roland version bytes: [major_hi, major_lo, minor_hi, minor_lo]
+                        # or sometimes [0, major, minor, patch]
+                        # For SP-404 MK2: 00 03 00 00 → v3.0
+                        # Interpret as: skip leading zeros, major.minor
+                        non_zero = [b for b in v if b > 0]
+                        if non_zero:
+                            major = non_zero[0]
+                            minor = non_zero[1] if len(non_zero) > 1 else 0
+                            ver = f"{major}.{minor}" if minor else f"{major}.0"
+                        else:
+                            ver = "0.0"
+
+                        raw = " ".join(f"{b:02X}" for b in data)
+                        log.info("Identity response: %s", raw)
+                        print(f"MIDI Identity: {raw}", flush=True)
+
+                        result = {
+                            "manufacturer": mfr_id,
+                            "family": family,
+                            "model": model,
+                            "firmware": ver,
+                            "raw_version": list(v),
+                        }
+                        break
+                else:
+                    time.sleep(0.01)
+
+            syx_in.close_port()
+            del syx_in
+            return result
+        except Exception as e:
+            log.warning("Identity query failed: %s", e)
+            return {}
+
     # ── State queries ───────────────────────────────────────────────────
 
     def get_cc_value(self, cc: int) -> int:

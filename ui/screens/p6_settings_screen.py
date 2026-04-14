@@ -167,6 +167,11 @@ class P6SettingsScreen:
                     "action": lambda sn=short_name: self.app.switch_focus(sn),
                     "value": status,
                 })
+            # Color picker row for this device
+            self._rows.append({
+                "label": f"  Color", "type": "color_picker",
+                "device": short_name,
+            })
 
         if not connected:
             self._rows.append({"label": "  No devices", "type": "info", "value": "—"})
@@ -352,6 +357,24 @@ class P6SettingsScreen:
                         row["action_inc"]()
                     return
 
+                elif rtype == "color_picker":
+                    # Color swatch blocks
+                    swatches = list(theme.COLOR_SWATCHES.items())
+                    sw_size = min(26, (theme.SCREEN_WIDTH - 120) // len(swatches) - 2)
+                    sx = 100
+                    for j, (swatch_name, rgb) in enumerate(swatches):
+                        sr = pygame.Rect(sx + j * (sw_size + 2), ry + 4, sw_size, row_h - 8)
+                        if sr.collidepoint(mx, my):
+                            dev = row["device"]
+                            theme.set_device_color(dev, swatch_name)
+                            theme.apply_theme_for_device(dev)
+                            # Save preference
+                            from ui.p6_app import save_config_key
+                            save_config_key(f"COLOR_{dev}", swatch_name)
+                            print(f"Device color: {dev} → {swatch_name}", flush=True)
+                            return
+                    return
+
                 elif rtype == "button":
                     btn_rect = pygame.Rect(ctrl_x, ry + 4, 90, row_h - 8)
                     if btn_rect.collidepoint(mx, my):
@@ -457,6 +480,20 @@ class P6SettingsScreen:
                 pygame.draw.rect(surface, theme.BORDER, inc_rect, 1, border_radius=6)
                 lbl = f_med.render("+", True, theme.TEXT)
                 surface.blit(lbl, lbl.get_rect(center=inc_rect.center))
+
+            elif rtype == "color_picker":
+                # Row of color swatches
+                dev = row["device"]
+                current_accent = theme.get_device_color(dev)
+                swatches = list(theme.COLOR_SWATCHES.items())
+                sw_size = min(26, (theme.SCREEN_WIDTH - 120) // len(swatches) - 2)
+                sx = 100
+                for j, (swatch_name, rgb) in enumerate(swatches):
+                    sr = pygame.Rect(sx + j * (sw_size + 2), ry + 4, sw_size, row_h - 8)
+                    pygame.draw.rect(surface, rgb, sr, border_radius=4)
+                    # Highlight current selection with white border
+                    if rgb == current_accent:
+                        pygame.draw.rect(surface, theme.TEXT_BRIGHT, sr, 2, border_radius=4)
 
             elif rtype == "button":
                 btn_rect = pygame.Rect(ctrl_x, ry + 4, 90, row_h - 8)

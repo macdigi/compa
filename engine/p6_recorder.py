@@ -117,6 +117,10 @@ class P6Recorder:
             except Exception:
                 pass
 
+        if not candidates:
+            print(f"No audio input matching '{self._device_hint}'", flush=True)
+            return
+
         # Try each candidate with sample rate probing
         for dev_idx, dev_name in candidates:
             for rate in [44100, 48000, 96000]:
@@ -129,9 +133,9 @@ class P6Recorder:
                     s.close()
                     self._device_index = dev_idx
                     self._sample_rate = rate
-                    log.info("P6 recorder: device %d '%s' @ %dHz", dev_idx, dev_name, rate)
+                    print(f"Audio input: {dev_name} @ {rate}Hz", flush=True)
                     return
-                except Exception:
+                except Exception as e:
                     continue
 
         log.warning("No suitable audio input device found")
@@ -168,12 +172,17 @@ class P6Recorder:
             self.stop_recording()
         self.stop_monitoring()
 
+        # Small delay to let ALSA release the previous device
+        import time
+        time.sleep(0.15)
+
         old_hint = self._device_hint
         old_rate = self._sample_rate
 
         self._device_hint = hint
         self._device_index = None
         self._find_device()
+        print(f"switch_device('{hint}'): idx={self._device_index}", flush=True)
 
         if self._device_index is None:
             # Revert on failure

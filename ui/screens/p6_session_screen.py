@@ -20,6 +20,11 @@ class P6SessionScreen:
         self._disp_peak_l = 0.0
         self._disp_peak_r = 0.0
 
+        # Double-tap detection
+        self._last_card_tap = 0.0
+        self._last_card_name = ""
+        self._double_tap_ms = 400  # ms window for double tap
+
         # Session notes
         notes_dir = app.config.get("P6_SESSIONS_DIR",
                                     os.path.join(os.path.dirname(os.path.dirname(
@@ -122,12 +127,22 @@ class P6SessionScreen:
                         self._handle_card_button(dev_name, action)
                         return
 
-            # Tap card → expand to device workspace
+            # Tap card: single = focus + monitor, double = open workspace
             if hasattr(self, "_card_rects"):
+                import time
+                now = time.monotonic()
                 for rect, dev_name in self._card_rects:
                     if rect.collidepoint(mx, my):
-                        self.app.switch_screen("device_workspace",
-                                               context={"device": dev_name})
+                        if (dev_name == self._last_card_name and
+                                (now - self._last_card_tap) * 1000 < self._double_tap_ms):
+                            # Double tap → open workspace
+                            self.app.switch_screen("device_workspace",
+                                                   context={"device": dev_name})
+                        else:
+                            # Single tap → focus + start monitoring
+                            self.app.switch_focus(dev_name)
+                        self._last_card_tap = now
+                        self._last_card_name = dev_name
                         return
 
     def _handle_card_button(self, dev_name: str, action: str):
@@ -244,7 +259,7 @@ class P6SessionScreen:
             midi = self.app._midi_connections.get(short_name)
             is_focused = (short_name == focus_key)
             is_connected = midi and midi.connected
-            device_color = self._DEVICE_COLORS.get(short_name, theme.ACCENT)
+            device_color = theme.get_device_color(short_name)
 
             card_x = 12 + idx * (card_w + card_gap)
             card_rect = pygame.Rect(card_x, cards_y, card_w, card_h)
@@ -276,7 +291,14 @@ class P6SessionScreen:
                 pygame.draw.rect(surface, device_color, tag_rect, border_radius=3)
                 surf2 = f_tiny.render("FOCUS", True, theme.BG)
                 surface.blit(surf2, surf2.get_rect(center=tag_rect.center))
-            cy += 24
+            cy += 20
+
+            # ── Row 1b: Manufacturer ────────────────────────────────
+            mfr = profile.name.split()[0] if " " in profile.name else ""
+            if mfr:
+                surf = f_tiny.render(mfr, True, theme.TEXT_DIM)
+                surface.blit(surf, (cx, cy))
+            cy += 14
 
             # ── Row 2: Connection + audio specs + headphone button ────
             is_monitor_out = (short_name == self.app.monitor_output)
@@ -286,7 +308,8 @@ class P6SessionScreen:
                 pygame.draw.circle(surface, theme.RED, (cx + 4, cy + 5), 3, 1)
             audio_info = f"{profile.audio_in_channels}in/{profile.audio_out_channels}out"
             rates = "/".join(f"{r//1000}k" for r in profile.supported_sample_rates)
-            surf = f_tiny.render(f"{audio_info} {rates}", True, theme.TEXT_DIM)
+            midi_str = "MIDI" if is_connected else ""
+            surf = f_tiny.render(f"{audio_info} {rates} {midi_str}", True, theme.TEXT_DIM)
             surface.blit(surf, (cx + 12, cy))
 
             # Headphone/monitor output button (right side of row 2)

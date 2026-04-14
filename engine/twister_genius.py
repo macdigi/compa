@@ -37,8 +37,8 @@ log = logging.getLogger(__name__)
 
 COLOR_RED = 1
 COLOR_ORANGE = 15
-COLOR_YELLOW = 29
-COLOR_GREEN = 43
+COLOR_YELLOW = 22
+COLOR_GREEN = 50
 COLOR_CYAN = 57
 COLOR_BLUE = 73
 COLOR_PURPLE = 90
@@ -166,6 +166,41 @@ FX_KNOB_INDICES = [0, 6, 4, 5, 1, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 SLOTS_PER_PAGE = len(FX_KNOB_INDICES)  # 14
 
 
+def _build_p6_pages() -> list[list[EffectSlot]]:
+    """Build parameter pages for the P-6 (knobs = direct CC control)."""
+    # P-6 params organized as pages matching the P-6's sections
+    p6_params = [
+        # Page 1: Granular engine (16 params — fills entire 4x4 Twister)
+        ("Grain Size",  23, COLOR_YELLOW),   ("Grains",       21, COLOR_YELLOW),
+        ("Head Pos",    19, COLOR_YELLOW),    ("Head Speed",   20, COLOR_YELLOW),
+        ("Grain Shape", 15, COLOR_YELLOW),    ("Detune",       13, COLOR_YELLOW),
+        ("Spread",      25, COLOR_YELLOW),    ("Jitter",       68, COLOR_YELLOW),
+        ("Fine Tune",   18, COLOR_YELLOW),    ("Coarse Tune",  76, COLOR_YELLOW),
+        ("Rev Prob",     3, COLOR_YELLOW),    ("Start Mode",   79, COLOR_YELLOW),
+        ("Sample Sel",  88, COLOR_YELLOW),    ("Time KF",      16, COLOR_YELLOW),
+        ("Cutoff KF",   26, COLOR_YELLOW),    ("Vel Sens",     78, COLOR_YELLOW),
+        # Page 2: Filter + Envelope + Mixer + FX (16 params)
+        ("Cutoff",      74, COLOR_YELLOW),    ("Resonance",    71, COLOR_YELLOW),
+        ("Filter Type", 12, COLOR_YELLOW),    ("Env Depth",    24, COLOR_YELLOW),
+        ("Attack",      73, COLOR_YELLOW),    ("Decay",        75, COLOR_YELLOW),
+        ("Sustain",     30, COLOR_YELLOW),    ("Release",      72, COLOR_YELLOW),
+        ("Level",        7, COLOR_YELLOW),    ("Pan",          10, COLOR_YELLOW),
+        ("Auto Pan",     9, COLOR_YELLOW),    ("Send Delay",   85, COLOR_YELLOW),
+        ("Delay Time",  90, COLOR_YELLOW),    ("Delay Level",  92, COLOR_YELLOW),
+        ("Reverb Time", 89, COLOR_YELLOW),    ("Reverb Level", 91, COLOR_YELLOW),
+    ]
+    pages = []
+    for page_start in range(0, len(p6_params), 16):  # 16 per page (full 4x4)
+        chunk = p6_params[page_start:page_start + 16]
+        page = []
+        for name, cc, color in chunk:
+            slot = EffectSlot(name, color)
+            slot._p6_cc = cc  # Store the CC number for direct control
+            page.append(slot)
+        pages.append(page)
+    return pages if pages else [[]]
+
+
 def _build_pages_for_bus(bus_tab: str) -> list[list[EffectSlot]]:
     """Auto-generate FX pages from the full effects list for a bus.
 
@@ -182,8 +217,8 @@ def _build_pages_for_bus(bus_tab: str) -> list[list[EffectSlot]]:
         page = []
         n = len(page_effects)
         for i, (fx_idx, fx_name) in enumerate(page_effects):
-            # Evenly space colors across the wheel for this page
-            color = max(1, int(1 + (i * 126) / max(1, n - 1))) if n > 1 else 64
+            # Evenly space colors across the wheel (1-125, avoid 0=off and 127=white)
+            color = max(1, int(1 + (i * 124) / max(1, n - 1))) if n > 1 else 64
             page.append(EffectSlot(fx_name, color))
         pages.append(page)
 
@@ -292,9 +327,21 @@ class TwisterGenius:
     def page_count(self) -> int:
         return len(self._pages)
 
+    @property
+    def is_p6_mode(self) -> bool:
+        """True if targeting a P-6 (direct CC mode instead of FX load mode)."""
+        if self._target_midi and hasattr(self._target_midi, '_profile'):
+            p = self._target_midi._profile
+            if p and "P-6" in (p.short_name or ""):
+                return True
+        return False
+
     def _rebuild_pages(self):
-        """Rebuild FX pages for the current bus."""
-        self._pages = _build_pages_for_bus(self.bus_tab)
+        """Rebuild FX pages for the current device/bus."""
+        if self.is_p6_mode:
+            self._pages = _build_p6_pages()
+        else:
+            self._pages = _build_pages_for_bus(self.bus_tab)
         self._current_page = 0
         self._apply_page()
 
@@ -434,9 +481,17 @@ class TwisterGenius:
 
     def _paint_all_leds(self):
         """Paint all 16 knob LEDs with their assigned colors."""
+        if self.is_p6_mode:
+            # P-6 mode: ALL 16 knobs are params, paint them all
+            for i in range(16):
+                if i < len(self.slots):
+                    self._led_on(i, self.slots[i].color)
+                else:
+                    self._led_off(i)
+            return
+
         for i in range(16):
             if i == KNOB_CTRL2 or i == KNOB_CTRL3:
-                # Dynamic knobs: match active effect color
                 color = self._get_active_fx_color()
                 self._led_on(i, color if color else COLOR_OFF)
             else:
@@ -613,7 +668,21 @@ class TwisterGenius:
                 time.sleep(0.001)
 
     def _on_turn(self, phys_knob: int, value: int):
-        """Handle encoder turn with dynamic Ctrl 2/3 and shift support."""
+        """Handle encoder turn. P-6 mode = direct CC, SP-404 mode = FX param."""
+        # P-6 direct CC mode: ALL 16 knobs map directly to params
+        # P-6 receives CC on channel 15 (0-indexed: 14) = "Auto" channel
+        if self.is_p6_mode:
+            if phys_knob < len(self.slots):
+                slot = self.slots[phys_knob]
+                cc = getattr(slot, "_p6_cc", None)
+                if cc is not None and self._target_midi:
+                    self._target_midi.send_cc(cc, value, channel=14)
+                    if self.on_cc_sent:
+                        self.on_cc_sent(14, cc, value)
+                    if self.on_param_changed:
+                        self.on_param_changed(phys_knob, value)
+            return
+
         ch = self._active_bus
 
         if phys_knob == KNOB_CTRL2:
@@ -657,6 +726,12 @@ class TwisterGenius:
     def _on_press(self, phys_knob: int, value: int):
         """Handle encoder press/release with shift, focus mode, momentary/toggle."""
 
+        # P-6 mode: knob 4 (KNOB_CTRL3) press = cycle pages
+        if self.is_p6_mode:
+            if phys_knob == KNOB_CTRL3 and value >= 64:
+                self.next_page()
+            return
+
         # KNOB_CTRL2 = SHIFT key
         if phys_knob == KNOB_CTRL2:
             if value >= 64:
@@ -667,10 +742,11 @@ class TwisterGenius:
                 self._pressed_knobs.discard(phys_knob)
             return
 
-        # KNOB_CTRL3 = no press action (just turn for Ctrl 3/6)
+        # KNOB_CTRL3 = press cycles FX pages, turn for Ctrl 3/6
         if phys_knob == KNOB_CTRL3:
             if value >= 64:
                 self._pressed_knobs.add(phys_knob)
+                self.next_page()
             else:
                 self._pressed_knobs.discard(phys_knob)
             return

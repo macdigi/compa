@@ -135,14 +135,63 @@ def apply_theme(name: str):
     NAV_ACTIVE = t["nav_active"]
 
 
+# ── Per-Device Color Overrides ───────────────────────────────────────
+# Maps device short_name → theme name. Editable at runtime via settings.
+_device_theme_map = {
+    "SP-404MKII": "sp404",
+    "P-6": "p6",
+    "Force": "force",
+}
+
+# Color swatches available for picking (name → accent RGB)
+COLOR_SWATCHES = {
+    "Teal":    (0, 200, 180),
+    "Yellow":  (255, 230, 0),
+    "Orange":  (235, 120, 30),
+    "Red":     (220, 50, 50),
+    "Pink":    (220, 80, 160),
+    "Purple":  (160, 80, 220),
+    "Blue":    (70, 140, 230),
+    "Cyan":    (50, 200, 220),
+    "Green":   (50, 195, 70),
+    "White":   (210, 210, 218),
+}
+
+
+def _make_theme_from_accent(accent: tuple) -> dict:
+    """Generate a full theme dict from a single accent RGB color."""
+    r, g, b = accent
+    return {
+        "accent": accent,
+        "accent_dim": (r * 2 // 3, g * 2 // 3, b * 2 // 3),
+        "accent_bright": (min(255, r + 30), min(255, g + 30), min(255, b + 30)),
+        "nav_active": accent,
+        "border_focus": (min(255, r + 20), min(255, g + 20), min(255, b + 20)),
+        "knob_fill": accent,
+        "pad_active": accent,
+    }
+
+
+def set_device_color(device_short_name: str, swatch_name: str):
+    """Assign a color swatch to a device. Creates/updates a dynamic theme."""
+    if swatch_name not in COLOR_SWATCHES:
+        return
+    accent = COLOR_SWATCHES[swatch_name]
+    theme_key = f"custom_{device_short_name.lower().replace('-', '').replace(' ', '')}"
+    THEMES[theme_key] = _make_theme_from_accent(accent)
+    _device_theme_map[device_short_name] = theme_key
+
+
+def get_device_color(device_short_name: str) -> tuple:
+    """Get the current accent color for a device."""
+    theme_name = _device_theme_map.get(device_short_name, "compa")
+    t = THEMES.get(theme_name, THEMES["compa"])
+    return t["accent"]
+
+
 def apply_theme_for_device(device_short_name: str):
     """Auto-apply theme matching a device. Falls back to 'compa'."""
-    mapping = {
-        "SP-404MKII": "sp404",
-        "P-6": "p6",
-        "Force": "force",
-    }
-    theme_name = mapping.get(device_short_name, "compa")
+    theme_name = _device_theme_map.get(device_short_name, "compa")
     apply_theme(theme_name)
 
 

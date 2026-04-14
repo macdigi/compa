@@ -81,6 +81,11 @@ class P6RadioScreen:
         self._viz_history = np.zeros(self._viz_width, dtype=np.float32)
         self._viz_pos = 0
 
+        # Fullscreen oscilloscope mode
+        self._scope_fullscreen = False
+        self._scope_smooth_l = 0.0
+        self._scope_smooth_r = 0.0
+
         self._apply_filter()
 
     def _apply_filter(self):
@@ -114,6 +119,24 @@ class P6RadioScreen:
         return self._search_active
 
     def handle_event(self, event):
+        # Fullscreen scope: handle REC, RECALL, EXIT buttons
+        if self._scope_fullscreen:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                rects = getattr(self, "_scope_rects", {})
+                if rects.get("rec") and rects["rec"].collidepoint(mx, my):
+                    if self._radio.is_recording:
+                        self._radio.stop_recording()
+                    else:
+                        self._radio.start_recording()
+                elif rects.get("recall") and rects["recall"].collidepoint(mx, my):
+                    path = self._radio.capture()
+                    if path:
+                        self._capture_flash = 30
+                elif rects.get("exit") and rects["exit"].collidepoint(mx, my):
+                    self._scope_fullscreen = False
+            return
+
         # Scrollbar drag — smooth
         if event.type == pygame.MOUSEMOTION and self._dragging_scrollbar:
             browser_y = 100 if self._radio.is_playing else 42
@@ -189,9 +212,15 @@ class P6RadioScreen:
                         self._capture_flash = 30
                     return
 
+                # Scope button (fullscreen oscilloscope)
+                scope_rect = pygame.Rect(ctrl_x + 184, 6, 40, 40)
+                if scope_rect.collidepoint(mx, my):
+                    self._scope_fullscreen = True
+                    return
+
                 # Volume -/+
-                vol_down = pygame.Rect(ctrl_x + 184, 28, 48, 18)
-                vol_up = pygame.Rect(ctrl_x + 236, 28, 48, 18)
+                vol_down = pygame.Rect(ctrl_x + 232, 28, 48, 18)
+                vol_up = pygame.Rect(ctrl_x + 284, 28, 48, 18)
                 if vol_down.collidepoint(mx, my):
                     self._radio.volume = max(0.0, self._radio.volume - 0.1)
                     return
@@ -304,6 +333,8 @@ class P6RadioScreen:
             peak_l, peak_r = self._radio.peak_levels
             self._disp_peak_l = max(peak_l, self._disp_peak_l * self._meter_decay)
             self._disp_peak_r = max(peak_r, self._disp_peak_r * self._meter_decay)
+            self._scope_smooth_l = max(peak_l, self._scope_smooth_l * 0.85)
+            self._scope_smooth_r = max(peak_r, self._scope_smooth_r * 0.85)
             # Feed visualizer
             avg = (self._disp_peak_l + self._disp_peak_r) * 0.5
             self._viz_history[self._viz_pos % self._viz_width] = avg
@@ -324,6 +355,10 @@ class P6RadioScreen:
         f_small = theme.font("small")
         f_tiny = theme.font("tiny")
         playing = self._radio.is_playing
+
+        if self._scope_fullscreen and playing:
+            self._draw_fullscreen_scope(surface, f_hero, f_large, f_med, f_small, f_tiny)
+            return
         cap_secs = self._radio.capture_seconds
 
         # ═══════════════════════════════════════════════════════════════
@@ -402,9 +437,15 @@ class P6RadioScreen:
             surf = f_small.render(c_text, True, c_tc)
             surface.blit(surf, surf.get_rect(center=capture_rect.center))
 
+            # SCOPE button (fullscreen oscilloscope)
+            scope_rect = pygame.Rect(ctrl_x + 184, 6, 40, 40)
+            pygame.draw.rect(surface, theme.BLUE, scope_rect, border_radius=6)
+            surf = f_tiny.render("SCOPE", True, theme.BG)
+            surface.blit(surf, surf.get_rect(center=scope_rect.center))
+
             # Volume bar (slim, right edge)
             vol = self._radio.volume
-            vol_rect = pygame.Rect(ctrl_x + 184, 10, 100, 14)
+            vol_rect = pygame.Rect(ctrl_x + 232, 10, 60, 14)
             pygame.draw.rect(surface, theme.KNOB_BG, vol_rect, border_radius=3)
             vf = int(vol_rect.width * vol)
             if vf > 0:
@@ -414,8 +455,8 @@ class P6RadioScreen:
             surface.blit(surf, surf.get_rect(center=vol_rect.center))
 
             # Vol -/+
-            vol_down = pygame.Rect(ctrl_x + 184, 28, 48, 18)
-            vol_up = pygame.Rect(ctrl_x + 236, 28, 48, 18)
+            vol_down = pygame.Rect(ctrl_x + 232, 28, 30, 18)
+            vol_up = pygame.Rect(ctrl_x + 264, 28, 30, 18)
             pygame.draw.rect(surface, theme.BUTTON_BG, vol_down, border_radius=3)
             pygame.draw.rect(surface, theme.BUTTON_BG, vol_up, border_radius=3)
             surf = f_tiny.render("-VOL", True, theme.TEXT_DIM)
@@ -587,6 +628,132 @@ class P6RadioScreen:
 
         # Modal
         self._url_modal.draw(surface)
+
+    def _draw_fullscreen_scope(self, surface, f_hero, f_large, f_med, f_small, f_tiny):
+        """Fullscreen oscilloscope with station name + metadata overlay."""
+        pad = 6
+        scope_y = 4
+        scope_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 8
+        scope_w = theme.SCREEN_WIDTH - pad * 2
+        scope_rect = pygame.Rect(pad, scope_y, scope_w, scope_h)
+
+        # Background
+        pygame.draw.rect(surface, (8, 8, 14), scope_rect, border_radius=6)
+
+        center_y = scope_rect.centery
+        half_h = (scope_h - 20) // 2
+
+        # Grid lines
+        for frac in (0.25, 0.5, 0.75):
+            gy = scope_rect.y + int(scope_h * frac)
+            pygame.draw.line(surface, (18, 18, 26),
+                            (scope_rect.x + 4, gy), (scope_rect.right - 30, gy))
+
+        # Meter area
+        meter_w = 24
+        wave_w = scope_w - meter_w - 14
+
+        # Waveform from radio's play buffer (ring buffer with running write counter)
+        radio = self._radio
+        buf = radio._play_buf
+        buf_size = radio._play_buf_size
+        wpos = radio._play_write
+        display_frames = min(4096, buf_size)
+
+        # Read most recent chunk from the ring buffer using modular indexing
+        end = wpos % buf_size
+        start = (wpos - display_frames) % buf_size
+        if start < end:
+            recent = buf[start:end]
+        else:
+            recent = np.concatenate([buf[start:], buf[:end]])
+
+        if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
+            mono = recent.mean(axis=1) if recent.ndim > 1 else recent
+            step = max(1, len(mono) // wave_w)
+            points = []
+            dc = theme.ACCENT
+
+            for px in range(wave_w):
+                si = px * step
+                if si < len(mono):
+                    val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
+                    py = center_y - int(val * half_h)
+                    points.append((scope_rect.x + 4 + px, py))
+
+            if len(points) > 1:
+                dim = (dc[0] // 5, dc[1] // 5, dc[2] // 5)
+                for px_x, py in points:
+                    if py != center_y:
+                        pygame.draw.line(surface, dim, (px_x, center_y), (px_x, py))
+                pygame.draw.lines(surface, dc, False, points, 2)
+        else:
+            pygame.draw.line(surface, (35, 35, 48),
+                           (scope_rect.x + 4, center_y),
+                           (scope_rect.x + 4 + wave_w, center_y))
+
+        # L/R meters
+        mx = scope_rect.right - meter_w - 4
+        mh = scope_h - 20
+        my = scope_rect.y + 8
+        for i, (level, label) in enumerate([(self._scope_smooth_l, "L"), (self._scope_smooth_r, "R")]):
+            bar_x = mx + i * (meter_w // 2 + 1)
+            bar_w = meter_w // 2 - 1
+            pygame.draw.rect(surface, (16, 16, 24), (bar_x, my, bar_w, mh))
+            fill = int(level * mh)
+            if fill > 0:
+                color = theme.RED if level > 0.9 else (theme.YELLOW if level > 0.7 else theme.ACCENT)
+                pygame.draw.rect(surface, color, (bar_x, my + mh - fill, bar_w, fill))
+
+        # Station name (big, bottom-left)
+        name = radio.station_name
+        name_y = scope_rect.bottom - 70
+        surf = f_hero.render(name[:30], True, theme.ACCENT)
+        surface.blit(surf, (scope_rect.x + 16, name_y))
+
+        # Track title / metadata (scrolling text below station name)
+        track = radio.track_title
+        if track:
+            surf = f_med.render(track[:60], True, theme.TEXT)
+            surface.blit(surf, (scope_rect.x + 16, name_y + 36))
+
+        # Recording indicator
+        if radio.is_recording:
+            dur = radio.rec_duration
+            surf = f_small.render(f"REC {dur:.0f}s", True, theme.RED)
+            surface.blit(surf, (scope_rect.x + 10, scope_rect.y + 8))
+
+        # ── Controls (top-right) ─────────────────────────────────────
+        ctrl_x = scope_rect.right - 220
+        ctrl_y = scope_rect.y + 8
+
+        # REC button
+        rec_rect = pygame.Rect(ctrl_x, ctrl_y, 60, 34)
+        rec_bg = theme.RED if radio.is_recording else theme.BUTTON_BG
+        pygame.draw.rect(surface, rec_bg, rec_rect, border_radius=6)
+        rec_label = f"REC {radio.rec_duration:.0f}s" if radio.is_recording else "REC"
+        surf = f_tiny.render(rec_label, True, theme.TEXT_BRIGHT if radio.is_recording else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=rec_rect.center))
+
+        # RECALL button
+        cap_secs = radio.capture_seconds
+        recall_rect = pygame.Rect(ctrl_x + 68, ctrl_y, 70, 34)
+        recall_bg = theme.ACCENT if cap_secs >= 1 else theme.BUTTON_BG
+        pygame.draw.rect(surface, recall_bg, recall_rect, border_radius=6)
+        surf = f_tiny.render(f"RCL {int(cap_secs)}s", True, theme.BG if cap_secs >= 1 else theme.TEXT_DIM)
+        surface.blit(surf, surf.get_rect(center=recall_rect.center))
+
+        # EXIT button
+        exit_rect = pygame.Rect(ctrl_x + 146, ctrl_y, 60, 34)
+        pygame.draw.rect(surface, theme.BUTTON_BG, exit_rect, border_radius=6)
+        surf = f_tiny.render("EXIT", True, theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=exit_rect.center))
+
+        # Store rects for click handling
+        self._scope_rects = {"rec": rec_rect, "recall": recall_rect, "exit": exit_rect}
+
+        # Border
+        pygame.draw.rect(surface, (28, 28, 38), scope_rect, 1, border_radius=6)
 
     def _draw_meter(self, surface, x, y, w, h, level, label, font):
         lbl = font.render(label, True, theme.TEXT_DIM)
