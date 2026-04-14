@@ -12,6 +12,10 @@ recordings/
 sessions/
 samples/
 
+# Runtime flags and config
+.setup_complete
+compa.config
+
 # Claude Code
 .claude/
 
