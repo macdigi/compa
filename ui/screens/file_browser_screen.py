@@ -25,6 +25,7 @@ class FileBrowserScreen:
         ("Kits",       "kits"),
         ("Sessions",   "sessions"),
         ("Network",    "network"),
+        ("Device",     "device"),    # MPC/Force via USB Computer Mode
     ]
 
     def __init__(self, app):
@@ -75,6 +76,17 @@ class FileBrowserScreen:
     def on_enter(self):
         if self._browser:
             self._browser.refresh()
+        # Consume context from other screens (e.g. kit builder "push this kit")
+        ctx = getattr(self.app, "_screen_context", None) or {}
+        if ctx.get("location") == "device":
+            # Forward the context to the transfer screen via its on_enter,
+            # which already handles {mode, kit_name}
+            xfer = self._get_xfer_screen()
+            if xfer is not None:
+                # TransferScreen.on_enter reads app._screen_context directly,
+                # so leave it in place for it to consume.
+                pass
+            self._switch_location("device")
 
     def on_exit(self):
         # Stop any preview playback
@@ -112,8 +124,52 @@ class FileBrowserScreen:
                 if peers:
                     self._net_selected_peer = peers[0]
                     self._load_network_peer()
+        elif loc == "device":
+            # Hand control to the embedded TransferScreen — it already
+            # handles its own tabs (PUSH/PULL/KITS), drive selector, and
+            # transfers. on_enter refreshes its file lists.
+            xfer = self._get_xfer_screen()
+            if xfer and hasattr(xfer, "on_enter"):
+                self._with_xfer_shim(lambda: (xfer.relayout(), xfer.on_enter()))
         else:
             self._build_browser()
+
+    def _get_xfer_screen(self):
+        """Get the shared TransferScreen instance from the app, marked embedded."""
+        xfer = getattr(self.app, "screens", {}).get("transfer")
+        if xfer is not None and not getattr(xfer, "_embedded", False):
+            xfer._embedded = True
+        return xfer
+
+    def _xfer_content_rect(self) -> pygame.Rect:
+        """Bounds of the content pane where the TransferScreen draws."""
+        return pygame.Rect(
+            self._sidebar_w, 0,
+            theme.SCREEN_WIDTH - self._sidebar_w,
+            theme.SCREEN_HEIGHT - theme.NAV_HEIGHT,
+        )
+
+    def _with_xfer_shim(self, fn):
+        """Run ``fn()`` with theme.SCREEN_WIDTH/HEIGHT shimmed to the content pane.
+
+        TransferScreen does its own layout against theme.SCREEN_WIDTH /
+        SCREEN_HEIGHT minus NAV_HEIGHT. When we embed it into the Files
+        screen, we want its coordinate system to start at 0,0 inside the
+        content subsurface with a smaller logical width. We temporarily
+        override those attributes, run the callback, and restore.
+        """
+        content = self._xfer_content_rect()
+        orig_w = theme.SCREEN_WIDTH
+        orig_h = theme.SCREEN_HEIGHT
+        theme.SCREEN_WIDTH = content.width
+        # Give it its content height plus NAV_HEIGHT so that its own
+        # subtraction of NAV_HEIGHT for the action bar lands correctly.
+        theme.SCREEN_HEIGHT = content.height + theme.NAV_HEIGHT
+        try:
+            return fn()
+        finally:
+            theme.SCREEN_WIDTH = orig_w
+            theme.SCREEN_HEIGHT = orig_h
 
     def _net_local_root(self) -> str:
         return self.app.config.get("P6_RECORDING_DIR",
@@ -214,6 +270,48 @@ class FileBrowserScreen:
         )
 
     def handle_event(self, event):
+        # ── Sidebar always wins for clicks in the sidebar area ───────
+        if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                and event.pos[0] < self._sidebar_w):
+            mx, my = event.pos
+            for i, (label, key) in enumerate(self.LOCATIONS):
+                r = pygame.Rect(4, 44 + i * 44, self._sidebar_w - 8, 40)
+                if r.collidepoint(mx, my):
+                    self._switch_location(key)
+                    return
+            # Peer entries
+            peer_y = 44 + len(self.LOCATIONS) * 44 + 12
+            if hasattr(self.app, 'compa_browser'):
+                peers = self.app.compa_browser.peers
+                for i, peer in enumerate(peers):
+                    r = pygame.Rect(4, peer_y + i * 36, self._sidebar_w - 8, 32)
+                    if r.collidepoint(mx, my):
+                        self._switch_to_peer(peer)
+                        return
+            return  # Click landed in sidebar area but not on anything
+
+        # ── Device (MPC/Force transfer) — delegate entirely ─────────
+        if self._current_loc == "device":
+            xfer = self._get_xfer_screen()
+            if xfer and hasattr(xfer, "handle_event"):
+                offset_x = self._sidebar_w
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
+                                  pygame.MOUSEMOTION):
+                    mx, my = event.pos
+                    if mx < offset_x:
+                        return  # sidebar handled above
+                    attrs = {"pos": (mx - offset_x, my)}
+                    if event.type == pygame.MOUSEMOTION:
+                        attrs["rel"] = getattr(event, "rel", (0, 0))
+                        attrs["buttons"] = getattr(event, "buttons", (0, 0, 0))
+                    else:
+                        attrs["button"] = getattr(event, "button", 1)
+                    remapped = pygame.event.Event(event.type, attrs)
+                    self._with_xfer_shim(lambda: (xfer.relayout(), xfer.handle_event(remapped)))
+                else:
+                    self._with_xfer_shim(lambda: (xfer.relayout(), xfer.handle_event(event)))
+            return
+
         # ── Mouse wheel scroll on network panes ──────────────────────
         if (self._current_loc == "network" and event.type == pygame.MOUSEBUTTONDOWN
                 and event.button in (4, 5)):
@@ -340,6 +438,11 @@ class FileBrowserScreen:
             self._browser.update()
         if self._action_flash > 0:
             self._action_flash -= 1
+        # Tick embedded transfer screen when we're showing it
+        if self._current_loc == "device":
+            xfer = self._get_xfer_screen()
+            if xfer and hasattr(xfer, "update"):
+                self._with_xfer_shim(xfer.update)
 
     def draw(self, surface: pygame.Surface):
         f_large = theme.font("large")
@@ -352,7 +455,21 @@ class FileBrowserScreen:
         surface.blit(surf, (10, 6))
 
         # Current path (right of header)
-        if self._viewing_peer:
+        if self._current_loc == "device":
+            # "DEVICE" label + drive info lives in the transfer pane itself
+            xfer = self._get_xfer_screen()
+            storage = getattr(self.app, "akai_storage", None)
+            if storage and storage.is_connected and storage.drives:
+                try:
+                    d = storage.drives[max(0, xfer._active_drive if xfer else 0)]
+                    info = f"DEVICE: {d.label} · {d.free_gb}GB free"
+                except Exception:
+                    info = "DEVICE"
+            else:
+                info = "DEVICE: no MPC/Force in Computer Mode"
+            surf = f_small.render(info, True, theme.TEXT_DIM)
+            surface.blit(surf, (110, 14))
+        elif self._viewing_peer:
             label = f"{self._viewing_peer['name']} ({self._viewing_peer['ip']})"
             surf = f_small.render(f"📡 {label}", True, theme.BLUE)
             surface.blit(surf, (110, 14))
@@ -390,10 +507,13 @@ class FileBrowserScreen:
                     surf = f_small.render(peer["name"][:16], True, tc)
                     surface.blit(surf, (r.x + 12, r.y + 9))
 
-        # Toolbar
+        # Toolbar — Device tab owns its own toolbar from TransferScreen
         tb_y = 44
         btn_w = 90
-        if self._viewing_peer:
+        buttons = []
+        if self._current_loc == "device":
+            pass  # TransferScreen draws its own tabs + action buttons
+        elif self._viewing_peer:
             buttons = [
                 ("DOWNLOAD", theme.GREEN),
                 ("PULL ALL", theme.BLUE),
@@ -444,7 +564,9 @@ class FileBrowserScreen:
                 surface.blit(surf, surf.get_rect(centery=np_rect.centery, left=np_rect.x + 8))
 
         # Content area
-        if self._current_loc == "network":
+        if self._current_loc == "device":
+            self._draw_device_transfer(surface)
+        elif self._current_loc == "network":
             self._draw_network_panes(surface, f_med, f_small, f_tiny)
         elif self._viewing_peer:
             self._draw_peer_files(surface, f_small, f_tiny)
@@ -462,6 +584,35 @@ class FileBrowserScreen:
         # Transfer progress overlay
         if self._transfer_active:
             self._draw_progress_overlay(surface, f_med, f_small)
+
+    def _draw_device_transfer(self, surface: pygame.Surface):
+        """Delegate the content pane to the shared TransferScreen.
+
+        Draws the TransferScreen into a subsurface covering the right-hand
+        content area. Under _with_xfer_shim(), theme.SCREEN_WIDTH/HEIGHT are
+        temporarily set to the content pane's dimensions so the transfer
+        screen's layout math lands inside the subsurface.
+        """
+        xfer = self._get_xfer_screen()
+        if xfer is None:
+            f = theme.font("medium")
+            msg = f.render("Transfer module unavailable", True, theme.TEXT_DIM)
+            surface.blit(msg, (self._sidebar_w + 16, 100))
+            return
+
+        content_rect = self._xfer_content_rect()
+        try:
+            sub = surface.subsurface(content_rect)
+        except ValueError:
+            # Subsurface can fail if the surface format is incompatible.
+            xfer.draw(surface)
+            return
+
+        def _do():
+            xfer.relayout()
+            xfer.draw(sub)
+
+        self._with_xfer_shim(_do)
 
     def _draw_peer_files(self, surface, f_small, f_tiny):
         """Draw the peer files list (when viewing a peer)."""

@@ -395,6 +395,29 @@ class P6SettingsScreen:
                             "action": lambda s=src_key, d=dst_key: self._start_clock_relay(s, d),
                         })
 
+        # IO & Connectivity (WiFi / Bluetooth / Network info)
+        self._rows.append({"label": "", "type": "section",
+                           "value": "IO & CONNECTIVITY"})
+        try:
+            from engine import network_manager as nm
+            ssid = self.app.wifi.current_ssid() if getattr(self.app, "wifi", None) else ""
+            ip = nm.get_ip_address()
+            status_bits = []
+            if ssid:
+                status_bits.append(f"WiFi: {ssid}")
+            elif ip and ip != "—":
+                status_bits.append("Ethernet")
+            status_bits.append(ip)
+            io_status = " · ".join(status_bits)[:40]
+        except Exception:
+            io_status = ""
+        self._rows.append({
+            "label": "  Network & Bluetooth", "type": "button",
+            "btn_label": "OPEN",
+            "action": lambda: self.app.switch_screen("io"),
+            "value": io_status,
+        })
+
         # Audio and display info
         self._rows.extend([
             {"label": "", "type": "section", "value": "AUDIO & DISPLAY"},

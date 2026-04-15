@@ -27,6 +27,7 @@ from ui.screens.kit_builder_screen import KitBuilderScreen
 from ui.screens.transfer_screen import TransferScreen
 from ui.screens.file_browser_screen import FileBrowserScreen
 from ui.screens.device_workspace import DeviceWorkspaceScreen
+from ui.screens.io_settings_screen import IOSettingsScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
@@ -40,6 +41,7 @@ from engine.spectra_mapper import SpectraMapper
 from engine.compa_link import CompaServer, CompaBrowser
 from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
+from engine.network_manager import WifiManager, BluetoothManager
 from ui.splash import run_splash
 from ui.wizard import run_wizard
 
@@ -256,6 +258,14 @@ class P6App:
         from ui.components.audio_player import AudioPlayer
         self.audio_player = AudioPlayer(self)
 
+        # ── On-screen keyboard overlay (for WiFi password, etc.) ────
+        from ui.components.keyboard import OnScreenKeyboard
+        self.keyboard = OnScreenKeyboard(self)
+
+        # ── WiFi + Bluetooth managers (end-user connectivity) ───────
+        self.wifi = WifiManager()
+        self.bluetooth = BluetoothManager()
+
         # ── Compa-to-Compa network link ──────────────────────────────
         recordings_dir = self.config.get("P6_RECORDING_DIR",
                                           os.path.join(PROJECT_ROOT, "recordings"))
@@ -306,10 +316,14 @@ class P6App:
             "transfer": TransferScreen(self),
             "device_workspace": DeviceWorkspaceScreen(self),
             "files": FileBrowserScreen(self),
+            "io": IOSettingsScreen(self),
         }
         self.current_screen_name = "session"
 
         # ── Nav bar (responsive) ─────────────────────────────────────
+        # XFER is now a location inside the Files screen ("Device"), so
+        # it no longer has its own nav slot. The transfer screen still
+        # lives in self.screens["transfer"] and is delegated to by Files.
         nav_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
         if theme.SCREEN_WIDTH >= 700:
             # Wide screen: full labels
@@ -319,7 +333,6 @@ class P6App:
                 ("SAMPLE",  "sample"),
                 ("RADIO",   "radio"),
                 ("FILES",   "files"),
-                ("XFER",    "transfer"),
             ]
             font_name = "small"
         elif theme.SCREEN_WIDTH >= 400:
@@ -330,7 +343,6 @@ class P6App:
                 ("SMP", "sample"),
                 ("RAD", "radio"),
                 ("FIL", "files"),
-                ("XFR", "transfer"),
             ]
             font_name = "tiny"
         else:
@@ -341,7 +353,6 @@ class P6App:
                 ("F", "sample"),
                 ("~", "radio"),
                 ("FB", "files"),
-                ("X", "transfer"),
             ]
             font_name = "tiny"
 
@@ -1487,6 +1498,11 @@ class P6App:
             if nav_handled:
                 continue
 
+            # On-screen keyboard takes highest priority when visible
+            if getattr(self, 'keyboard', None) and self.keyboard.visible:
+                if self.keyboard.handle_event(event):
+                    continue
+
             # Audio player modal takes priority when visible
             if getattr(self, 'audio_player', None) and self.audio_player.visible:
                 if self.audio_player.handle_event(event):
@@ -1538,6 +1554,9 @@ class P6App:
         # Audio player overlays everything when visible
         if getattr(self, 'audio_player', None) and self.audio_player.visible:
             self.audio_player.draw(self.screen)
+        # Keyboard overlays absolutely everything (including the audio player)
+        if getattr(self, 'keyboard', None) and self.keyboard.visible:
+            self.keyboard.draw(self.screen)
         pygame.display.flip()
 
         # Draw software cursor in FB + mouse mode

@@ -44,12 +44,15 @@ class TransferScreen:
         self._status_time = 0.0
         self._transferring = False
 
+        # When embedded inside another screen (e.g. Files → Device), we
+        # skip drawing our own top-level header since the host already
+        # owns that area.
+        self._embedded = False
+
         # Active drive index
         self._active_drive = -1
 
-        # Content area
-        content_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self.CONTENT_Y - self.ACTION_H - 8
-        content_rect = pygame.Rect(16, self.CONTENT_Y, theme.SCREEN_WIDTH - 32, content_h)
+        content_rect = self._compute_content_rect()
 
         # PUSH: multi-select list of local recordings
         self._push_list = TouchList(content_rect, item_height=48, multi_select=True)
@@ -65,6 +68,24 @@ class TransferScreen:
 
         # KITS: list of exported kits
         self._kit_list = TouchList(content_rect, item_height=56)
+
+    def _compute_content_rect(self) -> pygame.Rect:
+        """Content rect computed from current theme dimensions (may be shimmed)."""
+        content_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self.CONTENT_Y - self.ACTION_H - 8
+        return pygame.Rect(16, self.CONTENT_Y, theme.SCREEN_WIDTH - 32, content_h)
+
+    def relayout(self):
+        """Recompute internal rects from current theme dimensions.
+
+        The Files screen embeds this screen inside its content pane and
+        temporarily shims theme.SCREEN_WIDTH / SCREEN_HEIGHT to that pane's
+        size. Call this after the shim is active so the lists use the new
+        bounds instead of the values baked in at __init__.
+        """
+        rect = self._compute_content_rect()
+        self._push_list.set_rect(rect)
+        self._pull_browser.set_rect(rect)
+        self._kit_list.set_rect(rect)
 
     def on_enter(self):
         self._refresh_push_list()
@@ -406,7 +427,8 @@ class TransferScreen:
 
             active_d = drives[self._active_drive] if self._active_drive < len(drives) else None
             header_info = f"{active_d.label}: {active_d.free_gb}GB free" if active_d else ""
-            theme.draw_screen_header(surface, "TRANSFER", header_info)
+            if not self._embedded:
+                theme.draw_screen_header(surface, "TRANSFER", header_info)
 
             # Drive selector buttons
             self._drive_btn_rects = []
@@ -425,7 +447,8 @@ class TransferScreen:
                 self._drive_btn_rects.append((rect, i))
                 dx = rect.x - 6
         else:
-            theme.draw_screen_header(surface, "TRANSFER", "No device in Computer Mode")
+            if not self._embedded:
+                theme.draw_screen_header(surface, "TRANSFER", "No device in Computer Mode")
             self._drive_btn_rects = []
 
         # Mode tabs

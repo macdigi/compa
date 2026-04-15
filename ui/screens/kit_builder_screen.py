@@ -463,8 +463,9 @@ class KitBuilderScreen:
 
         if self._upload_btn_rect().collidepoint(mx, my):
             if self._last_export_name:
-                # PUSH TO DEVICE — jump to transfer screen with kit pre-selected
-                self.app.switch_screen("transfer", {
+                # PUSH TO DEVICE — jump to Files → Device tab with kit pre-selected
+                self.app.switch_screen("files", {
+                    "location": "device",
                     "mode": "kits",
                     "kit_name": self._last_export_name,
                 })
