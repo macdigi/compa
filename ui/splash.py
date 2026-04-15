@@ -22,7 +22,7 @@ COMPA_LOGO = [
     " \\___\\___/|_|  |_|_|/_/ \\_\\",
 ]
 
-TAGLINE = "P-6 Companion"
+TAGLINE = "SP + P-6 Companion"
 
 
 def run_splash(screen: pygame.Surface, clock: pygame.time.Clock):
