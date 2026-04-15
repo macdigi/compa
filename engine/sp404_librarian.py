@@ -3,7 +3,7 @@
 The SP-404 MK2 exposes its SD card as USB mass storage when it's put in
 USB storage mode (Tools menu). Samples live at:
 
-    /media/pi/SP-404MKII/
+    <mount>/
         ROLAND/SP-404MKII/
             PROJECT_01/
                 PADCONF.BIN           — pad config (RFPD magic, partially decoded)
@@ -12,6 +12,10 @@ USB storage mode (Tools menu). Samples live at:
                     BANK1-02.SMP
                     ...
                     BANK10-16.SMP
+
+The mount point is discovered dynamically via engine.device_mount — we
+don't hardcode `/media/pi/SP-404MKII` because the actual path varies
+depending on the mount helper and the volume label.
 
 The .SMP format is a 20-byte RFWV header + raw PCM:
     0x00: 'RFWV' magic (4 bytes)
@@ -40,51 +44,119 @@ from typing import Callable, Optional
 
 from engine.p6_image import P6ImageManager
 from engine import sp404_storage
+from engine.device_mount import find_device_mount, list_mount_candidates_debug
 
 log = logging.getLogger(__name__)
+
+
+def _sp404_signature(mount_point: str, label: str) -> bool:
+    """Return True if `mount_point` looks like an SP-404 MK2 volume."""
+    try:
+        if not os.path.isdir(mount_point):
+            return False
+        # Primary signature: ROLAND/SP-404MKII/
+        if os.path.isdir(os.path.join(mount_point, "ROLAND", "SP-404MKII")):
+            return True
+        # Alternate Roland-only layout (bare SD before first boot)
+        if os.path.isdir(os.path.join(mount_point, "ROLAND")):
+            # Make sure the SP-404MKII or SMPL dir is in there somewhere
+            try:
+                roland = os.path.join(mount_point, "ROLAND")
+                for entry in os.listdir(roland):
+                    if "SP-404" in entry.upper() or "SP404" in entry.upper():
+                        return True
+            except Exception:
+                pass
+        # Label-based match
+        if label:
+            lab = label.upper().replace("-", "").replace("_", "")
+            if "SP404" in lab or "SP404MKII" in lab:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 class SP404Librarian:
     """SP-404 MK2 on-device librarian."""
 
-    MOUNT_PATH = "/media/pi/SP-404MKII"
-    ALT_MOUNT_PATHS = ["/media/pi/SP404MKII"]
-    ON_DEVICE_SUBDIR = os.path.join("ROLAND", "SP-404MKII")
     BANKS = 10
     PADS_PER_BANK = 16
     NUM_PADS = 160  # 10 * 16
 
     def __init__(self, images_dir: str, mount_path: str = ""):
-        self._mount_path = mount_path or self._detect_mount()
+        """Create a librarian.
+
+        `mount_path` is only used as an initial hint / fixed override
+        (mainly for unit tests). At runtime we re-scan on every call to
+        `is_mounted()`.
+        """
+        self._fixed_mount = mount_path
+        self._mount_path = mount_path
+        self._last_error = ""
         os.makedirs(images_dir, exist_ok=True)
-        self._img = P6ImageManager(images_dir, mount_path=self._mount_path)
+        self._img = P6ImageManager(images_dir, mount_path=mount_path)
 
     # ── Mount state ──────────────────────────────────────────────────
-
-    def _detect_mount(self) -> str:
-        for p in [self.MOUNT_PATH] + self.ALT_MOUNT_PATHS:
-            if os.path.isdir(p):
-                return p
-        return self.MOUNT_PATH
 
     @property
     def mount_path(self) -> str:
         return self._mount_path
 
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
     def is_mounted(self) -> bool:
-        """True if the SP-404 mass storage is currently mounted."""
-        p = self._mount_path
-        if not os.path.isdir(p):
-            # Try re-detecting in case it was just plugged in
-            self._mount_path = self._detect_mount()
-            p = self._mount_path
-            if not os.path.isdir(p):
-                return False
-        roland = os.path.join(p, self.ON_DEVICE_SUBDIR)
-        return os.path.isdir(roland)
+        """Return True if an SP-404 volume is mounted. Auto-rescans."""
+        if self._fixed_mount:
+            if os.path.isdir(self._fixed_mount) and _sp404_signature(
+                    self._fixed_mount, ""):
+                self._mount_path = self._fixed_mount
+                self._img._mount_path = self._fixed_mount
+                return True
+            return False
+
+        found = find_device_mount(_sp404_signature)
+        if found is None:
+            self._mount_path = ""
+            self._img._mount_path = ""
+            self._last_error = "No SP-404 mount found"
+            return False
+        self._mount_path = found.mount_point
+        self._img._mount_path = found.mount_point
+        self._last_error = ""
+        return True
+
+    def diagnostic(self) -> str:
+        if self.is_mounted():
+            return f"SP-404: {self._mount_path}"
+        cands = list_mount_candidates_debug()
+        if not cands:
+            return "SP-404: no removable drives mounted"
+        return (f"SP-404: no match in {len(cands)} drive(s) — "
+                "Tools → USB storage")
 
     def roland_dir(self) -> str:
-        return os.path.join(self._mount_path, self.ON_DEVICE_SUBDIR)
+        """Return ROLAND/SP-404MKII on the current mount, or empty."""
+        if not self._mount_path:
+            return ""
+        # Try the standard path first
+        standard = os.path.join(self._mount_path, "ROLAND", "SP-404MKII")
+        if os.path.isdir(standard):
+            return standard
+        # Fallback: look for any ROLAND/SP-404* subdir
+        roland_root = os.path.join(self._mount_path, "ROLAND")
+        if os.path.isdir(roland_root):
+            try:
+                for entry in os.listdir(roland_root):
+                    if "SP-404" in entry.upper() or "SP404" in entry.upper():
+                        candidate = os.path.join(roland_root, entry)
+                        if os.path.isdir(candidate):
+                            return candidate
+            except Exception:
+                pass
+        return standard  # Return even if it doesn't exist yet
 
     # ── Project listing ─────────────────────────────────────────────
 
@@ -96,12 +168,29 @@ class SP404Librarian:
         testing on the dev machine).
         """
         if self.is_mounted():
-            return self._list_projects_in(self.roland_dir())
+            rdir = self.roland_dir()
+            if rdir and os.path.isdir(rdir):
+                projs = self._list_projects_in(rdir)
+                if projs:
+                    return projs
+                # No PROJECT_XX dirs? Create a default so the user can
+                # load samples. The SP-404 will see the new project on
+                # next boot.
+                self._ensure_default_project(rdir)
+                return self._list_projects_in(rdir)
         # Dev fallback — use the Mac librarian cache
         cache = sp404_storage.find_sp404_cache()
         if cache:
             return sp404_storage.list_projects(cache)
         return []
+
+    def _ensure_default_project(self, roland_dir: str):
+        """Make sure at least PROJECT_01/SMPL/ exists so writes have a target."""
+        try:
+            os.makedirs(os.path.join(roland_dir, "PROJECT_01", "SMPL"),
+                        exist_ok=True)
+        except Exception as e:
+            log.warning("Could not create default project: %s", e)
 
     @staticmethod
     def _list_projects_in(root: str) -> list[dict]:
@@ -250,14 +339,28 @@ class SP404Librarian:
                   src_wav: str) -> Optional[str]:
         """Convert a WAV to .SMP and write it to the given pad slot."""
         if not os.path.isfile(src_wav):
+            self._last_error = f"Source WAV not found: {os.path.basename(src_wav)}"
             return None
         if not 0 <= bank_idx < self.BANKS:
             return None
         if not 0 <= pad_idx < self.PADS_PER_BANK:
             return None
+        if not project_dir or not os.path.isdir(project_dir):
+            self._last_error = f"Project directory missing: {project_dir}"
+            return None
 
         dest = self.pad_path(project_dir, bank_idx, pad_idx)
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+        except PermissionError as e:
+            self._last_error = f"Permission denied writing to SP-404 mount: {e}"
+            return None
+        except Exception as e:
+            self._last_error = f"Couldn't create SMPL dir: {e}"
+            return None
+
         if not self.wav_to_smp(src_wav, dest):
+            self._last_error = "WAV→SMP conversion failed"
             return None
         self.sync()
         return dest

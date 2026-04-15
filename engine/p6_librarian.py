@@ -4,7 +4,7 @@ Reads, writes, clears, and backs up samples on a Roland AIRA Compact P-6
 when it's mounted as USB mass storage (SAMPLING + power-on).
 
 Storage layout on the P-6:
-    /media/pi/P-6/
+    <mount>/
         info.txt                 — "A-1:\tsample_name\n" for each pad
         IMPORT/
             BANK_A/PAD_1/*.wav
@@ -13,9 +13,10 @@ Storage layout on the P-6:
             BANK_H/PAD_6/*.wav
         SAMPLE/                  — fallback flat sample directory
 
-The P-6 reads the IMPORT/ folders on the next "IMPORT" action (or on
-reconnect, depending on mode). Dropping a WAV into IMPORT/BANK_X/PAD_N/
-assigns it to that pad.
+The mount point is auto-detected by scanning every mounted removable
+drive for a P-6 signature (info.txt or IMPORT/BANK_A presence, or a
+volume labelled P-6). We do NOT hardcode `/media/pi/P-6` because the
+actual path depends on the mount helper and the volume label.
 
 Backup/restore is delegated to engine.p6_image.P6ImageManager — it's
 already device-agnostic (despite the name) and runs in a background
@@ -30,22 +31,53 @@ import threading
 from typing import Callable, Optional
 
 from engine.p6_image import P6ImageManager
+from engine.device_mount import find_device_mount
 
 log = logging.getLogger(__name__)
+
+
+def _p6_signature(mount_point: str, label: str) -> bool:
+    """Return True if `mount_point` looks like a P-6 mass-storage volume."""
+    try:
+        if not os.path.isdir(mount_point):
+            return False
+        # Direct signatures — files/folders the P-6 places at its root
+        if os.path.isfile(os.path.join(mount_point, "info.txt")):
+            return True
+        if os.path.isdir(os.path.join(mount_point, "IMPORT")):
+            return True
+        if os.path.isdir(os.path.join(mount_point, "SAMPLE")):
+            return True
+        # Label-based match for a fresh device with nothing loaded
+        if label:
+            lab = label.upper().replace("-", "").replace("_", "")
+            if lab in ("P6", "AIRAP6", "ROLANDP6"):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 class P6Librarian:
     """P-6 on-device librarian."""
 
-    MOUNT_PATH = "/media/pi/P-6"
     BANKS = "ABCDEFGH"    # 8 banks
     PADS_PER_BANK = 6
     NUM_PADS = 48          # 8 * 6
 
     def __init__(self, images_dir: str, mount_path: str = ""):
-        self._mount_path = mount_path or self.MOUNT_PATH
+        """Create a librarian.
+
+        `mount_path` is only used as an initial hint or a fixed override
+        (mainly for unit tests). At runtime we re-scan every call to
+        `is_mounted()` so plug/unplug is tracked automatically.
+        """
+        self._fixed_mount = mount_path  # override for tests
+        self._mount_path = mount_path
+        self._last_error = ""
         os.makedirs(images_dir, exist_ok=True)
-        self._img = P6ImageManager(images_dir, mount_path=self._mount_path)
+        # Updated on each `is_mounted()` call as the real mount changes
+        self._img = P6ImageManager(images_dir, mount_path=mount_path)
 
     # ── Mount state ──────────────────────────────────────────────────
 
@@ -53,16 +85,46 @@ class P6Librarian:
     def mount_path(self) -> str:
         return self._mount_path
 
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
     def is_mounted(self) -> bool:
-        """True if the P-6 is currently mounted at mount_path."""
-        p = self._mount_path
-        if not os.path.isdir(p):
+        """Return True if a P-6 is currently mounted. Auto-rescans."""
+        # Fixed override (tests) — just check it has P-6 content
+        if self._fixed_mount:
+            if os.path.isdir(self._fixed_mount) and _p6_signature(
+                    self._fixed_mount, ""):
+                self._mount_path = self._fixed_mount
+                self._img._mount_path = self._fixed_mount  # keep image mgr in sync
+                return True
             return False
-        # Must have an IMPORT dir or info.txt to count as a P-6 mount
-        return (os.path.isdir(os.path.join(p, "IMPORT"))
-                or os.path.isfile(os.path.join(p, "info.txt")))
+
+        # Live scan
+        found = find_device_mount(_p6_signature)
+        if found is None:
+            self._mount_path = ""
+            self._img._mount_path = ""
+            self._last_error = "No P-6 mount found"
+            return False
+        self._mount_path = found.mount_point
+        self._img._mount_path = found.mount_point
+        self._last_error = ""
+        return True
+
+    def diagnostic(self) -> str:
+        """One-liner diagnostic for the UI status line."""
+        from engine.device_mount import list_mount_candidates_debug
+        if self.is_mounted():
+            return f"P-6: {self._mount_path}"
+        cands = list_mount_candidates_debug()
+        if not cands:
+            return "P-6: no removable drives mounted"
+        return f"P-6: no match in {len(cands)} drive(s) — hold SAMPLING + power on"
 
     def import_dir(self) -> str:
+        if not self._mount_path:
+            return ""
         return os.path.join(self._mount_path, "IMPORT")
 
     # ── Reading assignments ─────────────────────────────────────────
@@ -73,13 +135,16 @@ class P6Librarian:
         Merges two data sources:
           - info.txt (tracks what's currently loaded on the P-6)
           - IMPORT/BANK_X/PAD_N/*.wav (tracks pending imports)
+
+        Graceful: if IMPORT/ or info.txt is absent we just return empty
+        slots instead of failing — a fresh P-6 may not have either.
         """
         pads: list[Optional[dict]] = [None] * self.NUM_PADS
 
         if not self.is_mounted():
             return pads
 
-        # Parse info.txt for current device assignments
+        # Parse info.txt for current device assignments (optional)
         pad_names: dict[str, str] = {}  # "A-1" → sample name
         info_path = os.path.join(self._mount_path, "info.txt")
         if os.path.isfile(info_path):
@@ -95,21 +160,24 @@ class P6Librarian:
             except Exception as e:
                 log.warning("Failed to parse info.txt: %s", e)
 
-        # Scan IMPORT/BANK_X/PAD_N for pending WAVs
+        # Scan IMPORT/BANK_X/PAD_N for pending WAVs (optional)
         import_dir = self.import_dir()
+        has_import = os.path.isdir(import_dir)
 
         for bi, bank in enumerate(self.BANKS):
             for pi in range(self.PADS_PER_BANK):
                 pad_idx = bi * self.PADS_PER_BANK + pi
                 pad_id = f"{bank}-{pi + 1}"
-                pad_dir = os.path.join(import_dir, f"BANK_{bank}", f"PAD_{pi + 1}")
 
                 wav_path = None
-                if os.path.isdir(pad_dir):
-                    for fn in sorted(os.listdir(pad_dir)):
-                        if fn.lower().endswith(".wav"):
-                            wav_path = os.path.join(pad_dir, fn)
-                            break
+                if has_import:
+                    pad_dir = os.path.join(import_dir, f"BANK_{bank}",
+                                           f"PAD_{pi + 1}")
+                    if os.path.isdir(pad_dir):
+                        for fn in sorted(os.listdir(pad_dir)):
+                            if fn.lower().endswith(".wav"):
+                                wav_path = os.path.join(pad_dir, fn)
+                                break
 
                 current_name = pad_names.get(pad_id, "")
 
@@ -166,12 +234,15 @@ class P6Librarian:
 
         Returns the destination path on success, None on failure. Clears
         any existing WAV in that pad's folder first so the P-6 picks up
-        the new one.
+        the new one. Creates the IMPORT/BANK_X/PAD_N hierarchy if the
+        P-6 hasn't done so yet (e.g. a fresh device).
         """
         if not self.is_mounted():
+            self._last_error = "P-6 not mounted"
             log.warning("P-6 not mounted")
             return None
         if not os.path.isfile(src_wav):
+            self._last_error = f"Source WAV not found: {os.path.basename(src_wav)}"
             log.warning("Source WAV not found: %s", src_wav)
             return None
         if not 0 <= bank_idx < len(self.BANKS):
@@ -181,8 +252,14 @@ class P6Librarian:
 
         pad_dir = self._pad_dir(bank_idx, pad_idx)
         try:
+            # Auto-create the IMPORT root + bank + pad hierarchy if missing
             os.makedirs(pad_dir, exist_ok=True)
+        except PermissionError as e:
+            self._last_error = f"Permission denied writing to P-6 mount: {e}"
+            log.error("Permission denied creating %s: %s", pad_dir, e)
+            return None
         except Exception as e:
+            self._last_error = f"Can't create pad dir: {e}"
             log.error("Can't create pad dir %s: %s", pad_dir, e)
             return None
 
@@ -239,11 +316,17 @@ class P6Librarian:
         return ok
 
     def clear_all(self) -> bool:
-        """Clear every pad in the IMPORT folder (destructive)."""
+        """Clear every pad in the IMPORT folder (destructive).
+
+        Returns True even if IMPORT/ doesn't exist yet — there's nothing
+        to clear on a fresh device, which is success, not failure.
+        """
         if not self.is_mounted():
+            self._last_error = "P-6 not mounted"
             return False
         import_dir = self.import_dir()
         if not os.path.isdir(import_dir):
+            # Nothing to clear — a fresh P-6 has no IMPORT folder yet.
             return True
 
         try:
@@ -262,7 +345,12 @@ class P6Librarian:
                             log.warning("Couldn't remove %s: %s", fn, e)
             self.sync()
             return True
+        except PermissionError as e:
+            self._last_error = f"Permission denied — is the P-6 mounted read-only? {e}"
+            log.error("clear_all permission denied: %s", e)
+            return False
         except Exception as e:
+            self._last_error = f"clear_all failed: {e}"
             log.error("clear_all failed: %s", e)
             return False
 

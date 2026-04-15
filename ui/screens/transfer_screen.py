@@ -659,8 +659,11 @@ class TransferScreen:
 
     def _assign_p6_pad(self, global_idx: int, src_wav: str):
         lib = self.p6_lib
-        if lib is None or not lib.is_mounted():
-            self._set_status("P-6 not mounted")
+        if lib is None:
+            self._set_status("P-6 librarian unavailable")
+            return
+        if not lib.is_mounted():
+            self._set_status(lib.diagnostic())
             return
         bank_idx = global_idx // 6
         pad_idx = global_idx % 6
@@ -671,7 +674,8 @@ class TransferScreen:
             self._set_status(f"Loaded {name[:24]} → {bank_letter}-{pad_idx + 1}")
             self._refresh_p6_assignments()
         else:
-            self._set_status("Load failed — check the P-6 mount")
+            err = lib.last_error or "Load failed — check the P-6 mount"
+            self._set_status(err[:80])
 
     def _do_p6_action(self, action_id: str):
         lib = self.p6_lib
@@ -704,7 +708,7 @@ class TransferScreen:
 
         elif action_id == "backup":
             if not lib.is_mounted():
-                self._set_status("P-6 not mounted")
+                self._set_status(lib.diagnostic())
                 return
             if lib.busy:
                 self._set_status("Busy with another operation")
@@ -719,6 +723,9 @@ class TransferScreen:
                        on_complete=_done)
 
         elif action_id == "restore":
+            if not lib.is_mounted():
+                self._set_status(lib.diagnostic())
+                return
             images = lib.list_images()
             if not images:
                 self._set_status("No P-6 backups found")
@@ -744,7 +751,8 @@ class TransferScreen:
             self._set_status("Cleared all P-6 pads")
             self._refresh_p6_assignments()
         else:
-            self._set_status("Clear all failed")
+            err = lib.last_error or "Clear all failed"
+            self._set_status(err[:80])
 
     def _do_restore_p6(self, image_path: str):
         lib = self.p6_lib
@@ -763,13 +771,23 @@ class TransferScreen:
 
     def _assign_sp404_pad(self, global_idx: int, src_wav: str):
         lib = self.sp404_lib
-        if lib is None or not lib.is_mounted():
-            self._set_status("SP-404 not mounted")
+        if lib is None:
+            self._set_status("SP-404 librarian unavailable")
             return
+        if not lib.is_mounted():
+            self._set_status(lib.diagnostic())
+            return
+        # Make sure we have an up-to-date project list
+        if not self._sp404_projects:
+            self._refresh_sp404_projects()
         proj = self._current_sp404_project()
         if not proj:
-            self._set_status("No project — mount the SP-404 first")
-            return
+            self._set_status("No SP-404 project — creating PROJECT_01...")
+            self._refresh_sp404_projects()
+            proj = self._current_sp404_project()
+            if not proj:
+                self._set_status("Couldn't create project dir")
+                return
         bank_idx = global_idx // 16
         pad_idx = global_idx % 16
         self._set_status(
@@ -783,7 +801,8 @@ class TransferScreen:
                     f"Loaded → {bank_letter}{pad_idx + 1:02d}")
                 self._refresh_sp404_assignments()
             else:
-                self._set_status("SMP write failed")
+                err = lib.last_error or "SMP write failed"
+                self._set_status(err[:80])
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -791,9 +810,12 @@ class TransferScreen:
         lib = self.sp404_lib
         if lib is None:
             return
+        # Auto-rescan projects so we don't fail on first use
+        if not self._sp404_projects and lib.is_mounted():
+            self._refresh_sp404_projects()
         proj = self._current_sp404_project()
         if not proj and action_id not in ("backup", "restore"):
-            self._set_status("No SP-404 project loaded")
+            self._set_status(lib.diagnostic())
             return
 
         if action_id == "clear_pad":
@@ -827,7 +849,7 @@ class TransferScreen:
 
         elif action_id == "backup":
             if not lib.is_mounted():
-                self._set_status("SP-404 not mounted")
+                self._set_status(lib.diagnostic())
                 return
             if lib.busy:
                 self._set_status("Busy with another operation")
@@ -843,6 +865,9 @@ class TransferScreen:
                        on_complete=_done)
 
         elif action_id == "restore":
+            if not lib.is_mounted():
+                self._set_status(lib.diagnostic())
+                return
             images = lib.list_images()
             if not images:
                 self._set_status("No SP-404 backups found")
@@ -1151,11 +1176,14 @@ class TransferScreen:
         if lib is None:
             info = "P-6 librarian unavailable"
         elif lib.is_mounted():
+            # Re-read live assignments each draw so the view is fresh
+            self._p6_cached_assignments = lib.read_assignments()
+            self._p6_grid.set_pads(self._p6_cached_assignments)
             n = sum(1 for p in self._p6_cached_assignments if p is not None)
-            info = f"P-6 connected · {n}/48 pads loaded · {lib.mount_path}"
+            info = f"P-6 · {n}/48 loaded · {lib.mount_path}"
         else:
-            info = "P-6 not mounted — hold SAMPLING + power on"
-        info_surf = f_small.render(info, True, theme.TEXT_DIM)
+            info = lib.diagnostic()
+        info_surf = f_small.render(info[:100], True, theme.TEXT_DIM)
         surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 4))
 
         # Librarian grid and source list draw in their own laid-out rects
@@ -1190,20 +1218,25 @@ class TransferScreen:
     def _draw_sp404(self, surface: pygame.Surface, f_med, f_small, f_tiny):
         lib = self.sp404_lib
 
-        # Mount + project status row
+        # Mount + project status row — auto-refresh while drawing
         if lib is None:
             info = "SP-404 librarian unavailable"
         elif lib.is_mounted():
+            if not self._sp404_projects:
+                self._refresh_sp404_projects()
             if self._sp404_projects:
-                proj = self._sp404_projects[
-                    max(0, min(self._sp404_project_idx,
-                               len(self._sp404_projects) - 1))]
-                info = f"SP-404 · {proj['name']} · {proj['num_samples']} samples"
+                idx = max(0, min(self._sp404_project_idx,
+                                 len(self._sp404_projects) - 1))
+                proj = self._sp404_projects[idx]
+                # Refresh the pad grid too
+                pads = lib.read_project_pads(proj["path"])
+                self._sp404_grid.set_pads(pads)
+                info = f"SP-404 · {proj['name']} · {proj['num_samples']} samples · {lib.mount_path}"
             else:
-                info = f"SP-404 connected · no projects yet"
+                info = f"SP-404 · {lib.mount_path} · no projects yet"
         else:
-            info = "SP-404 not mounted — Tools menu → USB storage"
-        info_surf = f_small.render(info, True, theme.TEXT_DIM)
+            info = lib.diagnostic()
+        info_surf = f_small.render(info[:100], True, theme.TEXT_DIM)
         surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 4))
 
         # Project prev/next arrows (top-right)
