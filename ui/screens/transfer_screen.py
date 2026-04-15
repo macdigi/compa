@@ -121,6 +121,8 @@ class TransferScreen:
         # Debug panel state (tapped via the DEBUG button on P-6/SP-404)
         self._debug_panel_visible = False
         self._debug_close_rect = pygame.Rect(0, 0, 0, 0)
+        self._debug_subtab = "drives"  # "drives" | "raw"
+        self._debug_subtab_rects: list[tuple[pygame.Rect, str]] = []
 
     # ── Librarian accessors (lazy, reach into app) ──────────────────
 
@@ -379,6 +381,11 @@ class TransferScreen:
                 if self._debug_close_rect.collidepoint(mx, my):
                     self._debug_panel_visible = False
                     return
+                # Sub-tab clicks (DRIVES / RAW)
+                for rect, key in self._debug_subtab_rects:
+                    if rect.collidepoint(mx, my):
+                        self._debug_subtab = key
+                        return
                 # USE / MOUNT buttons
                 for rect, action, payload in getattr(self, "_debug_use_rects", []):
                     if rect.collidepoint(mx, my):
@@ -1420,24 +1427,21 @@ class TransferScreen:
                            f_small, f_tiny, lib):
         """Render the debug panel overlay with live mount diagnostic info.
 
-        Shows every mounted + unmounted removable partition. Each entry
-        gets a [USE] button the user can tap to manually claim it as
-        their device when auto-detection fails.
+        Has two sub-tabs:
+          DRIVES — mounted + unmounted partitions with USE / MOUNT buttons
+          RAW    — raw lsblk / lsusb / /dev output for troubleshooting
         """
         W = theme.SCREEN_WIDTH
         H = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
 
-        # Dim background
         overlay = pygame.Surface((W, H), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 180))
         surface.blit(overlay, (0, 0))
 
-        # Panel box
         panel = pygame.Rect(20, 20, W - 40, H - 40)
         pygame.draw.rect(surface, theme.BG_PANEL, panel, border_radius=10)
         pygame.draw.rect(surface, theme.ACCENT, panel, 2, border_radius=10)
 
-        # Title bar
         title_h = 36
         title_bar = pygame.Rect(panel.x, panel.y, panel.width, title_h)
         pygame.draw.rect(surface, theme.BG_LIGHTER, title_bar,
@@ -1453,7 +1457,6 @@ class TransferScreen:
         title_surf = f_title.render(title, True, theme.ACCENT)
         surface.blit(title_surf, (panel.x + 14, panel.y + 8))
 
-        # Close [X]
         close_size = 26
         self._debug_close_rect = pygame.Rect(
             panel.right - close_size - 10, panel.y + 5,
@@ -1466,17 +1469,59 @@ class TransferScreen:
         x_surf = f_small.render("X", True, theme.TEXT)
         surface.blit(x_surf, x_surf.get_rect(center=self._debug_close_rect.center))
 
-        # Get live state
-        from engine.device_mount import diagnostic_info, active_mount_partition
+        # Sub-tab bar inside the debug panel
+        tab_bar_y = panel.y + title_h + 6
+        tab_h = 26
+        sub_tabs = [("DRIVES", "drives"), ("RAW", "raw")]
+        tab_w = (panel.width - 30 - 6 * (len(sub_tabs) - 1)) // len(sub_tabs)
+        self._debug_subtab_rects = []
+        for i, (label, key) in enumerate(sub_tabs):
+            rect = pygame.Rect(
+                panel.x + 15 + i * (tab_w + 6),
+                tab_bar_y, tab_w, tab_h,
+            )
+            active = (getattr(self, "_debug_subtab", "drives") == key)
+            bg = theme.ACCENT if active else theme.BG_LIGHTER
+            tc = theme.BG if active else theme.TEXT
+            pygame.draw.rect(surface, bg, rect, border_radius=5)
+            lbl = f_small.render(label, True, tc)
+            surface.blit(lbl, lbl.get_rect(center=rect.center))
+            self._debug_subtab_rects.append((rect, key))
+
+        # Content area under the tab bar
+        content_top = tab_bar_y + tab_h + 8
+        content_rect = pygame.Rect(
+            panel.x + 10, content_top,
+            panel.width - 20, panel.bottom - content_top - 28,
+        )
+
+        # Fetch state once per draw
+        from engine.device_mount import diagnostic_info
         info = diagnostic_info()
 
-        content_x = panel.x + 16
-        y = panel.y + title_h + 12
         self._debug_use_rects: list[tuple[pygame.Rect, str, object]] = []
+        subtab = getattr(self, "_debug_subtab", "drives")
+        if subtab == "raw":
+            self._draw_debug_raw(surface, f_small, f_tiny, info, content_rect)
+        else:
+            self._draw_debug_drives(surface, f_small, f_tiny, info,
+                                     content_rect, lib)
 
-        # Current mount
+        # Footer hint
+        hint = f_tiny.render(
+            "Tap X to close. Tap RAW for lsblk/lsusb output to share.",
+            True, theme.TEXT_DIM)
+        surface.blit(hint, (panel.x + 14, panel.bottom - 20))
+
+    def _draw_debug_drives(self, surface, f_small, f_tiny, info,
+                            content_rect, lib):
+        content_x = content_rect.x + 6
+        y = content_rect.y
+
+        # Current active mount
         if lib is not None and lib.is_mounted():
-            surf = f_small.render(f"ACTIVE: {lib.mount_path}", True, theme.GREEN)
+            surf = f_small.render(f"ACTIVE: {lib.mount_path}",
+                                   True, theme.GREEN)
             surface.blit(surf, (content_x, y))
             y += 22
 
@@ -1496,42 +1541,49 @@ class TransferScreen:
                                    True, theme.RED)
             surface.blit(surf, (content_x, y))
             y += 22
-            hint = f_tiny.render(
-                "Install util-linux or run `which lsblk` on the Pi",
-                True, theme.TEXT_DIM)
-            surface.blit(hint, (content_x, y))
             return
 
-        # Mounted removable drives
+        mounted = info["mounted"]
+        unmounted = info["unmounted"]
+
+        # Combined "all partitions" view — catches raw disks too
+        all_parts = info.get("all_partitions", [])
+
+        if not mounted and not unmounted and not all_parts:
+            surf = f_small.render(
+                "No partitions found via lsblk.",
+                True, theme.YELLOW)
+            surface.blit(surf, (content_x, y))
+            y += 22
+            surf = f_tiny.render(
+                "Tap RAW to see lsusb / /dev / lsblk output.",
+                True, theme.TEXT_DIM)
+            surface.blit(surf, (content_x, y))
+            y += 18
+            return
+
         header = f_small.render(
-            f"MOUNTED REMOVABLE DRIVES ({len(info['mounted'])})",
-            True, theme.ACCENT)
+            f"MOUNTED DRIVES ({len(mounted)})", True, theme.ACCENT)
         surface.blit(header, (content_x, y))
         y += 22
-
-        if not info["mounted"]:
-            surf = f_tiny.render("  (none)", True, theme.TEXT_DIM)
-            surface.blit(surf, (content_x, y))
+        if not mounted:
+            surface.blit(f_tiny.render("  (none)", True, theme.TEXT_DIM),
+                         (content_x, y))
             y += 20
-
-        for m in info["mounted"]:
-            # Entry line
+        for m in mounted:
+            if y > content_rect.bottom - 50:
+                break
             label = m.label or "(no label)"
             text = f"  {m.device} → {m.mount_point}  [{label}]  {m.size_gb:.0f}G"
-            surf = f_small.render(text[:100], True, theme.TEXT)
-            surface.blit(surf, (content_x, y))
-
-            # USE button (right-aligned)
+            surface.blit(f_small.render(text[:100], True, theme.TEXT),
+                         (content_x, y))
             use_rect = pygame.Rect(
-                panel.right - 90, y - 2, 70, 22,
-            )
+                content_rect.right - 80, y - 2, 70, 22)
             pygame.draw.rect(surface, theme.ACCENT, use_rect, border_radius=4)
             ulbl = f_tiny.render("USE", True, theme.BG)
             surface.blit(ulbl, ulbl.get_rect(center=use_rect.center))
             self._debug_use_rects.append((use_rect, "use_mounted", m.mount_point))
             y += 22
-
-            # Show root contents
             try:
                 entries = sorted(os.listdir(m.mount_point))[:8]
                 if entries:
@@ -1545,43 +1597,70 @@ class TransferScreen:
 
         y += 6
 
-        # Unmounted partitions
         header = f_small.render(
-            f"UNMOUNTED PARTITIONS ({len(info['unmounted'])})",
+            f"UNMOUNTED PARTITIONS / DISKS ({len(unmounted)})",
             True, theme.ACCENT)
         surface.blit(header, (content_x, y))
         y += 22
-
-        if not info["unmounted"]:
-            surf = f_tiny.render("  (none)", True, theme.TEXT_DIM)
-            surface.blit(surf, (content_x, y))
+        if not unmounted:
+            surface.blit(f_tiny.render("  (none)", True, theme.TEXT_DIM),
+                         (content_x, y))
             y += 20
-
-        for p in info["unmounted"]:
+        for p in unmounted:
+            if y > content_rect.bottom - 26:
+                more = f_tiny.render("  ...more truncated",
+                                      True, theme.TEXT_DIM)
+                surface.blit(more, (content_x, y))
+                break
             label = p.label or "(no label)"
             fs = p.fs_type or "?"
             text = f"  {p.device}  [{label}]  {p.size}  {fs}"
-            surf = f_small.render(text[:100], True, theme.TEXT)
-            surface.blit(surf, (content_x, y))
-
-            # MOUNT button
+            surface.blit(f_small.render(text[:100], True, theme.TEXT),
+                         (content_x, y))
             mount_rect = pygame.Rect(
-                panel.right - 90, y - 2, 70, 22,
-            )
+                content_rect.right - 80, y - 2, 70, 22)
             pygame.draw.rect(surface, theme.BLUE, mount_rect, border_radius=4)
             mlbl = f_tiny.render("MOUNT", True, theme.BG)
             surface.blit(mlbl, mlbl.get_rect(center=mount_rect.center))
             self._debug_use_rects.append((mount_rect, "mount_unmounted", p))
             y += 22
 
-            if y > panel.bottom - 60:
-                more = f_tiny.render("... more truncated", True, theme.TEXT_DIM)
-                surface.blit(more, (content_x, y))
-                break
+    def _draw_debug_raw(self, surface, f_small, f_tiny, info, content_rect):
+        """Scrollable raw output panel — shows lsblk, lsusb, /dev/sd*."""
+        lines: list[str] = []
 
-        # Footer hint
-        hint = f_tiny.render(
-            "Tap USE to manually claim a drive as your device. "
-            "Tap MOUNT to mount an unmounted partition first.",
-            True, theme.TEXT_DIM)
-        surface.blit(hint, (panel.x + 14, panel.bottom - 20))
+        lines.append("── lsblk ─────────────────────────────")
+        for line in info.get("lsblk_raw", "").splitlines()[:30]:
+            lines.append(line)
+        lines.append("")
+
+        lines.append("── /dev (sd*, mmcblk1*) ──────────────")
+        for entry in info.get("dev_sd_list", [])[:20]:
+            lines.append(entry)
+        if not info.get("dev_sd_list"):
+            lines.append("(no sd or mmcblk1 entries)")
+        lines.append("")
+
+        lines.append("── lsusb ────────────────────────────")
+        for line in info.get("lsusb_raw", "").splitlines()[:15]:
+            # Highlight Roland entries
+            lines.append(line)
+
+        content_x = content_rect.x + 6
+        y = content_rect.y
+        line_h = 16
+        for line in lines:
+            if y + line_h > content_rect.bottom:
+                break
+            if line.startswith("──"):
+                color = theme.ACCENT
+            elif "Roland" in line or "0582" in line:
+                color = theme.GREEN
+            else:
+                color = theme.TEXT_DIM if line == "" or line.startswith("(") \
+                    else theme.TEXT
+            # Monospaced-ish — use small font, long lines truncated
+            truncated = line[:120]
+            surface.blit(f_tiny.render(truncated, True, color),
+                         (content_x, y))
+            y += line_h

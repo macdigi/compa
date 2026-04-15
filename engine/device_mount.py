@@ -207,10 +207,14 @@ def list_mount_candidates_debug() -> list[str]:
 
 
 def list_all_partitions() -> list[Partition]:
-    """Enumerate every partition on the system via lsblk, mounted or not.
+    """Enumerate every partition OR partitionless disk via lsblk.
 
-    Skips the Pi's own SD card (mmcblk0*), tiny EFI/boot partitions, and
-    read-only device-mapper nodes.
+    Includes both TYPE=part and TYPE=disk entries. The P-6 exposes its
+    internal storage as a raw disk without a partition table, so a
+    partition-only filter misses it entirely.
+
+    Skips the Pi's own SD card (mmcblk0*), the root partition, /boot/*
+    entries, and anything smaller than 256 MB (EFI stubs etc).
     """
     results: list[Partition] = []
     try:
@@ -222,6 +226,11 @@ def list_all_partitions() -> list[Partition]:
         log.debug("lsblk failed: %s", e)
         return results
 
+    # Track which disks have partitions — if a disk has at least one
+    # partition child, we prefer the partitions and skip the disk itself.
+    disks_with_parts: set[str] = set()
+    raw_entries: list[tuple[str, str, str, str, str, str]] = []
+
     for line in out.stdout.splitlines():
         parts = line.split(None, 5)
         if len(parts) < 3:
@@ -232,8 +241,16 @@ def list_all_partitions() -> list[Partition]:
         mountpoint = parts[3] if len(parts) >= 4 else ""
         label = parts[4] if len(parts) >= 5 else ""
         fs_type = parts[5] if len(parts) >= 6 else ""
+        raw_entries.append((name, size, ptype, mountpoint, label, fs_type))
 
-        if ptype != "part":
+        if ptype == "part":
+            # Derive parent disk name: sda1 → sda, nvme0n1p1 → nvme0n1
+            parent = _parent_disk(name)
+            if parent:
+                disks_with_parts.add(parent)
+
+    for name, size, ptype, mountpoint, label, fs_type in raw_entries:
+        if ptype not in ("part", "disk"):
             continue
         if name.startswith("mmcblk0"):
             continue  # Pi's own SD
@@ -241,10 +258,15 @@ def list_all_partitions() -> list[Partition]:
             continue
         if mountpoint.startswith("/boot/"):
             continue
+        # Skip disks that have partition children — those children are
+        # listed separately above.
+        if ptype == "disk" and name in disks_with_parts:
+            continue
 
         size_gb = _parse_size_gb(size)
-        # Skip sub-1GB partitions (EFI/boot)
-        if size_gb < 0.5:
+        # Skip sub-256MB (EFI stubs, bootstrap partitions). The P-6 has
+        # ~2GB internal storage so this is safe.
+        if size_gb < 0.25:
             continue
 
         results.append(Partition(
@@ -258,6 +280,16 @@ def list_all_partitions() -> list[Partition]:
         ))
 
     return results
+
+
+def _parent_disk(part_name: str) -> str:
+    """Return the parent disk for a partition name ('sda1' → 'sda')."""
+    # Simple heuristic: strip trailing digits (sda1 → sda)
+    stripped = part_name.rstrip("0123456789")
+    # nvme0n1p1 → nvme0n1 (rstrip leaves 'nvme0n1p', trim trailing 'p')
+    if stripped.endswith("p"):
+        stripped = stripped[:-1]
+    return stripped or part_name
 
 
 def list_unmounted_partitions() -> list[Partition]:
@@ -420,7 +452,11 @@ def diagnostic_info() -> dict:
       {
         "mounted": [RemovableMount, ...],
         "unmounted": [Partition, ...],
+        "all_partitions": [Partition, ...],
         "lsblk_available": bool,
+        "lsblk_raw": str,           # raw lsblk output
+        "lsusb_raw": str,           # raw lsusb output (Roland filter)
+        "dev_sd_list": list[str],   # `ls /dev/sd*`
       }
     """
     try:
@@ -430,8 +466,39 @@ def diagnostic_info() -> dict:
     except Exception:
         lsblk_ok = False
 
+    lsblk_raw = ""
+    try:
+        out = subprocess.run(
+            ["lsblk", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE"],
+            capture_output=True, text=True, timeout=5,
+        )
+        lsblk_raw = out.stdout
+    except Exception as e:
+        lsblk_raw = f"(lsblk error: {e})"
+
+    lsusb_raw = ""
+    try:
+        out = subprocess.run(
+            ["lsusb"], capture_output=True, text=True, timeout=5,
+        )
+        lsusb_raw = out.stdout
+    except Exception as e:
+        lsusb_raw = f"(lsusb error: {e})"
+
+    dev_sd = []
+    try:
+        for entry in sorted(os.listdir("/dev")):
+            if entry.startswith("sd") or entry.startswith("mmcblk1"):
+                dev_sd.append(f"/dev/{entry}")
+    except Exception as e:
+        dev_sd = [f"(/dev scan error: {e})"]
+
     return {
         "mounted": list_removable_mounts(),
         "unmounted": list_unmounted_partitions(),
+        "all_partitions": list_all_partitions(),
         "lsblk_available": lsblk_ok,
+        "lsblk_raw": lsblk_raw,
+        "lsusb_raw": lsusb_raw,
+        "dev_sd_list": dev_sd,
     }
