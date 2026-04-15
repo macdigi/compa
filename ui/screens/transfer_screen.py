@@ -118,6 +118,10 @@ class TransferScreen:
         )
         self._confirm_action = None  # callable to run on OK
 
+        # Debug panel state (tapped via the DEBUG button on P-6/SP-404)
+        self._debug_panel_visible = False
+        self._debug_close_rect = pygame.Rect(0, 0, 0, 0)
+
     # ── Librarian accessors (lazy, reach into app) ──────────────────
 
     @property
@@ -367,6 +371,23 @@ class TransferScreen:
     # ── Event handling ───────────────────────────────────────────────
 
     def handle_event(self, event):
+        # Debug panel takes highest priority
+        if self._debug_panel_visible:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                # Close button
+                if self._debug_close_rect.collidepoint(mx, my):
+                    self._debug_panel_visible = False
+                    return
+                # USE / MOUNT buttons
+                for rect, action, payload in getattr(self, "_debug_use_rects", []):
+                    if rect.collidepoint(mx, my):
+                        self._handle_debug_action(action, payload)
+                        return
+            return
+
+        # Debug panel cleared all input; fall through normally below
+
         # Confirm modal takes priority
         if self._confirm_modal.visible:
             result = self._confirm_modal.handle_event(event)
@@ -682,6 +703,10 @@ class TransferScreen:
         if lib is None:
             return
 
+        if action_id == "debug":
+            self._debug_panel_visible = True
+            return
+
         if action_id == "clear_pad":
             selected = self._p6_grid.selected_pad
             if selected < 0:
@@ -810,11 +835,16 @@ class TransferScreen:
         lib = self.sp404_lib
         if lib is None:
             return
+
+        if action_id == "debug":
+            self._debug_panel_visible = True
+            return
+
         # Auto-rescan projects so we don't fail on first use
         if not self._sp404_projects and lib.is_mounted():
             self._refresh_sp404_projects()
         proj = self._current_sp404_project()
-        if not proj and action_id not in ("backup", "restore"):
+        if not proj and action_id not in ("backup", "restore", "debug"):
             self._set_status(lib.diagnostic())
             return
 
@@ -1201,10 +1231,11 @@ class TransferScreen:
             surface, f_small, f_tiny,
             [
                 ("clear_pad",  "CLEAR PAD",  theme.BUTTON_BG),
-                ("clear_bank", "CLEAR BANK", theme.BUTTON_BG),
-                ("clear_all",  "CLEAR ALL",  theme.RED),
+                ("clear_bank", "CLR BANK",   theme.BUTTON_BG),
+                ("clear_all",  "CLR ALL",    theme.RED),
                 ("backup",     "BACKUP",     theme.BLUE),
                 ("restore",    "RESTORE",    theme.ACCENT_DIM),
+                ("debug",      "DEBUG",      theme.BUTTON_BG),
             ],
             self._p6_action_rects,
             lib,
@@ -1212,6 +1243,10 @@ class TransferScreen:
 
         # Status line
         self._draw_status_line(surface, f_small)
+
+        # Debug panel overlay
+        if self._debug_panel_visible:
+            self._draw_debug_panel(surface, f_small, f_tiny, lib)
 
     # ── SP-404 librarian view ──────────────────────────────────────
 
@@ -1274,11 +1309,16 @@ class TransferScreen:
                 ("clear_bank", "CLR BANK",   theme.BUTTON_BG),
                 ("backup",     "BACKUP",     theme.BLUE),
                 ("restore",    "RESTORE",    theme.ACCENT_DIM),
+                ("debug",      "DEBUG",      theme.BUTTON_BG),
             ],
             self._sp404_action_rects,
             lib,
         )
         self._draw_status_line(surface, f_small)
+
+        # Debug panel overlay
+        if self._debug_panel_visible:
+            self._draw_debug_panel(surface, f_small, f_tiny, lib)
 
     def _draw_librarian_actions(self, surface, f_small, f_tiny,
                                   buttons: list,
@@ -1334,3 +1374,214 @@ class TransferScreen:
         H = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
         y = H - self.ACTION_H - 28
         surface.blit(surf, (12, y))
+
+    def _handle_debug_action(self, action: str, payload):
+        """Handle a tap on a USE/MOUNT button inside the debug panel."""
+        lib = self.p6_lib if self._device_type == "p6" else self.sp404_lib
+        if lib is None:
+            return
+
+        if action == "clear_manual":
+            lib.set_manual_mount("")
+            self._set_status("Cleared manual mount override")
+            return
+
+        if action == "use_mounted":
+            mount_point = payload
+            lib.set_manual_mount(mount_point)
+            self._set_status(f"Using {mount_point}")
+            if self._device_type == "p6":
+                self._refresh_p6_assignments()
+            else:
+                self._refresh_sp404_projects()
+                self._refresh_sp404_assignments()
+            self._debug_panel_visible = False
+            return
+
+        if action == "mount_unmounted":
+            from engine.device_mount import active_mount_partition
+            part = payload
+            mp = active_mount_partition(
+                part, mount_name=part.label or self._device_type)
+            if mp:
+                lib.set_manual_mount(mp)
+                self._set_status(f"Mounted {part.device} at {mp}")
+                if self._device_type == "p6":
+                    self._refresh_p6_assignments()
+                else:
+                    self._refresh_sp404_projects()
+                    self._refresh_sp404_assignments()
+                self._debug_panel_visible = False
+            else:
+                self._set_status(f"Mount failed for {part.device}")
+            return
+
+    def _draw_debug_panel(self, surface: pygame.Surface,
+                           f_small, f_tiny, lib):
+        """Render the debug panel overlay with live mount diagnostic info.
+
+        Shows every mounted + unmounted removable partition. Each entry
+        gets a [USE] button the user can tap to manually claim it as
+        their device when auto-detection fails.
+        """
+        W = theme.SCREEN_WIDTH
+        H = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
+
+        # Dim background
+        overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        surface.blit(overlay, (0, 0))
+
+        # Panel box
+        panel = pygame.Rect(20, 20, W - 40, H - 40)
+        pygame.draw.rect(surface, theme.BG_PANEL, panel, border_radius=10)
+        pygame.draw.rect(surface, theme.ACCENT, panel, 2, border_radius=10)
+
+        # Title bar
+        title_h = 36
+        title_bar = pygame.Rect(panel.x, panel.y, panel.width, title_h)
+        pygame.draw.rect(surface, theme.BG_LIGHTER, title_bar,
+                         border_top_left_radius=10,
+                         border_top_right_radius=10)
+        pygame.draw.line(surface, theme.BORDER,
+                         (panel.x, panel.y + title_h),
+                         (panel.right, panel.y + title_h))
+
+        title = "P-6 STORAGE DIAGNOSTIC" if self._device_type == "p6" \
+            else "SP-404 STORAGE DIAGNOSTIC"
+        f_title = theme.font("large")
+        title_surf = f_title.render(title, True, theme.ACCENT)
+        surface.blit(title_surf, (panel.x + 14, panel.y + 8))
+
+        # Close [X]
+        close_size = 26
+        self._debug_close_rect = pygame.Rect(
+            panel.right - close_size - 10, panel.y + 5,
+            close_size, close_size,
+        )
+        pygame.draw.rect(surface, theme.BG, self._debug_close_rect,
+                         border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER, self._debug_close_rect,
+                         1, border_radius=4)
+        x_surf = f_small.render("X", True, theme.TEXT)
+        surface.blit(x_surf, x_surf.get_rect(center=self._debug_close_rect.center))
+
+        # Get live state
+        from engine.device_mount import diagnostic_info, active_mount_partition
+        info = diagnostic_info()
+
+        content_x = panel.x + 16
+        y = panel.y + title_h + 12
+        self._debug_use_rects: list[tuple[pygame.Rect, str, object]] = []
+
+        # Current mount
+        if lib is not None and lib.is_mounted():
+            surf = f_small.render(f"ACTIVE: {lib.mount_path}", True, theme.GREEN)
+            surface.blit(surf, (content_x, y))
+            y += 22
+
+            if lib._manual_mount:
+                clear_rect = pygame.Rect(content_x, y, 140, 24)
+                pygame.draw.rect(surface, theme.ACCENT_DIM, clear_rect,
+                                 border_radius=4)
+                lbl = f_tiny.render("Clear manual", True, theme.TEXT_BRIGHT)
+                surface.blit(lbl, lbl.get_rect(center=clear_rect.center))
+                self._debug_use_rects.append((clear_rect, "clear_manual", None))
+                y += 30
+            else:
+                y += 6
+
+        if not info["lsblk_available"]:
+            surf = f_small.render("ERROR: lsblk not available",
+                                   True, theme.RED)
+            surface.blit(surf, (content_x, y))
+            y += 22
+            hint = f_tiny.render(
+                "Install util-linux or run `which lsblk` on the Pi",
+                True, theme.TEXT_DIM)
+            surface.blit(hint, (content_x, y))
+            return
+
+        # Mounted removable drives
+        header = f_small.render(
+            f"MOUNTED REMOVABLE DRIVES ({len(info['mounted'])})",
+            True, theme.ACCENT)
+        surface.blit(header, (content_x, y))
+        y += 22
+
+        if not info["mounted"]:
+            surf = f_tiny.render("  (none)", True, theme.TEXT_DIM)
+            surface.blit(surf, (content_x, y))
+            y += 20
+
+        for m in info["mounted"]:
+            # Entry line
+            label = m.label or "(no label)"
+            text = f"  {m.device} → {m.mount_point}  [{label}]  {m.size_gb:.0f}G"
+            surf = f_small.render(text[:100], True, theme.TEXT)
+            surface.blit(surf, (content_x, y))
+
+            # USE button (right-aligned)
+            use_rect = pygame.Rect(
+                panel.right - 90, y - 2, 70, 22,
+            )
+            pygame.draw.rect(surface, theme.ACCENT, use_rect, border_radius=4)
+            ulbl = f_tiny.render("USE", True, theme.BG)
+            surface.blit(ulbl, ulbl.get_rect(center=use_rect.center))
+            self._debug_use_rects.append((use_rect, "use_mounted", m.mount_point))
+            y += 22
+
+            # Show root contents
+            try:
+                entries = sorted(os.listdir(m.mount_point))[:8]
+                if entries:
+                    sub = f_tiny.render(
+                        f"    {', '.join(entries)[:95]}",
+                        True, theme.TEXT_DIM)
+                    surface.blit(sub, (content_x, y))
+                    y += 18
+            except Exception:
+                pass
+
+        y += 6
+
+        # Unmounted partitions
+        header = f_small.render(
+            f"UNMOUNTED PARTITIONS ({len(info['unmounted'])})",
+            True, theme.ACCENT)
+        surface.blit(header, (content_x, y))
+        y += 22
+
+        if not info["unmounted"]:
+            surf = f_tiny.render("  (none)", True, theme.TEXT_DIM)
+            surface.blit(surf, (content_x, y))
+            y += 20
+
+        for p in info["unmounted"]:
+            label = p.label or "(no label)"
+            fs = p.fs_type or "?"
+            text = f"  {p.device}  [{label}]  {p.size}  {fs}"
+            surf = f_small.render(text[:100], True, theme.TEXT)
+            surface.blit(surf, (content_x, y))
+
+            # MOUNT button
+            mount_rect = pygame.Rect(
+                panel.right - 90, y - 2, 70, 22,
+            )
+            pygame.draw.rect(surface, theme.BLUE, mount_rect, border_radius=4)
+            mlbl = f_tiny.render("MOUNT", True, theme.BG)
+            surface.blit(mlbl, mlbl.get_rect(center=mount_rect.center))
+            self._debug_use_rects.append((mount_rect, "mount_unmounted", p))
+            y += 22
+
+            if y > panel.bottom - 60:
+                more = f_tiny.render("... more truncated", True, theme.TEXT_DIM)
+                surface.blit(more, (content_x, y))
+                break
+
+        # Footer hint
+        hint = f_tiny.render(
+            "Tap USE to manually claim a drive as your device. "
+            "Tap MOUNT to mount an unmounted partition first.",
+            True, theme.TEXT_DIM)
+        surface.blit(hint, (panel.x + 14, panel.bottom - 20))

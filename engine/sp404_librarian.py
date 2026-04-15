@@ -44,7 +44,7 @@ from typing import Callable, Optional
 
 from engine.p6_image import P6ImageManager
 from engine import sp404_storage
-from engine.device_mount import find_device_mount, list_mount_candidates_debug
+from engine.device_mount import find_or_mount_device, diagnostic_info
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +92,7 @@ class SP404Librarian:
         `is_mounted()`.
         """
         self._fixed_mount = mount_path
+        self._manual_mount = ""          # user-selected mount (DEBUG panel)
         self._mount_path = mount_path
         self._last_error = ""
         os.makedirs(images_dir, exist_ok=True)
@@ -108,7 +109,18 @@ class SP404Librarian:
         return self._last_error
 
     def is_mounted(self) -> bool:
-        """Return True if an SP-404 volume is mounted. Auto-rescans."""
+        """Return True if an SP-404 volume is mounted. Auto-rescans.
+
+        If no mounted drive matches, actively mounts any unmounted
+        removable partition and re-checks. Handles headless Pi setups.
+        """
+        # Manual override from the DEBUG panel takes precedence
+        if self._manual_mount and os.path.isdir(self._manual_mount):
+            self._mount_path = self._manual_mount
+            self._img._mount_path = self._manual_mount
+            self._last_error = ""
+            return True
+
         if self._fixed_mount:
             if os.path.isdir(self._fixed_mount) and _sp404_signature(
                     self._fixed_mount, ""):
@@ -117,7 +129,7 @@ class SP404Librarian:
                 return True
             return False
 
-        found = find_device_mount(_sp404_signature)
+        found = find_or_mount_device(_sp404_signature, mount_name="sp404")
         if found is None:
             self._mount_path = ""
             self._img._mount_path = ""
@@ -128,14 +140,78 @@ class SP404Librarian:
         self._last_error = ""
         return True
 
+    def set_manual_mount(self, mount_point: str):
+        """Override auto-detection with a user-selected mount point."""
+        self._manual_mount = mount_point or ""
+        if mount_point:
+            self._mount_path = mount_point
+            self._img._mount_path = mount_point
+            log.info("SP-404: manual mount override → %s", mount_point)
+
     def diagnostic(self) -> str:
         if self.is_mounted():
             return f"SP-404: {self._mount_path}"
-        cands = list_mount_candidates_debug()
-        if not cands:
-            return "SP-404: no removable drives mounted"
-        return (f"SP-404: no match in {len(cands)} drive(s) — "
-                "Tools → USB storage")
+        info = diagnostic_info()
+        if not info["lsblk_available"]:
+            return "SP-404: lsblk unavailable — install util-linux?"
+        nm = len(info["mounted"])
+        nu = len(info["unmounted"])
+        if nm == 0 and nu == 0:
+            return "SP-404: no USB storage detected — Tools → USB storage"
+        return f"SP-404: seen {nm} mounted + {nu} unmounted — none match signature"
+
+    def diagnostic_lines(self) -> list[str]:
+        """Full diagnostic report for the debug modal."""
+        lines: list[str] = []
+
+        # Show current mount state first, regardless of lsblk
+        if self.is_mounted():
+            lines.append(f"CURRENT MOUNT: {self._mount_path}")
+            try:
+                entries = sorted(os.listdir(self._mount_path))[:12]
+                if entries:
+                    lines.append(f"  contents: {', '.join(entries)}")
+            except Exception:
+                pass
+            lines.append("")
+        else:
+            lines.append("SP-404 IS NOT DETECTED")
+            if self._last_error:
+                lines.append(f"  last error: {self._last_error}")
+            lines.append("")
+
+        info = diagnostic_info()
+
+        if not info["lsblk_available"]:
+            lines.append("ERROR: lsblk not available on this system")
+            return lines
+
+        mounted = info["mounted"]
+        if mounted:
+            lines.append(f"MOUNTED REMOVABLE DRIVES ({len(mounted)}):")
+            for m in mounted:
+                label = m.label or "(no label)"
+                lines.append(f"  {m.device} → {m.mount_point}")
+                lines.append(f"    [{label}] {m.size_gb:.0f}G")
+                try:
+                    entries = sorted(os.listdir(m.mount_point))[:8]
+                    if entries:
+                        lines.append(f"    contents: {', '.join(entries)}")
+                except Exception:
+                    pass
+        else:
+            lines.append("NO MOUNTED REMOVABLE DRIVES")
+
+        unmounted = info["unmounted"]
+        if unmounted:
+            lines.append("")
+            lines.append(f"UNMOUNTED PARTITIONS ({len(unmounted)}):")
+            for p in unmounted:
+                label = p.label or "(no label)"
+                fs = p.fs_type or "?"
+                lines.append(f"  {p.device} [{label}] {p.size} {fs}")
+
+        return lines
 
     def roland_dir(self) -> str:
         """Return ROLAND/SP-404MKII on the current mount, or empty."""
