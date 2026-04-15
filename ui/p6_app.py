@@ -42,6 +42,8 @@ from engine.compa_link import CompaServer, CompaBrowser
 from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
 from engine.network_manager import WifiManager, BluetoothManager
+from engine.p6_librarian import P6Librarian
+from engine.sp404_librarian import SP404Librarian
 from ui.splash import run_splash
 from ui.wizard import run_wizard
 
@@ -292,6 +294,20 @@ class P6App:
 
         # ── Akai USB storage (Computer Mode file transfer) ───────────
         self.akai_storage = AkaiStorageManager()
+
+        # ── Device librarians (P-6 + SP-404 MK2) ────────────────────
+        sessions_dir = self.config.get(
+            "P6_SESSIONS_DIR",
+            os.path.join(PROJECT_ROOT, "sessions"),
+        )
+        images_dir = os.path.join(sessions_dir, "device_images")
+        try:
+            self.p6_lib = P6Librarian(os.path.join(images_dir, "p6"))
+            self.sp404_lib = SP404Librarian(os.path.join(images_dir, "sp404"))
+        except Exception as e:
+            print(f"Librarian init failed: {e}", flush=True)
+            self.p6_lib = None
+            self.sp404_lib = None
 
         # ── Recorder ─────────────────────────────────────────────────
         self.recorder = P6Recorder(

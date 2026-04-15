@@ -1,4 +1,8 @@
-"""P-6 Session Screen — dashboard with live status, notes, and P-6 backup."""
+"""P-6 Session Screen — dashboard with live status, notes.
+
+Backup/restore was moved out of this screen to Files → Device → P-6
+(see engine/p6_librarian.py + ui/screens/transfer_screen.py).
+"""
 
 import json
 import math
@@ -7,8 +11,6 @@ import time
 import pygame
 from .. import theme
 from ..components.text_area import TextArea
-from ..components.modal import Modal
-from engine.p6_image import P6ImageManager
 
 
 class P6SessionScreen:
@@ -40,20 +42,6 @@ class P6SessionScreen:
 
         self._last_save = time.monotonic()
         self._save_interval = 2.0
-
-        # P-6 image backup/restore
-        images_dir = os.path.join(notes_dir, "images")
-        self._image_mgr = P6ImageManager(images_dir)
-        self._backup_modal = Modal(
-            "Backup P-6", "Name this backup:",
-            buttons=["SAVE", "CANCEL"], width=400, height=190,
-        )
-        self._restore_modal = Modal(
-            "Restore P-6", "This will overwrite P-6 contents!",
-            buttons=["RESTORE", "CANCEL"], width=400, height=190,
-        )
-        self._restore_target: str | None = None
-        self._backup_flash = 0
 
     @property
     def wants_keyboard(self) -> bool:
@@ -102,21 +90,6 @@ class P6SessionScreen:
             self.app.recorder.stop_monitoring()
 
     def handle_event(self, event):
-        # Modals first
-        if self._backup_modal.visible:
-            result = self._backup_modal.handle_event(event)
-            if result == "SAVE":
-                name = self._backup_modal.input_text.strip() or "backup"
-                self._image_mgr.backup(name)
-            return
-        if self._restore_modal.visible:
-            result = self._restore_modal.handle_event(event)
-            if result == "RESTORE" and self._restore_target:
-                self._image_mgr.restore(self._restore_target)
-                self._restore_target = None
-            return
-
-        # Backup/restore buttons
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
@@ -604,10 +577,6 @@ class P6SessionScreen:
             preview = notes_text[:60].replace("\n", " ")
             surf = f_tiny.render(f"Notes: {preview}...", True, theme.TEXT_DIM)
             surface.blit(surf, (left_x, info_y))
-
-        # Modals
-        self._backup_modal.draw(surface)
-        self._restore_modal.draw(surface)
 
     def _draw_meter(self, surface, x, y, w, h, level, label):
         f = theme.font("small")

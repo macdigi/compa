@@ -1,10 +1,19 @@
-"""Transfer Screen — push/pull files between Compa and MPC/Force.
+"""Transfer Screen — device-side sample management.
 
-When an Akai device is in Computer Mode, its storage mounts via USB.
-This screen lets you browse the device's files, push Compa recordings
-and kits to it, and pull samples from it.
+Hosts three device-type tabs accessible from Files → Device:
 
-Uses TouchList and FolderBrowser for consistent touch-friendly navigation.
+  AKAI    push/pull files between Compa and MPC/Force via USB Computer Mode
+  P-6     librarian for the Roland AIRA Compact P-6: bank/pad view, load
+          samples by tapping a pad then tapping a WAV, clear, backup/restore
+  SP-404  librarian for the Roland SP-404 MK2: bank/pad view, load samples
+          (WAV→SMP conversion), move pads, clear, backup/restore
+
+The AKAI path uses TouchList + FolderBrowser. The librarian paths use
+LibrarianGrid (bank selector + pad grid) + a TouchList source picker.
+
+Backup/restore is delegated to engine.p6_image.P6ImageManager through
+P6Librarian / SP404Librarian — it runs in a background thread with
+progress tracking that we poll here in update() / draw().
 """
 
 import os
@@ -15,6 +24,8 @@ import pygame
 from .. import theme
 from ..components.touch_list import TouchList, TouchListItem
 from ..components.folder_browser import FolderBrowser
+from ..components.librarian_grid import LibrarianGrid
+from ..components.modal import Modal
 
 import logging
 log = logging.getLogger(__name__)
@@ -32,14 +43,20 @@ def _human_size(size_bytes: int) -> str:
 class TransferScreen:
     """File transfer between Compa and MPC/Force USB storage."""
 
-    TAB_Y = 40
-    TAB_H = 28
-    CONTENT_Y = 72
-    ACTION_H = 40
+    # Layout constants — offsets within the transfer content surface
+    DEVICE_TAB_Y = 0       # Device-type tab bar (AKAI / P-6 / SP-404)
+    DEVICE_TAB_H = 32
+    DRIVE_ROW_Y = 38       # AKAI: drive selector pills
+    DRIVE_ROW_H = 24
+    TAB_Y = 68             # AKAI mode sub-tabs (PUSH / PULL / KITS)
+    TAB_H = 26
+    CONTENT_Y = 100        # First content row after tabs
+    ACTION_H = 40          # Bottom action strip height
 
     def __init__(self, app):
         self.app = app
-        self._mode = "push"  # push, pull, kits
+        self._device_type = "akai"   # "akai" | "p6" | "sp404"
+        self._mode = "push"          # akai sub-mode: push | pull | kits
         self._status = ""
         self._status_time = 0.0
         self._transferring = False
@@ -49,8 +66,13 @@ class TransferScreen:
         # owns that area.
         self._embedded = False
 
-        # Active drive index
+        # Active drive index (AKAI)
         self._active_drive = -1
+
+        # Click-target rects (populated each draw, consumed each click)
+        self._device_tab_rects: list[tuple[pygame.Rect, str]] = []
+        self._p6_action_rects: list[tuple[pygame.Rect, str]] = []
+        self._sp404_action_rects: list[tuple[pygame.Rect, str]] = []
 
         content_rect = self._compute_content_rect()
 
@@ -69,6 +91,43 @@ class TransferScreen:
         # KITS: list of exported kits
         self._kit_list = TouchList(content_rect, item_height=56)
 
+        # ── P-6 librarian state ────────────────────────────────────
+        # The grid+list rects get resized on every draw via _relayout_librarian
+        placeholder = pygame.Rect(0, 0, 100, 100)
+        self._p6_grid = LibrarianGrid(
+            placeholder,
+            banks=8, pads_per_bank=6, grid_cols=3, grid_rows=2,
+        )
+        self._p6_source_list = TouchList(placeholder, item_height=36)
+        self._p6_cached_assignments: list = [None] * 48
+
+        # ── SP-404 librarian state ─────────────────────────────────
+        self._sp404_grid = LibrarianGrid(
+            placeholder,
+            banks=10, pads_per_bank=16, grid_cols=4, grid_rows=4,
+        )
+        self._sp404_source_list = TouchList(placeholder, item_height=36)
+        self._sp404_projects: list[dict] = []
+        self._sp404_project_idx = 0
+        self._sp404_move_mode = False  # first tap = source, second = dest
+
+        # Shared confirm modal for destructive actions
+        self._confirm_modal = Modal(
+            "Confirm", "", buttons=["OK", "CANCEL"],
+            width=400, height=170,
+        )
+        self._confirm_action = None  # callable to run on OK
+
+    # ── Librarian accessors (lazy, reach into app) ──────────────────
+
+    @property
+    def p6_lib(self):
+        return getattr(self.app, "p6_lib", None)
+
+    @property
+    def sp404_lib(self):
+        return getattr(self.app, "sp404_lib", None)
+
     def _compute_content_rect(self) -> pygame.Rect:
         """Content rect computed from current theme dimensions (may be shimmed)."""
         content_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self.CONTENT_Y - self.ACTION_H - 8
@@ -86,11 +145,32 @@ class TransferScreen:
         self._push_list.set_rect(rect)
         self._pull_browser.set_rect(rect)
         self._kit_list.set_rect(rect)
+        self._relayout_librarian()
+
+    def _relayout_librarian(self):
+        """Size the P-6/SP-404 grid + source list for the current viewport."""
+        W = theme.SCREEN_WIDTH
+        H = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT  # usable content height
+
+        # Grid takes the left 60% of the width
+        lib_top = self.DEVICE_TAB_H + 6
+        lib_bottom = H - self.ACTION_H - 8
+        lib_h = lib_bottom - lib_top
+
+        grid_w = int(W * 0.60) - 20
+        grid_rect = pygame.Rect(10, lib_top, grid_w, lib_h)
+        src_rect = pygame.Rect(grid_w + 20, lib_top, W - grid_w - 30, lib_h)
+
+        self._p6_grid.set_rect(grid_rect)
+        self._sp404_grid.set_rect(grid_rect)
+        self._p6_source_list.set_rect(src_rect)
+        self._sp404_source_list.set_rect(src_rect)
 
     def on_enter(self):
         self._refresh_push_list()
         self._refresh_pull_browser()
         self._refresh_kit_list()
+        self._refresh_librarian_sources()
 
         # Check for cross-device workflow context
         ctx = getattr(self.app, "_screen_context", {})
@@ -180,6 +260,90 @@ class TransferScreen:
                 ))
         self._kit_list.set_items(items)
 
+    # ── Librarian helpers ──────────────────────────────────────────────
+
+    def _refresh_librarian_sources(self):
+        """Populate both librarian source lists with local WAVs."""
+        items = self._scan_local_wavs()
+        self._p6_source_list.set_items(items)
+        # Fresh copies so selection state is independent
+        self._sp404_source_list.set_items(self._scan_local_wavs())
+
+    def _scan_local_wavs(self) -> list:
+        """Return TouchListItem entries for all local WAVs.
+
+        Pulls from P6_RECORDING_DIR (recordings/) and LOCAL_SAMPLE_CACHE
+        (samples/). Deduped by basename.
+        """
+        roots = []
+        rec_dir = self.app.config.get("P6_RECORDING_DIR", "")
+        if rec_dir and os.path.isdir(rec_dir):
+            roots.append(("REC", rec_dir))
+        sample_dir = self.app.config.get("LOCAL_SAMPLE_CACHE", "")
+        if sample_dir and os.path.isdir(sample_dir):
+            roots.append(("SMP", sample_dir))
+
+        seen = set()
+        items: list = []
+        for tag, root in roots:
+            try:
+                for fn in sorted(os.listdir(root)):
+                    if not fn.lower().endswith(".wav"):
+                        continue
+                    if fn in seen:
+                        continue
+                    seen.add(fn)
+                    path = os.path.join(root, fn)
+                    try:
+                        size = os.path.getsize(path)
+                    except Exception:
+                        size = 0
+                    items.append(TouchListItem(
+                        text=fn,
+                        subtext=f"{tag} · {size // 1024}KB",
+                        icon="~",
+                        icon_color=theme.WAVEFORM_COLOR,
+                        data={"path": path, "name": fn, "size": size},
+                    ))
+            except Exception as e:
+                log.warning("scan %s failed: %s", root, e)
+        return items
+
+    def _refresh_p6_assignments(self):
+        """Re-read pad assignments from the P-6."""
+        lib = self.p6_lib
+        if lib is None:
+            self._p6_cached_assignments = [None] * 48
+        else:
+            self._p6_cached_assignments = lib.read_assignments()
+        self._p6_grid.set_pads(self._p6_cached_assignments)
+
+    def _refresh_sp404_projects(self):
+        lib = self.sp404_lib
+        if lib is None:
+            self._sp404_projects = []
+            return
+        self._sp404_projects = lib.list_projects()
+        if not self._sp404_projects:
+            self._sp404_project_idx = 0
+        elif self._sp404_project_idx >= len(self._sp404_projects):
+            self._sp404_project_idx = 0
+
+    def _current_sp404_project(self) -> str:
+        if not self._sp404_projects:
+            return ""
+        idx = max(0, min(self._sp404_project_idx, len(self._sp404_projects) - 1))
+        return self._sp404_projects[idx]["path"]
+
+    def _refresh_sp404_assignments(self):
+        lib = self.sp404_lib
+        proj = self._current_sp404_project()
+        if lib is None or not proj:
+            self._sp404_grid.set_pads([None] * 160)
+            return
+        pads = lib.read_project_pads(proj)
+        self._sp404_grid.set_pads(pads)
+
     def _get_active_samples_dir(self) -> str:
         storage = getattr(self.app, "akai_storage", None)
         if not storage or not storage.is_connected:
@@ -203,6 +367,45 @@ class TransferScreen:
     # ── Event handling ───────────────────────────────────────────────
 
     def handle_event(self, event):
+        # Confirm modal takes priority
+        if self._confirm_modal.visible:
+            result = self._confirm_modal.handle_event(event)
+            if result == "OK":
+                action = self._confirm_action
+                self._confirm_action = None
+                if action:
+                    try:
+                        action()
+                    except Exception as e:
+                        log.error("Confirm action failed: %s", e)
+            elif result == "CANCEL":
+                self._confirm_action = None
+            return
+
+        # Device-type tab bar — always checked first
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+            for rect, dtype in self._device_tab_rects:
+                if rect.collidepoint(mx, my):
+                    if dtype != self._device_type:
+                        self._device_type = dtype
+                        if dtype == "p6":
+                            self._refresh_p6_assignments()
+                        elif dtype == "sp404":
+                            self._refresh_sp404_projects()
+                            self._refresh_sp404_assignments()
+                    return
+
+        # Dispatch to the active device handler
+        if self._device_type == "akai":
+            self._handle_event_akai(event)
+        elif self._device_type == "p6":
+            self._handle_event_p6(event)
+        elif self._device_type == "sp404":
+            self._handle_event_sp404(event)
+
+    def _handle_event_akai(self, event):
+        """Original AKAI push/pull/kits handler — unchanged behaviour."""
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
@@ -258,7 +461,6 @@ class TransferScreen:
                     return
 
             elif self._mode == "kits":
-                # PUSH KIT — check each kit row for button hit
                 pass  # Handled by kit list tap below
 
         # Delegate to active list/browser
@@ -270,6 +472,73 @@ class TransferScreen:
             tapped = self._kit_list.handle_event(event)
             if tapped and tapped.data:
                 self._do_push_kit(tapped.data)
+
+    def _handle_event_p6(self, event):
+        """P-6 librarian: tap a pad, tap a sample, assign."""
+        # Action bar buttons
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+            for rect, action_id in self._p6_action_rects:
+                if rect.collidepoint(mx, my):
+                    self._do_p6_action(action_id)
+                    return
+
+        # Grid tap → selects a pad
+        tapped_pad = self._p6_grid.handle_event(event)
+        if tapped_pad is not None:
+            return
+
+        # Source list tap → assign to selected pad
+        tapped = self._p6_source_list.handle_event(event)
+        if tapped and tapped.data:
+            selected = self._p6_grid.selected_pad
+            if selected < 0:
+                self._set_status("Select a pad first, then a sample")
+                return
+            self._assign_p6_pad(selected, tapped.data["path"])
+
+    def _handle_event_sp404(self, event):
+        """SP-404 librarian: tap pad + tap sample (or MOVE mode)."""
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+
+            # Project prev/next arrows
+            if hasattr(self, "_sp404_proj_rects"):
+                for rect, delta in self._sp404_proj_rects:
+                    if rect.collidepoint(mx, my):
+                        if self._sp404_projects:
+                            n = len(self._sp404_projects)
+                            self._sp404_project_idx = (
+                                self._sp404_project_idx + delta) % n
+                            self._refresh_sp404_assignments()
+                        return
+
+            for rect, action_id in self._sp404_action_rects:
+                if rect.collidepoint(mx, my):
+                    self._do_sp404_action(action_id)
+                    return
+
+        tapped_pad = self._sp404_grid.handle_event(event)
+        if tapped_pad is not None:
+            # MOVE mode: first tap = src, second = dest
+            if self._sp404_move_mode:
+                move_src = self._sp404_grid.move_src
+                if move_src < 0:
+                    self._sp404_grid.set_move_src(tapped_pad)
+                    self._set_status("Now tap destination pad")
+                else:
+                    self._do_sp404_move(move_src, tapped_pad)
+                    self._sp404_move_mode = False
+                    self._sp404_grid.clear_move_src()
+            return
+
+        tapped = self._sp404_source_list.handle_event(event)
+        if tapped and tapped.data:
+            selected = self._sp404_grid.selected_pad
+            if selected < 0:
+                self._set_status("Select a pad first, then a sample")
+                return
+            self._assign_sp404_pad(selected, tapped.data["path"])
 
     # ── Transfer operations ──────────────────────────────────────────
 
@@ -386,18 +655,281 @@ class TransferScreen:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ── P-6 librarian actions ──────────────────────────────────────
+
+    def _assign_p6_pad(self, global_idx: int, src_wav: str):
+        lib = self.p6_lib
+        if lib is None or not lib.is_mounted():
+            self._set_status("P-6 not mounted")
+            return
+        bank_idx = global_idx // 6
+        pad_idx = global_idx % 6
+        dest = lib.write_pad(bank_idx, pad_idx, src_wav)
+        if dest:
+            name = os.path.basename(src_wav)
+            bank_letter = "ABCDEFGH"[bank_idx]
+            self._set_status(f"Loaded {name[:24]} → {bank_letter}-{pad_idx + 1}")
+            self._refresh_p6_assignments()
+        else:
+            self._set_status("Load failed — check the P-6 mount")
+
+    def _do_p6_action(self, action_id: str):
+        lib = self.p6_lib
+        if lib is None:
+            return
+
+        if action_id == "clear_pad":
+            selected = self._p6_grid.selected_pad
+            if selected < 0:
+                self._set_status("Select a pad first")
+                return
+            bank_idx = selected // 6
+            pad_idx = selected % 6
+            if lib.clear_pad(bank_idx, pad_idx):
+                self._set_status(f"Cleared {'ABCDEFGH'[bank_idx]}-{pad_idx + 1}")
+                self._refresh_p6_assignments()
+
+        elif action_id == "clear_bank":
+            bank_idx = self._p6_grid.current_bank
+            self._confirm(
+                f"Clear entire bank {'ABCDEFGH'[bank_idx]}?",
+                lambda: self._do_clear_bank_p6(bank_idx),
+            )
+
+        elif action_id == "clear_all":
+            self._confirm(
+                "Clear ALL 48 pads on P-6?",
+                self._do_clear_all_p6,
+            )
+
+        elif action_id == "backup":
+            if not lib.is_mounted():
+                self._set_status("P-6 not mounted")
+                return
+            if lib.busy:
+                self._set_status("Busy with another operation")
+                return
+            self._set_status("Starting P-6 backup...")
+
+            def _done(ok, msg):
+                self._set_status(f"P-6 backup: {msg[:40]}")
+
+            ts = time.strftime("%Y-%m-%d_%H-%M")
+            lib.backup(f"P-6 {ts}", description="From Compa librarian",
+                       on_complete=_done)
+
+        elif action_id == "restore":
+            images = lib.list_images()
+            if not images:
+                self._set_status("No P-6 backups found")
+                return
+            self._confirm(
+                f"Restore most recent backup? ({images[0]['name']})",
+                lambda: self._do_restore_p6(images[0]["path"]),
+            )
+
+    def _do_clear_bank_p6(self, bank_idx: int):
+        lib = self.p6_lib
+        if lib is None:
+            return
+        if lib.clear_bank(bank_idx):
+            self._set_status(f"Cleared bank {'ABCDEFGH'[bank_idx]}")
+            self._refresh_p6_assignments()
+
+    def _do_clear_all_p6(self):
+        lib = self.p6_lib
+        if lib is None:
+            return
+        if lib.clear_all():
+            self._set_status("Cleared all P-6 pads")
+            self._refresh_p6_assignments()
+        else:
+            self._set_status("Clear all failed")
+
+    def _do_restore_p6(self, image_path: str):
+        lib = self.p6_lib
+        if lib is None or lib.busy:
+            return
+        self._set_status("Restoring P-6...")
+
+        def _done(ok, msg):
+            self._set_status(f"P-6 restore: {msg[:40]}")
+            if ok:
+                self._refresh_p6_assignments()
+
+        lib.restore(image_path, on_complete=_done)
+
+    # ── SP-404 librarian actions ───────────────────────────────────
+
+    def _assign_sp404_pad(self, global_idx: int, src_wav: str):
+        lib = self.sp404_lib
+        if lib is None or not lib.is_mounted():
+            self._set_status("SP-404 not mounted")
+            return
+        proj = self._current_sp404_project()
+        if not proj:
+            self._set_status("No project — mount the SP-404 first")
+            return
+        bank_idx = global_idx // 16
+        pad_idx = global_idx % 16
+        self._set_status(
+            f"Converting {os.path.basename(src_wav)[:24]} → SMP...")
+
+        def _worker():
+            dest = lib.write_pad(proj, bank_idx, pad_idx, src_wav)
+            if dest:
+                bank_letter = chr(ord("A") + bank_idx)
+                self._set_status(
+                    f"Loaded → {bank_letter}{pad_idx + 1:02d}")
+                self._refresh_sp404_assignments()
+            else:
+                self._set_status("SMP write failed")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _do_sp404_action(self, action_id: str):
+        lib = self.sp404_lib
+        if lib is None:
+            return
+        proj = self._current_sp404_project()
+        if not proj and action_id not in ("backup", "restore"):
+            self._set_status("No SP-404 project loaded")
+            return
+
+        if action_id == "clear_pad":
+            selected = self._sp404_grid.selected_pad
+            if selected < 0:
+                self._set_status("Select a pad first")
+                return
+            b = selected // 16
+            p = selected % 16
+            if lib.clear_pad(proj, b, p):
+                bank_letter = chr(ord("A") + b)
+                self._set_status(f"Cleared {bank_letter}{p + 1:02d}")
+                self._refresh_sp404_assignments()
+
+        elif action_id == "move":
+            self._sp404_move_mode = not self._sp404_move_mode
+            if self._sp404_move_mode:
+                self._sp404_grid.set_move_src(-1)
+                self._set_status("MOVE: tap source pad, then destination")
+            else:
+                self._sp404_grid.clear_move_src()
+                self._set_status("MOVE cancelled")
+
+        elif action_id == "clear_bank":
+            bank_idx = self._sp404_grid.current_bank
+            bank_letter = chr(ord("A") + bank_idx)
+            self._confirm(
+                f"Clear entire bank {bank_letter}?",
+                lambda: self._do_clear_bank_sp404(proj, bank_idx),
+            )
+
+        elif action_id == "backup":
+            if not lib.is_mounted():
+                self._set_status("SP-404 not mounted")
+                return
+            if lib.busy:
+                self._set_status("Busy with another operation")
+                return
+            self._set_status("Starting SP-404 backup...")
+
+            def _done(ok, msg):
+                self._set_status(f"SP-404 backup: {msg[:36]}")
+
+            ts = time.strftime("%Y-%m-%d_%H-%M")
+            lib.backup(f"SP-404 {ts}",
+                       description="From Compa librarian",
+                       on_complete=_done)
+
+        elif action_id == "restore":
+            images = lib.list_images()
+            if not images:
+                self._set_status("No SP-404 backups found")
+                return
+            self._confirm(
+                f"Restore most recent backup? ({images[0]['name']})",
+                lambda: self._do_restore_sp404(images[0]["path"]),
+            )
+
+    def _do_sp404_move(self, src_global: int, dst_global: int):
+        lib = self.sp404_lib
+        if lib is None:
+            return
+        proj = self._current_sp404_project()
+        if not proj:
+            return
+        src_b, src_p = src_global // 16, src_global % 16
+        dst_b, dst_p = dst_global // 16, dst_global % 16
+        if lib.move_pad(proj, src_b, src_p, dst_b, dst_p):
+            self._set_status(
+                f"Moved {chr(65 + src_b)}{src_p + 1:02d} → "
+                f"{chr(65 + dst_b)}{dst_p + 1:02d}")
+            self._refresh_sp404_assignments()
+        else:
+            self._set_status("Move failed")
+
+    def _do_clear_bank_sp404(self, proj: str, bank_idx: int):
+        lib = self.sp404_lib
+        if lib is None:
+            return
+        if lib.clear_bank(proj, bank_idx):
+            self._set_status(f"Cleared bank {chr(65 + bank_idx)}")
+            self._refresh_sp404_assignments()
+
+    def _do_restore_sp404(self, image_path: str):
+        lib = self.sp404_lib
+        if lib is None or lib.busy:
+            return
+        self._set_status("Restoring SP-404...")
+
+        def _done(ok, msg):
+            self._set_status(f"SP-404 restore: {msg[:36]}")
+            if ok:
+                self._refresh_sp404_assignments()
+
+        lib.restore(image_path, on_complete=_done)
+
+    # ── Confirm modal helper ───────────────────────────────────────
+
+    def _confirm(self, message: str, action):
+        self._confirm_modal.show(
+            title="Confirm", message=message,
+        )
+        self._confirm_action = action
+
+    # ── Update tick ────────────────────────────────────────────────
+
     def update(self):
         storage = getattr(self.app, "akai_storage", None)
         if storage:
             storage.scan_and_mount()
 
-        # Update active list physics
-        if self._mode == "push":
-            self._push_list.update()
-        elif self._mode == "pull":
-            self._pull_browser.update()
-        else:
-            self._kit_list.update()
+        if self._device_type == "akai":
+            if self._mode == "push":
+                self._push_list.update()
+            elif self._mode == "pull":
+                self._pull_browser.update()
+            else:
+                self._kit_list.update()
+        elif self._device_type == "p6":
+            self._p6_source_list.update()
+            # Poll for mount/unmount state changes
+            if self.p6_lib:
+                now_mounted = self.p6_lib.is_mounted()
+                if now_mounted != getattr(self, "_p6_was_mounted", None):
+                    self._p6_was_mounted = now_mounted
+                    if now_mounted:
+                        self._refresh_p6_assignments()
+        elif self._device_type == "sp404":
+            self._sp404_source_list.update()
+            if self.sp404_lib:
+                now_mounted = self.sp404_lib.is_mounted()
+                if now_mounted != getattr(self, "_sp404_was_mounted", None):
+                    self._sp404_was_mounted = now_mounted
+                    if now_mounted:
+                        self._refresh_sp404_projects()
+                        self._refresh_sp404_assignments()
 
     # ── Drawing ──────────────────────────────────────────────────────
 
@@ -406,10 +938,74 @@ class TransferScreen:
         f_small = theme.font("small")
         f_tiny = theme.font("tiny")
 
+        # Device-type tab bar (always visible)
+        self._draw_device_tabs(surface, f_small)
+
+        # Dispatch to the active device view
+        if self._device_type == "akai":
+            self._draw_akai(surface, f_med, f_small, f_tiny)
+        elif self._device_type == "p6":
+            self._draw_p6(surface, f_med, f_small, f_tiny)
+        elif self._device_type == "sp404":
+            self._draw_sp404(surface, f_med, f_small, f_tiny)
+
+        # Confirm modal overlay on top of everything
+        if self._confirm_modal.visible:
+            self._confirm_modal.draw(surface)
+
+    def _draw_device_tabs(self, surface: pygame.Surface, f_small):
+        """Top tab bar: AKAI · P-6 · SP-404."""
+        W = theme.SCREEN_WIDTH
+        y = self.DEVICE_TAB_Y
+        h = self.DEVICE_TAB_H
+
+        storage = getattr(self.app, "akai_storage", None)
+        akai_ok = storage and storage.is_connected
+        p6_ok = self.p6_lib is not None and self.p6_lib.is_mounted()
+        sp_ok = self.sp404_lib is not None and self.sp404_lib.is_mounted()
+
+        tabs = [
+            ("AKAI",   "akai",  akai_ok),
+            ("P-6",    "p6",    p6_ok),
+            ("SP-404", "sp404", sp_ok),
+        ]
+        num = len(tabs)
+        gap = 4
+        tab_w = (W - 20 - gap * (num - 1)) // num
+
+        self._device_tab_rects = []
+        for i, (label, dtype, mount_ok) in enumerate(tabs):
+            x = 10 + i * (tab_w + gap)
+            rect = pygame.Rect(x, y, tab_w, h)
+            self._device_tab_rects.append((rect, dtype))
+
+            is_active = (dtype == self._device_type)
+
+            if is_active:
+                bg = theme.ACCENT
+                tc = theme.BG
+            elif mount_ok:
+                bg = theme.BG_LIGHTER
+                tc = theme.TEXT
+            else:
+                bg = theme.BG_PANEL
+                tc = theme.TEXT_DIM
+
+            pygame.draw.rect(surface, bg, rect, border_radius=6)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=6)
+
+            lbl = f_small.render(label, True, tc)
+            surface.blit(lbl, lbl.get_rect(center=(rect.centerx, rect.centery - 2)))
+
+            # Mount state dot
+            dot_color = theme.GREEN if mount_ok else theme.TEXT_DIM
+            pygame.draw.circle(surface, dot_color,
+                               (rect.right - 12, rect.centery), 3)
+
+    def _draw_akai(self, surface: pygame.Surface, f_med, f_small, f_tiny):
         storage = getattr(self.app, "akai_storage", None)
         connected = storage and storage.is_connected
 
-        # Header + drive selector
         if connected:
             drives = storage.drives
             if self._active_drive < 0 or self._active_drive >= len(drives):
@@ -430,7 +1026,11 @@ class TransferScreen:
             if not self._embedded:
                 theme.draw_screen_header(surface, "TRANSFER", header_info)
 
-            # Drive selector buttons
+            # Drive info label + drive selector buttons on DRIVE_ROW
+            info = f"{active_d.label}: {active_d.free_gb}GB free" if active_d else ""
+            label_surf = f_small.render(info, True, theme.TEXT_DIM)
+            surface.blit(label_surf, (12, self.DRIVE_ROW_Y + 4))
+
             self._drive_btn_rects = []
             dx = theme.SCREEN_WIDTH - 16
             for i in range(len(drives) - 1, -1, -1):
@@ -438,7 +1038,7 @@ class TransferScreen:
                 is_active = (i == self._active_drive)
                 label = f"{d.label} ({d.free_gb}G)"
                 w = max(100, len(label) * 7 + 20)
-                rect = pygame.Rect(dx - w, 6, w, 24)
+                rect = pygame.Rect(dx - w, self.DRIVE_ROW_Y, w, self.DRIVE_ROW_H)
                 bg = theme.ACCENT if is_active else theme.BUTTON_BG
                 tc = theme.BG if is_active else theme.TEXT_DIM
                 pygame.draw.rect(surface, bg, rect, border_radius=4)
@@ -447,8 +1047,11 @@ class TransferScreen:
                 self._drive_btn_rects.append((rect, i))
                 dx = rect.x - 6
         else:
-            if not self._embedded:
-                theme.draw_screen_header(surface, "TRANSFER", "No device in Computer Mode")
+            # "No device" hint in the drive row
+            hint = f_small.render(
+                "No MPC/Force mounted — put device in Computer Mode",
+                True, theme.TEXT_DIM)
+            surface.blit(hint, (12, self.DRIVE_ROW_Y + 4))
             self._drive_btn_rects = []
 
         # Mode tabs
@@ -466,7 +1069,7 @@ class TransferScreen:
             surface.blit(surf, surf.get_rect(center=rect.center))
 
         if not connected:
-            y = 120
+            y = self.CONTENT_Y + 12
             for line in [
                 "Connect your MPC or Force via USB cable",
                 "Put the device in Computer Mode:",
@@ -538,3 +1141,163 @@ class TransferScreen:
         label = f"PULL {count}" if count else "PULL"
         surf = f_med.render(label, True, theme.BG if can else theme.TEXT_DIM)
         surface.blit(surf, surf.get_rect(center=pull_rect.center))
+
+    # ── P-6 librarian view ─────────────────────────────────────────
+
+    def _draw_p6(self, surface: pygame.Surface, f_med, f_small, f_tiny):
+        lib = self.p6_lib
+
+        # Mount status row (replaces AKAI's drive row)
+        if lib is None:
+            info = "P-6 librarian unavailable"
+        elif lib.is_mounted():
+            n = sum(1 for p in self._p6_cached_assignments if p is not None)
+            info = f"P-6 connected · {n}/48 pads loaded · {lib.mount_path}"
+        else:
+            info = "P-6 not mounted — hold SAMPLING + power on"
+        info_surf = f_small.render(info, True, theme.TEXT_DIM)
+        surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 4))
+
+        # Librarian grid and source list draw in their own laid-out rects
+        self._relayout_librarian()
+        self._p6_grid.draw(surface)
+
+        # Source list header
+        src_rect = self._p6_source_list.rect
+        label_surf = f_tiny.render("LOCAL WAVS", True, theme.ACCENT)
+        surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
+        self._p6_source_list.draw(surface)
+
+        # Action bar at bottom
+        self._draw_librarian_actions(
+            surface, f_small, f_tiny,
+            [
+                ("clear_pad",  "CLEAR PAD",  theme.BUTTON_BG),
+                ("clear_bank", "CLEAR BANK", theme.BUTTON_BG),
+                ("clear_all",  "CLEAR ALL",  theme.RED),
+                ("backup",     "BACKUP",     theme.BLUE),
+                ("restore",    "RESTORE",    theme.ACCENT_DIM),
+            ],
+            self._p6_action_rects,
+            lib,
+        )
+
+        # Status line
+        self._draw_status_line(surface, f_small)
+
+    # ── SP-404 librarian view ──────────────────────────────────────
+
+    def _draw_sp404(self, surface: pygame.Surface, f_med, f_small, f_tiny):
+        lib = self.sp404_lib
+
+        # Mount + project status row
+        if lib is None:
+            info = "SP-404 librarian unavailable"
+        elif lib.is_mounted():
+            if self._sp404_projects:
+                proj = self._sp404_projects[
+                    max(0, min(self._sp404_project_idx,
+                               len(self._sp404_projects) - 1))]
+                info = f"SP-404 · {proj['name']} · {proj['num_samples']} samples"
+            else:
+                info = f"SP-404 connected · no projects yet"
+        else:
+            info = "SP-404 not mounted — Tools menu → USB storage"
+        info_surf = f_small.render(info, True, theme.TEXT_DIM)
+        surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 4))
+
+        # Project prev/next arrows (top-right)
+        self._sp404_proj_rects = []
+        if self._sp404_projects and len(self._sp404_projects) > 1:
+            arrow_y = self.DRIVE_ROW_Y
+            prev_rect = pygame.Rect(
+                theme.SCREEN_WIDTH - 80, arrow_y, 28, self.DRIVE_ROW_H)
+            next_rect = pygame.Rect(
+                theme.SCREEN_WIDTH - 48, arrow_y, 32, self.DRIVE_ROW_H)
+            pygame.draw.rect(surface, theme.BUTTON_BG, prev_rect, border_radius=4)
+            pygame.draw.rect(surface, theme.BUTTON_BG, next_rect, border_radius=4)
+            lp = f_small.render("<", True, theme.TEXT)
+            ln = f_small.render(">", True, theme.TEXT)
+            surface.blit(lp, lp.get_rect(center=prev_rect.center))
+            surface.blit(ln, ln.get_rect(center=next_rect.center))
+            self._sp404_proj_rects.append((prev_rect, -1))
+            self._sp404_proj_rects.append((next_rect, 1))
+
+        # Grid + source list
+        self._relayout_librarian()
+        self._sp404_grid.draw(surface)
+        src_rect = self._sp404_source_list.rect
+        label_surf = f_tiny.render("LOCAL WAVS", True, theme.ACCENT)
+        surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
+        self._sp404_source_list.draw(surface)
+
+        # Action bar
+        self._draw_librarian_actions(
+            surface, f_small, f_tiny,
+            [
+                ("clear_pad",  "CLEAR PAD",  theme.BUTTON_BG),
+                ("move",       "MOVE" if not self._sp404_move_mode else "CANCEL",
+                 theme.BLUE if not self._sp404_move_mode else theme.RED),
+                ("clear_bank", "CLR BANK",   theme.BUTTON_BG),
+                ("backup",     "BACKUP",     theme.BLUE),
+                ("restore",    "RESTORE",    theme.ACCENT_DIM),
+            ],
+            self._sp404_action_rects,
+            lib,
+        )
+        self._draw_status_line(surface, f_small)
+
+    def _draw_librarian_actions(self, surface, f_small, f_tiny,
+                                  buttons: list,
+                                  out_rects: list, lib):
+        """Draw an action button row at the bottom of the content pane."""
+        out_rects.clear()
+        W = theme.SCREEN_WIDTH
+        H = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
+        y = H - self.ACTION_H - 4
+        gap = 6
+        n = len(buttons)
+        btn_w = (W - 20 - gap * (n - 1)) // n
+        btn_h = self.ACTION_H - 8
+
+        busy = lib is not None and lib.busy
+        for i, (action_id, label, color) in enumerate(buttons):
+            x = 10 + i * (btn_w + gap)
+            rect = pygame.Rect(x, y, btn_w, btn_h)
+            out_rects.append((rect, action_id))
+
+            # Dim disabled buttons while busy
+            draw_color = color if not busy else theme.BG_PANEL
+            text_color = theme.TEXT_BRIGHT if not busy else theme.TEXT_DIM
+
+            pygame.draw.rect(surface, draw_color, rect, border_radius=6)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=6)
+            lbl = f_small.render(label, True, text_color)
+            surface.blit(lbl, lbl.get_rect(center=rect.center))
+
+        # Progress bar overlay if backup/restore is running
+        if busy:
+            bar_y = y - 10
+            bar_rect = pygame.Rect(10, bar_y, W - 20, 6)
+            pygame.draw.rect(surface, theme.BG_PANEL, bar_rect, border_radius=3)
+            fill_w = int(bar_rect.width * max(0.0, min(1.0, lib.progress)))
+            if fill_w > 0:
+                fill = pygame.Rect(bar_rect.x, bar_rect.y, fill_w, bar_rect.height)
+                pygame.draw.rect(surface, theme.ACCENT, fill, border_radius=3)
+
+    def _draw_status_line(self, surface: pygame.Surface, f_small):
+        """Draw the current status line (shared by P-6 and SP-404 views)."""
+        if not self._status:
+            return
+        age = time.monotonic() - self._status_time
+        if age >= 8.0:
+            return
+        color = theme.GREEN if ("Loaded" in self._status
+                                or "Cleared" in self._status
+                                or "Moved" in self._status
+                                or "complete" in self._status.lower()) \
+            else theme.ACCENT
+        surf = f_small.render(self._status[:80], True, color)
+        H = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
+        y = H - self.ACTION_H - 28
+        surface.blit(surf, (12, y))
