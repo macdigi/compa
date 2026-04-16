@@ -65,9 +65,8 @@ class DeviceWorkspaceScreen:
         self._keys_pad = 0     # 0-indexed pad within bank
         self._keys_selected_name = ""  # display label for the selected pad
 
-        # SP-404 held pad state — pad stays held while in chromatic mode
-        self._sp404_held_ch = -1
-        self._sp404_held_note = -1
+        # SP-404 chromatic workflow state
+        self._sp404_chromatic_ready = False  # True after user does SHIFT+CHROMATIC
 
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
@@ -152,18 +151,6 @@ class DeviceWorkspaceScreen:
             self.app.chromatic_kb._all_notes_off()
         self._latched_notes.clear()
         self._keys_latch = False
-        # Release any held SP-404 pad
-        self._release_sp404_held_pad()
-
-    def _release_sp404_held_pad(self):
-        """Release the pad being held on the SP-404 bank channel."""
-        if self._sp404_held_ch >= 0:
-            midi = self.app._midi_connections.get(self._device_key)
-            if midi:
-                midi.send_note_off(self._sp404_held_note,
-                                   channel=self._sp404_held_ch)
-            self._sp404_held_ch = -1
-            self._sp404_held_note = -1
 
     def _build_tabs(self):
         key = self._device_key
@@ -345,7 +332,6 @@ class DeviceWorkspaceScreen:
                             self.app.chromatic_kb._all_notes_off()
                             self._latched_notes.clear()
                             self._keys_latch = False
-                            self._release_sp404_held_pad()
                     if new_tab == "control":
                         self._build_knobs()
                     return
@@ -1395,19 +1381,24 @@ class DeviceWorkspaceScreen:
                 self._piano_display._active_notes = dict(kb.active_notes)
             self._piano_display.draw(surface)
 
-        # Channel info + hint (bottom)
+        # Channel info + workflow hint (bottom)
+        bottom_y = self._controls_top + self._controls_h - 14
         if self._device_key == "SP-404MKII":
-            ch_text = "Ch16 chromatic · Tap pads above to preview · Select on SP for Ch16 target"
+            # Two-line guide for SP-404 chromatic workflow
+            line1 = "1) Select pad above  2) On SP: SHIFT + CHROMATIC  3) Play keys"
+            surface.blit(f_tiny.render(line1, True, theme.TEXT_DIM),
+                         (10, bottom_y))
         elif kb and kb._target_midi:
             ch_text = f"MIDI Ch {kb._target_channel + 1}"
             if kb.enabled:
                 ch_text += " · ACTIVE"
             else:
                 ch_text += " · TAP KEY TO ENABLE"
+            surface.blit(f_tiny.render(ch_text, True, theme.TEXT_DIM),
+                         (10, bottom_y))
         else:
-            ch_text = "No MIDI output target"
-        ch_surf = f_tiny.render(ch_text[:90], True, theme.TEXT_DIM)
-        surface.blit(ch_surf, (10, self._controls_top + self._controls_h - 14))
+            surface.blit(f_tiny.render("No MIDI output target",
+                                        True, theme.TEXT_DIM), (10, bottom_y))
 
     def _handle_keys_clicks(self, mx, my):
         """Handle clicks within the KEYS tab."""
@@ -1549,33 +1540,30 @@ class DeviceWorkspaceScreen:
         if self._device_key == "SP-404MKII":
             # SP-404 pad numbering: pads 1-4 are the TOP row, 13-16 the
             # BOTTOM row. But MIDI notes 36-39 map to the BOTTOM row.
-            # Convert SP-404 pad number → MIDI note:
-            #   SP row (0=top) = pad_idx // 4
-            #   MIDI row (0=bottom) = 3 - SP row
-            #   note = 36 + MIDI_row * 4 + (pad_idx % 4)
+            #   note = 36 + (3 - sp_row) * 4 + col
             channel = bank_idx
             sp_row = pad_idx // 4
             col = pad_idx % 4
             midi_row = 3 - sp_row
             note = 36 + midi_row * 4 + col
-            # Release any previously held pad first
-            if hasattr(self, '_sp404_held_ch') and self._sp404_held_ch >= 0:
-                midi.send_note_off(self._sp404_held_note,
-                                   channel=self._sp404_held_ch)
 
-            # HOLD the pad on the bank channel — keep it held the entire
-            # time the user is in chromatic mode. YouTube tutorials show
-            # people physically holding a pad while playing the keyboard.
-            # The pad must stay actively held for Ch16 to target it.
-            midi.send_note_on(note, 100, channel=channel)
-            self._sp404_held_ch = channel
-            self._sp404_held_note = note
+            # Preview trigger — brief note so user hears the pad.
+            # Chromatic target is set on the SP-404 via SHIFT + CHROMATIC.
+            midi.send_note_on(note, 80, channel=channel)
+            def _off():
+                import time
+                time.sleep(0.15)
+                midi.send_note_off(note, channel=channel)
+            threading.Thread(target=_off, daemon=True).start()
 
-            kb.set_pad(channel=channel, note=note, root_midi=60)
+            # Reset chromatic-ready flag — user needs to SHIFT+CHROMATIC
+            # on the SP-404 after selecting a new pad
+            self._sp404_chromatic_ready = False
+
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            print(f"KEYS: SP-404 pad → {bank_letter}-{pad_idx + 1} "
-                  f"(Ch{channel + 1} note {note}, HELD)", flush=True)
+            print(f"KEYS: SP-404 preview {bank_letter}-{pad_idx + 1} "
+                  f"(Ch{channel + 1} note {note})", flush=True)
 
         elif self._device_key == "P-6":
             # P-6: trigger the pad on the sampler channel
