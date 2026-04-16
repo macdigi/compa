@@ -49,7 +49,13 @@ class P6PatternScreen:
             self.sequencer.set_midi_out(self.app.p6)
 
     def _recalc_grid(self):
-        """Recalculate grid dimensions based on focused device's pattern count."""
+        """Recalculate grid dimensions based on focused device's pattern count.
+
+        On the 7" touchscreen (800×480) an 8×8 grid of 46px cells doesn't
+        fit between the header (y=46) and the nav bar (bottom 52px). We
+        use a scrollable viewport: the grid can be larger than the visible
+        area, and `_grid_scroll` controls which row is at the top.
+        """
         dev = getattr(self.app, "device", None)
         self._pattern_count = getattr(dev, "pattern_count", 64) if dev else 64
         if self._pattern_count <= 0:
@@ -57,23 +63,32 @@ class P6PatternScreen:
 
         if self._pattern_count <= 16:
             self._grid_cols = 4
-            self._grid_rows = 4
             self._cell_w = 170
-            self._cell_h = 80
+            self._cell_h = 70
         elif self._pattern_count <= 32:
             self._grid_cols = 8
-            self._grid_rows = 4
             self._cell_w = 88
-            self._cell_h = 80
+            self._cell_h = 70
         else:
             self._grid_cols = 8
-            self._grid_rows = 8
             self._cell_w = 88
             self._cell_h = 46
 
+        self._grid_total_rows = (self._pattern_count + self._grid_cols - 1) // self._grid_cols
         self._grid_x = 16
         self._grid_y = 46
         self._cell_gap = 4
+
+        # How many rows fit in the visible area
+        avail_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self._grid_y - 8
+        self._grid_visible_rows = max(1, avail_h // (self._cell_h + self._cell_gap))
+
+        # Scroll offset (in rows)
+        if not hasattr(self, "_grid_scroll"):
+            self._grid_scroll = 0
+        self._grid_scroll = max(0, min(
+            self._grid_scroll,
+            self._grid_total_rows - self._grid_visible_rows))
 
     def on_focus_changed(self):
         """Called when the focused device changes — rebuild grid + re-wire MIDI."""
@@ -155,16 +170,27 @@ class P6PatternScreen:
             else:
                 self._handle_seq_click(mx, my)
 
-        # Scroll chain list
-        if self._mode == "chain" and event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 4:
-                self._chain_scroll = max(0, self._chain_scroll - 1)
-            elif event.button == 5:
-                max_scroll = max(0, len(self._chain.steps) - 6)
-                self._chain_scroll = min(max_scroll, self._chain_scroll + 1)
+        # Mouse wheel / touch-drag scroll
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 4:  # scroll up
+                if self._mode == "grid":
+                    self._grid_scroll = max(0, self._grid_scroll - 1)
+                elif self._mode == "chain":
+                    self._chain_scroll = max(0, self._chain_scroll - 1)
+            elif event.button == 5:  # scroll down
+                if self._mode == "grid":
+                    max_scroll = max(0, self._grid_total_rows - self._grid_visible_rows)
+                    self._grid_scroll = min(max_scroll, self._grid_scroll + 1)
+                elif self._mode == "chain":
+                    max_scroll = max(0, len(self._chain.steps) - 6)
+                    self._chain_scroll = min(max_scroll, self._chain_scroll + 1)
 
     def _handle_grid_click(self, mx, my):
-        for i in range(self._pattern_count):
+        # Only check patterns in visible rows
+        first = self._grid_scroll * self._grid_cols
+        last = min(self._pattern_count,
+                   (self._grid_scroll + self._grid_visible_rows) * self._grid_cols)
+        for i in range(first, last):
             rect = self._cell_rect(i)
             if rect.collidepoint(mx, my):
                 self._select_pattern(i)
@@ -289,10 +315,12 @@ class P6PatternScreen:
             return
 
     def _cell_rect(self, index: int) -> pygame.Rect:
+        """Screen rect for pattern cell, accounting for scroll offset."""
         row = index // self._grid_cols
         col = index % self._grid_cols
+        scroll_offset = getattr(self, "_grid_scroll", 0)
         x = self._grid_x + col * (self._cell_w + self._cell_gap)
-        y = self._grid_y + row * (self._cell_h + self._cell_gap)
+        y = self._grid_y + (row - scroll_offset) * (self._cell_h + self._cell_gap)
         return pygame.Rect(x, y, self._cell_w, self._cell_h)
 
     def _select_pattern(self, index: int):
@@ -389,21 +417,37 @@ class P6PatternScreen:
     def _draw_grid(self, surface, f_small, f_mono):
         active = self.app.p6.state.active_pattern if self.app.p6 else 0
 
-        # Panel behind grid area
+        # Auto-scroll to keep active pattern visible
+        active_row = active // self._grid_cols
+        if active_row < self._grid_scroll:
+            self._grid_scroll = active_row
+        elif active_row >= self._grid_scroll + self._grid_visible_rows:
+            self._grid_scroll = active_row - self._grid_visible_rows + 1
+
+        # Clamp scroll
+        max_scroll = max(0, self._grid_total_rows - self._grid_visible_rows)
+        self._grid_scroll = max(0, min(self._grid_scroll, max_scroll))
+
+        # Panel behind visible grid area
+        vis_rows = min(self._grid_visible_rows, self._grid_total_rows)
         grid_panel = pygame.Rect(
             self._grid_x - 6, self._grid_y - 6,
             self._grid_cols * (self._cell_w + self._cell_gap) + 8,
-            self._grid_rows * (self._cell_h + self._cell_gap) + 8)
+            vis_rows * (self._cell_h + self._cell_gap) + 8)
         theme.draw_panel(surface, grid_panel, border=True)
 
-        for i in range(self._pattern_count):
+        # Draw visible patterns only
+        first = self._grid_scroll * self._grid_cols
+        last = min(self._pattern_count,
+                   (self._grid_scroll + self._grid_visible_rows) * self._grid_cols)
+
+        for i in range(first, last):
             rect = self._cell_rect(i)
             is_active = (i == active)
 
             if is_active:
                 bg = theme.ACCENT
                 text_color = theme.BG
-                # Glow effect behind active cell
                 glow_rect = rect.inflate(6, 6)
                 pygame.draw.rect(surface, theme.ACCENT, glow_rect, border_radius=6)
             else:
@@ -417,11 +461,26 @@ class P6PatternScreen:
             nr = num.get_rect(centerx=rect.centerx, top=rect.top + 4)
             surface.blit(num, nr)
 
-            name = self._pattern_names[i]
+            name = self._pattern_names[i] if i < len(self._pattern_names) else ""
             if name:
                 name_surf = f_small.render(name[:8], True, text_color)
                 nr2 = name_surf.get_rect(centerx=rect.centerx, bottom=rect.bottom - 3)
                 surface.blit(name_surf, nr2)
+
+        # Scroll indicators — show arrows when there are patterns above/below
+        f_tiny = theme.font("tiny")
+        right_x = self._grid_x + self._grid_cols * (self._cell_w + self._cell_gap) + 12
+        if self._grid_scroll > 0:
+            up = f_small.render("▲", True, theme.ACCENT)
+            surface.blit(up, (right_x, self._grid_y))
+        if self._grid_scroll < max_scroll:
+            down = f_small.render("▼", True, theme.ACCENT)
+            surface.blit(down, (right_x, grid_panel.bottom - 24))
+
+        # Row counter
+        row_text = f"{self._grid_scroll + 1}-{self._grid_scroll + vis_rows}/{self._grid_total_rows}"
+        row_surf = f_tiny.render(row_text, True, theme.TEXT_DIM)
+        surface.blit(row_surf, (right_x, grid_panel.centery - 6))
 
     def _draw_seq(self, surface, f_small, f_med, f_mono):
         """Draw the Pi-side step sequencer grid."""
