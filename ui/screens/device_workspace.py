@@ -1384,7 +1384,7 @@ class DeviceWorkspaceScreen:
         # Channel info + workflow hint (bottom)
         bottom_y = self._controls_top + self._controls_h - 14
         if self._device_key == "SP-404MKII":
-            line1 = "On SP: select pad > SHIFT + CHROMATIC > play keys here"
+            line1 = "On SP: select pad > SHIFT + PAD 4 (CHROMATIC) > play keys here"
             surface.blit(f_tiny.render(line1, True, theme.TEXT_DIM),
                          (10, bottom_y))
         elif kb and kb._target_midi:
