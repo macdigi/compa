@@ -1485,62 +1485,62 @@ class DeviceWorkspaceScreen:
                     self._touch_note = note
 
     def _select_chromatic_pad(self, bank_idx: int, pad_idx: int):
-        """Trigger a pad briefly to make it the 'active' sound for chromatic play.
+        """Select a pad as the active sound for chromatic play.
 
-        SP-404: sends note-on then note-off on the bank's channel (Ch1-10).
-                Channel 16 chromatic play then uses this pad's sample.
-        P-6:    sends note-on/off on the sampler channel (Ch11).
-                The granular engine (Ch4) then plays this sample.
+        SP-404: Sets the pitch-bend-mode pad (bank channel + note).
+                Sends a brief trigger so the user hears a preview.
+                Subsequent piano keys use pitch bend on that channel.
+        P-6:    Triggers the pad on the sampler channel so the granular
+                engine picks it up. Ch4 chromatic play continues.
         """
         kb = getattr(self.app, 'chromatic_kb', None)
         if kb is None or kb._target_midi is None:
             return
 
         midi = kb._target_midi
+        import threading
 
         if self._device_key == "SP-404MKII":
-            # SP-404 MIDI Mode A: Ch 1-10 = Banks A-J, notes 36-51 = pads 1-16
+            # SP-404: set the pitch-bend routing to this pad
             channel = bank_idx  # 0-indexed (Ch1 = bank A)
             note = 36 + pad_idx
-            midi.send_note_on(note, 100, channel=channel)
-            import threading
+            # Update the chromatic keyboard's pad routing
+            kb.set_pad(channel=channel, note=note, root_midi=60)
+            # Brief preview trigger so the user hears which pad they picked
+            midi.send_note_on(note, 80, channel=channel)
             def _off():
                 import time
-                time.sleep(0.05)  # 50ms trigger pulse
+                time.sleep(0.12)
                 midi.send_note_off(note, channel=channel)
             threading.Thread(target=_off, daemon=True).start()
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            print(f"KEYS: selected SP-404 {bank_letter}-{pad_idx + 1} "
-                  f"(Ch{channel + 1} note {note})", flush=True)
+            print(f"KEYS: SP-404 pad → {bank_letter}-{pad_idx + 1} "
+                  f"(Ch{channel + 1} note {note}, pitch-bend mode)",
+                  flush=True)
 
         elif self._device_key == "P-6":
             # P-6: trigger the pad on the sampler channel
-            # Pads are laid out as notes 48+ on Ch11 (ch_sampler)
             channel = midi.ch_sampler
-            # P-6 banks A-H × pads 1-6 → sequential notes from 48
             note = 48 + bank_idx * 6 + pad_idx
-            midi.send_note_on(note, 100, channel=channel)
-            import threading
+            midi.send_note_on(note, 80, channel=channel)
             def _off():
                 import time
-                time.sleep(0.05)
+                time.sleep(0.12)
                 midi.send_note_off(note, channel=channel)
             threading.Thread(target=_off, daemon=True).start()
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            print(f"KEYS: selected P-6 {bank_letter}-{pad_idx + 1} "
+            print(f"KEYS: P-6 pad → {bank_letter}-{pad_idx + 1} "
                   f"(Ch{channel + 1} note {note})", flush=True)
 
         else:
-            # Generic: just trigger a note on the sampler channel
             channel = getattr(midi, 'ch_sampler', 10)
             note = 36 + pad_idx
-            midi.send_note_on(note, 100, channel=channel)
-            import threading
+            midi.send_note_on(note, 80, channel=channel)
             def _off():
                 import time
-                time.sleep(0.05)
+                time.sleep(0.12)
                 midi.send_note_off(note, channel=channel)
             threading.Thread(target=_off, daemon=True).start()
             self._keys_selected_name = f"Pad {pad_idx + 1}"

@@ -53,10 +53,20 @@ class ChromaticKeyboard:
         self._target_midi = None   # P6Midi instance
         self._target_channel = 15  # 0-indexed (Ch 16 for SP-404)
 
+        # Pitch-bend routing mode (for SP-404 bank-channel chromatic)
+        # When enabled, notes are sent on _pad_channel as _pad_note with
+        # pitch bend to shift pitch, instead of using _target_channel.
+        self._pitchbend_mode = False
+        self._pad_channel = 0    # bank channel (Ch1=0 for bank A)
+        self._pad_note = 36      # the pad's note number on that channel
+        self._root_midi = 60     # piano root note = no pitch shift
+        self._bend_range = 12    # pitch bend range in semitones (±12)
+
         # State
         self.active_notes: dict[int, int] = {}  # note → velocity
         self.octave_shift: int = 0               # -3 to +3
         self.enabled: bool = False               # Only forward when True
+        self._held_pad_note = False  # whether pad note is currently sounding
 
         # UI callbacks (called from the MIDI thread — keep them fast)
         self.on_note_on: Optional[Callable[[int, int], None]] = None
@@ -94,15 +104,46 @@ class ChromaticKeyboard:
         self._all_notes_off()
         self._close_port()
 
-    def set_target(self, midi_out, channel: int):
+    def set_target(self, midi_out, channel: int,
+                   pitchbend_mode: bool = False):
         """Set the output destination and channel.
 
         Called by the app when the focused device changes.
         Releases all held notes first to avoid stuck notes.
+
+        If pitchbend_mode is True, chromatic notes are routed through
+        the pad's bank channel using pitch bend instead of a dedicated
+        chromatic channel. Call set_pad() after this to set the pad.
         """
         self._all_notes_off()
         self._target_midi = midi_out
         self._target_channel = channel
+        self._pitchbend_mode = pitchbend_mode
+
+    def set_pad(self, channel: int, note: int, root_midi: int = 60):
+        """Set the active pad for pitch-bend chromatic mode.
+
+        channel: the pad's bank MIDI channel (0-indexed, e.g. 0 = Ch1 = Bank A)
+        note:    the pad's note number on that channel (36-51 for SP-404)
+        root_midi: which piano key = no pitch shift (default 60 = C3)
+        """
+        # Release any currently held pad note
+        if self._held_pad_note and self._target_midi:
+            try:
+                self._target_midi.send_note_off(self._pad_note,
+                                                 channel=self._pad_channel)
+            except Exception:
+                pass
+            self._held_pad_note = False
+
+        self._all_notes_off()
+        self._pad_channel = channel
+        self._pad_note = note
+        self._root_midi = root_midi
+        # Reset pitch bend to center
+        if self._target_midi and self._target_midi._out:
+            self._target_midi._out.send_message(
+                [0xE0 | self._pad_channel, 0x00, 0x40])  # center = 8192
 
     # ── Port management ──────────────────────────────────────────────
 
@@ -248,18 +289,74 @@ class ChromaticKeyboard:
     # ── Forwarding ───────────────────────────────────────────────────
 
     def _forward_note_on(self, note: int, velocity: int):
-        if self._target_midi:
+        if not self._target_midi:
+            return
+
+        if self._pitchbend_mode:
+            # Route through the pad's bank channel with pitch bend
+            semitones = note - self._root_midi
+            self._send_pitch_bend(semitones)
+            # Send note-on for the pad note (same note every time)
+            self._target_midi.send_note_on(self._pad_note, velocity,
+                                            channel=self._pad_channel)
+            self._held_pad_note = True
+        else:
+            # Direct chromatic: send the note number on the target channel
             self._target_midi.send_note_on(note, velocity,
                                             channel=self._target_channel)
 
     def _forward_note_off(self, note: int):
-        if self._target_midi:
+        if not self._target_midi:
+            return
+
+        if self._pitchbend_mode:
+            # Release the pad note and reset pitch bend
+            self._target_midi.send_note_off(self._pad_note,
+                                             channel=self._pad_channel)
+            self._held_pad_note = False
+            # Reset pitch bend to center
+            if self._target_midi._out:
+                self._target_midi._out.send_message(
+                    [0xE0 | self._pad_channel, 0x00, 0x40])
+        else:
             self._target_midi.send_note_off(note,
                                              channel=self._target_channel)
+
+    def _send_pitch_bend(self, semitones: int):
+        """Send a pitch bend message for the given semitone offset.
+
+        Assumes ±12 semitone bend range (SP-404 default).
+        MIDI pitch bend: 14-bit, 0-16383, center = 8192.
+        """
+        if not self._target_midi or not self._target_midi._out:
+            return
+        # Clamp to bend range
+        semitones = max(-self._bend_range, min(self._bend_range, semitones))
+        # Map semitones to 14-bit pitch bend
+        # Center (8192) = no shift, 0 = -bend_range, 16383 = +bend_range
+        ratio = semitones / self._bend_range  # -1.0 to +1.0
+        bend_val = int(8192 + ratio * 8191)
+        bend_val = max(0, min(16383, bend_val))
+        lsb = bend_val & 0x7F
+        msb = (bend_val >> 7) & 0x7F
+        self._target_midi._out.send_message(
+            [0xE0 | self._pad_channel, lsb, msb])
 
     def _all_notes_off(self):
         """Release all held notes. Called on disconnect, mode switch, retarget."""
         if self._target_midi:
+            if self._pitchbend_mode and self._held_pad_note:
+                try:
+                    self._target_midi.send_note_off(self._pad_note,
+                                                     channel=self._pad_channel)
+                    # Reset pitch bend
+                    if self._target_midi._out:
+                        self._target_midi._out.send_message(
+                            [0xE0 | self._pad_channel, 0x00, 0x40])
+                except Exception:
+                    pass
+                self._held_pad_note = False
+
             for note in list(self.active_notes.keys()):
                 try:
                     self._target_midi.send_note_off(note,
