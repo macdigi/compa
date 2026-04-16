@@ -1544,23 +1544,19 @@ class DeviceWorkspaceScreen:
             note = 36 + midi_row * 4 + col
             kb.set_pad(channel=channel, note=note, root_midi=60)
 
-            # Three-pronged trigger strategy to try to update Ch16 target:
-            # 1) Trigger on the bank channel (works for preview)
-            # 2) Also trigger on Ch16 at the pad note (36-51 range) —
-            #    maybe Ch16 interprets pad-range notes as "select this pad"
-            # 3) Release both after a short delay
-            midi.send_note_on(note, 80, channel=channel)   # bank ch
-            midi.send_note_on(note, 80, channel=15)         # Ch16
+            # Trigger on the bank channel only — gives audible preview
+            # of the correct pad. Ch16 chromatic target can only be changed
+            # on the SP-404 hardware (firmware 5.0 limitation).
+            midi.send_note_on(note, 80, channel=channel)
             def _off():
                 import time
                 time.sleep(0.15)
                 midi.send_note_off(note, channel=channel)
-                midi.send_note_off(note, channel=15)
             threading.Thread(target=_off, daemon=True).start()
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
             print(f"KEYS: SP-404 pad → {bank_letter}-{pad_idx + 1} "
-                  f"(Ch{channel + 1} + Ch16, note {note})", flush=True)
+                  f"(Ch{channel + 1} note {note})", flush=True)
 
         elif self._device_key == "P-6":
             # P-6: trigger the pad on the sampler channel
