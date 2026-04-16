@@ -1379,8 +1379,10 @@ class DeviceWorkspaceScreen:
                 self._piano_display._active_notes = dict(kb.active_notes)
             self._piano_display.draw(surface)
 
-        # Channel info (bottom-left)
-        if kb and kb._target_midi:
+        # Channel info + hint (bottom)
+        if self._device_key == "SP-404MKII":
+            ch_text = "Ch16 chromatic · Tap pads above to preview · Select on SP for Ch16 target"
+        elif kb and kb._target_midi:
             ch_text = f"MIDI Ch {kb._target_channel + 1}"
             if kb.enabled:
                 ch_text += " · ACTIVE"
@@ -1388,7 +1390,7 @@ class DeviceWorkspaceScreen:
                 ch_text += " · TAP KEY TO ENABLE"
         else:
             ch_text = "No MIDI output target"
-        ch_surf = f_tiny.render(ch_text, True, theme.TEXT_DIM)
+        ch_surf = f_tiny.render(ch_text[:90], True, theme.TEXT_DIM)
         surface.blit(ch_surf, (10, self._controls_top + self._controls_h - 14))
 
     def _handle_keys_clicks(self, mx, my):
@@ -1501,9 +1503,8 @@ class DeviceWorkspaceScreen:
             return
 
         if self._device_key == "SP-404MKII":
-            kb.set_target(midi, 0, pitchbend_mode=True)
-            kb.set_pad(channel=0, note=36, root_midi=60)
-            print(f"KEYS: retargeted to SP-404 (pitch-bend mode)", flush=True)
+            kb.set_target(midi, 15, pitchbend_mode=False)  # Ch16 chromatic
+            print(f"KEYS: retargeted to SP-404 Ch16", flush=True)
         elif self._device_key == "P-6":
             ch_map = getattr(self._device_profile, "midi_channels", None)
             channel = ch_map.get("granular", 3) if ch_map else 3
@@ -1530,23 +1531,30 @@ class DeviceWorkspaceScreen:
         import threading
 
         if self._device_key == "SP-404MKII":
-            # SP-404: set the pitch-bend routing to this pad
-            channel = bank_idx  # 0-indexed (Ch1 = bank A)
-            note = 36 + pad_idx
+            # SP-404 pad numbering: pads 1-4 are the TOP row, 13-16 the
+            # BOTTOM row. But MIDI notes 36-39 map to the BOTTOM row.
+            # Convert SP-404 pad number → MIDI note:
+            #   SP row (0=top) = pad_idx // 4
+            #   MIDI row (0=bottom) = 3 - SP row
+            #   note = 36 + MIDI_row * 4 + (pad_idx % 4)
+            channel = bank_idx
+            sp_row = pad_idx // 4
+            col = pad_idx % 4
+            midi_row = 3 - sp_row
+            note = 36 + midi_row * 4 + col
             # Update the chromatic keyboard's pad routing
             kb.set_pad(channel=channel, note=note, root_midi=60)
             # Brief preview trigger so the user hears which pad they picked
             midi.send_note_on(note, 80, channel=channel)
             def _off():
                 import time
-                time.sleep(0.12)
+                time.sleep(0.15)
                 midi.send_note_off(note, channel=channel)
             threading.Thread(target=_off, daemon=True).start()
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
             print(f"KEYS: SP-404 pad → {bank_letter}-{pad_idx + 1} "
-                  f"(Ch{channel + 1} note {note}, pitch-bend mode)",
-                  flush=True)
+                  f"(Ch{channel + 1} note {note})", flush=True)
 
         elif self._device_key == "P-6":
             # P-6: trigger the pad on the sampler channel

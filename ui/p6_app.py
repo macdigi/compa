@@ -1072,12 +1072,11 @@ class P6App:
 
         dev = self.device_manager.active
         if dev and dev.short_name == "SP-404MKII":
-            # SP-404: use pitch-bend mode on the pad's bank channel.
-            # Ch16 chromatic is hardware-UI-selected and can't be changed
-            # via MIDI, so we route through the bank channel instead.
-            kb.set_target(focused_midi, 0, pitchbend_mode=True)
-            # Default to pad A-1 until the user picks one in the KEYS tab
-            kb.set_pad(channel=0, note=36, root_midi=60)
+            # SP-404: Ch16 chromatic play. The target pad for Ch16 is
+            # set on the SP-404 hardware (not controllable via MIDI).
+            # Pad selector in KEYS tab preview-triggers pads so the user
+            # can hear which one they want, then they select it on the SP.
+            kb.set_target(focused_midi, 15, pitchbend_mode=False)
         elif dev and dev.short_name == "P-6":
             # P-6 granular engine on Ch 4 (0-indexed: 3) — direct chromatic
             ch_map = getattr(dev, "midi_channels", None)
