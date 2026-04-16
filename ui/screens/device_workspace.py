@@ -60,6 +60,11 @@ class DeviceWorkspaceScreen:
         self._keys_latch = False
         self._latched_notes: set[int] = set()
 
+        # Pad selector for KEYS tab — pick which sound plays chromatically
+        self._keys_bank = 0    # 0-indexed bank (A=0, B=1, ...)
+        self._keys_pad = 0     # 0-indexed pad within bank
+        self._keys_selected_name = ""  # display label for the selected pad
+
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
     @property
@@ -1259,55 +1264,115 @@ class DeviceWorkspaceScreen:
     # ── KEYS tab (chromatic keyboard) ────────────────────────────────
 
     def _draw_keyboard_tab(self, surface, f_med, f_small, f_tiny):
-        """Draw the chromatic keyboard tab with piano display + note info."""
+        """Draw the chromatic keyboard tab: header + pad selector + piano."""
         kb = getattr(self.app, 'chromatic_kb', None)
         top = self._controls_top + 2
 
-        # Header row: keyboard name + active notes + octave controls
+        # ── Row 1: controls bar ──────────────────────────────────────
+        # Keyboard name (left)
         if kb and kb.connected:
-            name = kb.device_name
+            name = kb.device_name[:20]
         else:
-            name = "No keyboard — touch to play"
-        name_surf = f_small.render(name, True, self._device_color)
-        surface.blit(name_surf, (10, top + 3))
+            name = "touch to play"
+        name_surf = f_tiny.render(name, True, self._device_color)
+        surface.blit(name_surf, (10, top + 6))
 
-        # Active notes text (center)
+        # Active notes text (center-left)
         if kb and kb.active_notes:
             note_strs = [note_name(n) for n in sorted(kb.active_notes.keys())]
-            notes_text = "  ".join(note_strs[:8])
-            nt_surf = f_med.render(notes_text, True, self._device_color)
-            surface.blit(nt_surf, nt_surf.get_rect(
-                centerx=theme.SCREEN_WIDTH // 2, top=top + 2))
+            notes_text = "  ".join(note_strs[:6])
+            nt_surf = f_small.render(notes_text, True, self._device_color)
+            surface.blit(nt_surf, (160, top + 4))
 
-        # LATCH button (middle-right)
-        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 260, top, 70, 26)
+        # LATCH button
+        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 300, top, 60, 24)
         latch_bg = theme.YELLOW if self._keys_latch else theme.BUTTON_BG
         latch_tc = theme.BG if self._keys_latch else theme.TEXT
         pygame.draw.rect(surface, latch_bg, latch_rect, border_radius=5)
-        latch_lbl = f_small.render("LATCH", True, latch_tc)
-        surface.blit(latch_lbl, latch_lbl.get_rect(center=latch_rect.center))
+        surface.blit(f_tiny.render("LATCH", True, latch_tc),
+                     f_tiny.render("LATCH", True, latch_tc).get_rect(
+                         center=latch_rect.center))
 
-        # Octave shift buttons (right)
+        # Octave shift
         oct_val = kb.octave_shift if kb else 0
         oct_label = f"OCT {oct_val:+d}" if oct_val != 0 else "OCT 0"
-        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 160, top, 50, 26)
-        oct_rect = pygame.Rect(theme.SCREEN_WIDTH - 106, top, 46, 26)
-        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 56, top, 50, 26)
-
-        pygame.draw.rect(surface, theme.BUTTON_BG, minus_rect, border_radius=5)
+        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 210, top, 40, 24)
+        oct_rect = pygame.Rect(theme.SCREEN_WIDTH - 166, top, 56, 24)
+        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 106, top, 40, 24)
+        for r in (minus_rect, plus_rect):
+            pygame.draw.rect(surface, theme.BUTTON_BG, r, border_radius=5)
         pygame.draw.rect(surface, theme.BG_LIGHTER, oct_rect, border_radius=5)
-        pygame.draw.rect(surface, theme.BUTTON_BG, plus_rect, border_radius=5)
+        surface.blit(f_small.render("-", True, theme.TEXT),
+                     f_small.render("-", True, theme.TEXT).get_rect(
+                         center=minus_rect.center))
+        surface.blit(f_tiny.render(oct_label, True, theme.TEXT_DIM),
+                     f_tiny.render(oct_label, True, theme.TEXT_DIM).get_rect(
+                         center=oct_rect.center))
+        surface.blit(f_small.render("+", True, theme.TEXT),
+                     f_small.render("+", True, theme.TEXT).get_rect(
+                         center=plus_rect.center))
 
-        m_surf = f_small.render("-", True, theme.TEXT)
-        surface.blit(m_surf, m_surf.get_rect(center=minus_rect.center))
-        o_surf = f_tiny.render(oct_label, True, theme.TEXT_DIM)
-        surface.blit(o_surf, o_surf.get_rect(center=oct_rect.center))
-        p_surf = f_small.render("+", True, theme.TEXT)
-        surface.blit(p_surf, p_surf.get_rect(center=plus_rect.center))
+        # ── Row 2: Pad selector — bank buttons + pad grid ───────────
+        pad_row_y = top + 28
+        pad_row_h = 28
 
-        # Piano display
+        # Device-specific bank/pad counts
+        if self._device_key == "SP-404MKII":
+            bank_count = 10
+            pads_per_bank = 16
+            bank_labels = [chr(ord("A") + i) for i in range(10)]
+        elif self._device_key == "P-6":
+            bank_count = 8
+            pads_per_bank = 6
+            bank_labels = [chr(ord("A") + i) for i in range(8)]
+        else:
+            bank_count = 4
+            pads_per_bank = 16
+            bank_labels = [chr(ord("A") + i) for i in range(4)]
+
+        # Bank selector buttons (left side)
+        bank_btn_w = min(28, (theme.SCREEN_WIDTH // 3) // bank_count)
+        for bi in range(bank_count):
+            r = pygame.Rect(10 + bi * (bank_btn_w + 2), pad_row_y,
+                            bank_btn_w, pad_row_h)
+            active = (bi == self._keys_bank)
+            bg = self._device_color if active else theme.BG_LIGHTER
+            tc = theme.BG if active else theme.TEXT_DIM
+            pygame.draw.rect(surface, bg, r, border_radius=4)
+            lbl = f_tiny.render(bank_labels[bi], True, tc)
+            surface.blit(lbl, lbl.get_rect(center=r.center))
+
+        # Pad buttons (right side, filling remaining width)
+        pad_start_x = 10 + bank_count * (bank_btn_w + 2) + 8
+        pad_avail_w = theme.SCREEN_WIDTH - pad_start_x - 10
+        pad_btn_w = min(36, (pad_avail_w - (pads_per_bank - 1) * 2) // pads_per_bank)
+        for pi in range(pads_per_bank):
+            r = pygame.Rect(pad_start_x + pi * (pad_btn_w + 2), pad_row_y,
+                            pad_btn_w, pad_row_h)
+            active = (pi == self._keys_pad and self._keys_bank == self._keys_bank)
+            bg = self._device_color if active else theme.PAD_OFF
+            tc = theme.BG if active else theme.TEXT
+            pygame.draw.rect(surface, bg, r, border_radius=4)
+            pygame.draw.rect(surface, theme.BORDER, r, 1, border_radius=4)
+            lbl = f_tiny.render(str(pi + 1), True, tc)
+            surface.blit(lbl, lbl.get_rect(center=r.center))
+
+        # Selected pad label
+        bank_letter = bank_labels[self._keys_bank] if self._keys_bank < bank_count else "?"
+        sel_text = f"{bank_letter}-{self._keys_pad + 1}"
+        if self._keys_selected_name:
+            sel_text += f"  {self._keys_selected_name}"
+        sel_surf = f_tiny.render(sel_text, True, self._device_color)
+        surface.blit(sel_surf, (pad_start_x, pad_row_y - 12))
+
+        # ── Piano display (below pad selector) ──────────────────────
+        piano_top = pad_row_y + pad_row_h + 6
+        piano_h = self._controls_top + self._controls_h - piano_top - 18
         if self._piano_display:
-            # Sync active notes from the chromatic keyboard engine
+            new_rect = pygame.Rect(10, piano_top,
+                                    theme.SCREEN_WIDTH - 20, piano_h)
+            if self._piano_display.rect != new_rect:
+                self._piano_display.set_rect(new_rect)
             if kb:
                 self._piano_display._active_notes = dict(kb.active_notes)
             self._piano_display.draw(surface)
@@ -1318,11 +1383,11 @@ class DeviceWorkspaceScreen:
             if kb.enabled:
                 ch_text += " · ACTIVE"
             else:
-                ch_text += " · TAP TO ENABLE"
+                ch_text += " · TAP KEY TO ENABLE"
         else:
             ch_text = "No MIDI output target"
         ch_surf = f_tiny.render(ch_text, True, theme.TEXT_DIM)
-        surface.blit(ch_surf, (10, self._controls_top + self._controls_h - 16))
+        surface.blit(ch_surf, (10, self._controls_top + self._controls_h - 14))
 
     def _handle_keys_clicks(self, mx, my):
         """Handle clicks within the KEYS tab."""
@@ -1331,12 +1396,13 @@ class DeviceWorkspaceScreen:
             return
         top = self._controls_top + 2
 
+        # ── Row 1 controls ───────────────────────────────────────────
+
         # LATCH button
-        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 260, top, 70, 26)
+        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 300, top, 60, 24)
         if latch_rect.collidepoint(mx, my):
             self._keys_latch = not self._keys_latch
             if not self._keys_latch:
-                # Turning latch OFF — release all latched notes
                 for note in list(self._latched_notes):
                     if kb._target_midi:
                         kb._forward_note_off(note)
@@ -1345,8 +1411,8 @@ class DeviceWorkspaceScreen:
             return
 
         # Octave shift buttons
-        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 160, top, 50, 26)
-        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 56, top, 50, 26)
+        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 210, top, 40, 24)
+        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 106, top, 40, 24)
         if minus_rect.collidepoint(mx, my):
             kb.octave_shift = max(-3, kb.octave_shift - 1)
             if self._piano_display:
@@ -1358,34 +1424,123 @@ class DeviceWorkspaceScreen:
                 self._piano_display.shift_octave(1)
             return
 
-        # Touch-to-play on the piano display
+        # ── Row 2: pad selector ──────────────────────────────────────
+        pad_row_y = top + 28
+        pad_row_h = 28
+
+        if self._device_key == "SP-404MKII":
+            bank_count, pads_per_bank = 10, 16
+        elif self._device_key == "P-6":
+            bank_count, pads_per_bank = 8, 6
+        else:
+            bank_count, pads_per_bank = 4, 16
+
+        bank_btn_w = min(28, (theme.SCREEN_WIDTH // 3) // bank_count)
+
+        # Bank buttons
+        for bi in range(bank_count):
+            r = pygame.Rect(10 + bi * (bank_btn_w + 2), pad_row_y,
+                            bank_btn_w, pad_row_h)
+            if r.collidepoint(mx, my):
+                self._keys_bank = bi
+                return
+
+        # Pad buttons
+        pad_start_x = 10 + bank_count * (bank_btn_w + 2) + 8
+        pad_avail_w = theme.SCREEN_WIDTH - pad_start_x - 10
+        pad_btn_w = min(36, (pad_avail_w - (pads_per_bank - 1) * 2) // pads_per_bank)
+        for pi in range(pads_per_bank):
+            r = pygame.Rect(pad_start_x + pi * (pad_btn_w + 2), pad_row_y,
+                            pad_btn_w, pad_row_h)
+            if r.collidepoint(mx, my):
+                self._keys_pad = pi
+                self._select_chromatic_pad(self._keys_bank, pi)
+                return
+
+        # ── Piano touch-to-play ──────────────────────────────────────
         if self._piano_display:
             note = self._piano_display.handle_event_at(mx, my)
             if note >= 0:
-                # Auto-enable on first touch if not already
                 if not kb.enabled:
                     kb.enabled = True
 
                 if self._keys_latch:
-                    # Latch mode: toggle — tap on = hold, tap again = release
                     if note in self._latched_notes:
-                        # Release this note
                         if kb._target_midi:
                             kb._forward_note_off(note)
                         kb.active_notes.pop(note, None)
                         self._latched_notes.discard(note)
                     else:
-                        # Latch this note on
                         if kb._target_midi:
                             kb._forward_note_on(note, 100)
                         kb.active_notes[note] = 100
                         self._latched_notes.add(note)
-                    self._touch_note = -1  # no note-off on finger lift
+                    self._touch_note = -1
                 else:
-                    # Normal mode: note-on now, note-off on finger lift
                     if kb._target_midi:
                         kb._forward_note_on(note, 100)
                         kb.active_notes[note] = 100
                         if kb.on_note_on:
                             kb.on_note_on(note, 100)
                     self._touch_note = note
+
+    def _select_chromatic_pad(self, bank_idx: int, pad_idx: int):
+        """Trigger a pad briefly to make it the 'active' sound for chromatic play.
+
+        SP-404: sends note-on then note-off on the bank's channel (Ch1-10).
+                Channel 16 chromatic play then uses this pad's sample.
+        P-6:    sends note-on/off on the sampler channel (Ch11).
+                The granular engine (Ch4) then plays this sample.
+        """
+        kb = getattr(self.app, 'chromatic_kb', None)
+        if kb is None or kb._target_midi is None:
+            return
+
+        midi = kb._target_midi
+
+        if self._device_key == "SP-404MKII":
+            # SP-404 MIDI Mode A: Ch 1-10 = Banks A-J, notes 36-51 = pads 1-16
+            channel = bank_idx  # 0-indexed (Ch1 = bank A)
+            note = 36 + pad_idx
+            midi.send_note_on(note, 100, channel=channel)
+            import threading
+            def _off():
+                import time
+                time.sleep(0.05)  # 50ms trigger pulse
+                midi.send_note_off(note, channel=channel)
+            threading.Thread(target=_off, daemon=True).start()
+            bank_letter = chr(ord("A") + bank_idx)
+            self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
+            print(f"KEYS: selected SP-404 {bank_letter}-{pad_idx + 1} "
+                  f"(Ch{channel + 1} note {note})", flush=True)
+
+        elif self._device_key == "P-6":
+            # P-6: trigger the pad on the sampler channel
+            # Pads are laid out as notes 48+ on Ch11 (ch_sampler)
+            channel = midi.ch_sampler
+            # P-6 banks A-H × pads 1-6 → sequential notes from 48
+            note = 48 + bank_idx * 6 + pad_idx
+            midi.send_note_on(note, 100, channel=channel)
+            import threading
+            def _off():
+                import time
+                time.sleep(0.05)
+                midi.send_note_off(note, channel=channel)
+            threading.Thread(target=_off, daemon=True).start()
+            bank_letter = chr(ord("A") + bank_idx)
+            self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
+            print(f"KEYS: selected P-6 {bank_letter}-{pad_idx + 1} "
+                  f"(Ch{channel + 1} note {note})", flush=True)
+
+        else:
+            # Generic: just trigger a note on the sampler channel
+            channel = getattr(midi, 'ch_sampler', 10)
+            note = 36 + pad_idx
+            midi.send_note_on(note, 100, channel=channel)
+            import threading
+            def _off():
+                import time
+                time.sleep(0.05)
+                midi.send_note_off(note, channel=channel)
+            threading.Thread(target=_off, daemon=True).start()
+            self._keys_selected_name = f"Pad {pad_idx + 1}"
