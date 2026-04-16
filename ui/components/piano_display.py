@@ -38,12 +38,14 @@ class PianoDisplay:
     WHITE_KEY_OFF = (210, 210, 218)
     BLACK_KEY_OFF = (20, 20, 28)
     WHITE_KEY_BORDER = (120, 120, 135)
+    ROOT_KEY_COLOR = (70, 180, 255)  # Bright blue for the "home" pitch
 
     def __init__(self, rect: pygame.Rect, octaves: int = 2,
-                 start_octave: int = 3):
+                 start_octave: int = 2, root_note: int = 60):
         self.rect = rect
         self._octaves = max(1, min(5, octaves))
         self._start_octave = start_octave
+        self._root_note = root_note  # "standard pitch" key — highlighted
 
         # State
         self._active_notes: dict[int, int] = {}  # note → velocity (0-127)
@@ -146,21 +148,30 @@ class PianoDisplay:
             rect = self._key_rects.get(note)
             if rect is None:
                 continue
+            is_root = (note == self._root_note)
             if note in self._active_notes:
                 vel = self._active_notes[note] / 127.0
                 color = theme.velocity_color(vel)
+            elif is_root:
+                color = self.ROOT_KEY_COLOR
             else:
                 color = self.WHITE_KEY_OFF
 
             pygame.draw.rect(surface, color, rect, border_radius=3)
-            pygame.draw.rect(surface, self.WHITE_KEY_BORDER, rect, 1,
-                             border_radius=3)
+            border = theme.ACCENT if is_root else self.WHITE_KEY_BORDER
+            pygame.draw.rect(surface, border, rect,
+                             2 if is_root else 1, border_radius=3)
 
-            # Label: always on C notes, also on any active key
-            show_label = (note in self._active_notes) or (note % 12 == 0)
+            # Label: always on C notes, root note, and any active key
+            show_label = (note in self._active_notes) or (note % 12 == 0) or is_root
             if show_label:
                 name = note_name(note)
-                tc = theme.BG if note in self._active_notes else theme.TEXT_DIM
+                if is_root and note not in self._active_notes:
+                    tc = theme.BG
+                elif note in self._active_notes:
+                    tc = theme.BG
+                else:
+                    tc = theme.TEXT_DIM
                 lbl = f_tiny.render(name, True, tc)
                 surface.blit(lbl, lbl.get_rect(
                     centerx=rect.centerx,
@@ -171,20 +182,25 @@ class PianoDisplay:
             rect = self._key_rects.get(note)
             if rect is None:
                 continue
+            is_root = (note == self._root_note)
             if note in self._active_notes:
                 vel = self._active_notes[note] / 127.0
                 color = theme.velocity_color(vel)
+            elif is_root:
+                color = self.ROOT_KEY_COLOR
             else:
                 color = self.BLACK_KEY_OFF
 
             pygame.draw.rect(surface, color, rect, border_radius=3)
-            pygame.draw.rect(surface, theme.BORDER, rect, 1,
-                             border_radius=3)
+            border = theme.ACCENT if is_root else theme.BORDER
+            pygame.draw.rect(surface, border, rect,
+                             2 if is_root else 1, border_radius=3)
 
-            # Label on active black keys
-            if note in self._active_notes:
+            # Label on active or root black keys
+            if note in self._active_notes or is_root:
                 name = note_name(note)
-                lbl = f_tiny.render(name, True, theme.TEXT_BRIGHT)
+                tc = theme.TEXT_BRIGHT if note in self._active_notes else theme.BG
+                lbl = f_tiny.render(name, True, tc)
                 surface.blit(lbl, lbl.get_rect(
                     centerx=rect.centerx,
                     centery=rect.centery))

@@ -56,6 +56,9 @@ class DeviceWorkspaceScreen:
         self._piano_display: PianoDisplay | None = None
         # Touch-to-play note-off tracking
         self._touch_note: int = -1
+        # Latch mode: notes stay on until tapped again
+        self._keys_latch = False
+        self._latched_notes: set[int] = set()
 
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
@@ -120,21 +123,26 @@ class DeviceWorkspaceScreen:
         self._build_knobs()
 
         # Build piano display for the KEYS tab
+        # Start at octave 2 so both playable octaves are visible
+        # immediately (SP-404 chromatic is C2-C4, MIDI 36-60)
         piano_rect = pygame.Rect(
             10, self._controls_top + 30,
             theme.SCREEN_WIDTH - 20,
             self._controls_h - 40,
         )
+        # Root note = C3 (MIDI 60) = the sample's natural pitch
         self._piano_display = PianoDisplay(piano_rect, octaves=2,
-                                            start_octave=3)
+                                            start_octave=2, root_note=60)
 
     def on_exit(self):
         if not self.app.recorder.is_recording:
             self.app.recorder.stop_monitoring()
-        # Disable chromatic mode when leaving workspace
+        # Disable chromatic mode + release all latched notes
         if hasattr(self.app, 'chromatic_kb'):
             self.app.chromatic_kb.enabled = False
             self.app.chromatic_kb._all_notes_off()
+        self._latched_notes.clear()
+        self._keys_latch = False
 
     def _build_tabs(self):
         key = self._device_key
@@ -312,6 +320,9 @@ class DeviceWorkspaceScreen:
                         elif old_tab == "keys":
                             self.app.chromatic_kb.enabled = False
                             self.app.chromatic_kb._all_notes_off()
+                            # Release latched notes too
+                            self._latched_notes.clear()
+                            self._keys_latch = False
                     if new_tab == "control":
                         self._build_knobs()
                     return
@@ -436,8 +447,12 @@ class DeviceWorkspaceScreen:
             self._smooth_l *= 0.95
             self._smooth_r *= 0.95
         # Decay piano display notes for fade-out animation
+        # But don't decay latched notes — they stay at full brightness
         if self._piano_display:
             self._piano_display.decay_active()
+            # Re-apply full velocity to latched notes so they don't fade
+            for note in self._latched_notes:
+                self._piano_display._active_notes[note] = 127
 
         # Sync SP-404 live CC values into workspace knobs + FX state
         if self._device_key == "SP-404MKII":
@@ -1264,6 +1279,14 @@ class DeviceWorkspaceScreen:
             surface.blit(nt_surf, nt_surf.get_rect(
                 centerx=theme.SCREEN_WIDTH // 2, top=top + 2))
 
+        # LATCH button (middle-right)
+        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 260, top, 70, 26)
+        latch_bg = theme.YELLOW if self._keys_latch else theme.BUTTON_BG
+        latch_tc = theme.BG if self._keys_latch else theme.TEXT
+        pygame.draw.rect(surface, latch_bg, latch_rect, border_radius=5)
+        latch_lbl = f_small.render("LATCH", True, latch_tc)
+        surface.blit(latch_lbl, latch_lbl.get_rect(center=latch_rect.center))
+
         # Octave shift buttons (right)
         oct_val = kb.octave_shift if kb else 0
         oct_label = f"OCT {oct_val:+d}" if oct_val != 0 else "OCT 0"
@@ -1275,15 +1298,12 @@ class DeviceWorkspaceScreen:
         pygame.draw.rect(surface, theme.BG_LIGHTER, oct_rect, border_radius=5)
         pygame.draw.rect(surface, theme.BUTTON_BG, plus_rect, border_radius=5)
 
-        surface.blit(f_small.render("-", True, theme.TEXT),
-                     f_small.render("-", True, theme.TEXT).get_rect(
-                         center=minus_rect.center))
-        surface.blit(f_tiny.render(oct_label, True, theme.TEXT_DIM),
-                     f_tiny.render(oct_label, True, theme.TEXT_DIM).get_rect(
-                         center=oct_rect.center))
-        surface.blit(f_small.render("+", True, theme.TEXT),
-                     f_small.render("+", True, theme.TEXT).get_rect(
-                         center=plus_rect.center))
+        m_surf = f_small.render("-", True, theme.TEXT)
+        surface.blit(m_surf, m_surf.get_rect(center=minus_rect.center))
+        o_surf = f_tiny.render(oct_label, True, theme.TEXT_DIM)
+        surface.blit(o_surf, o_surf.get_rect(center=oct_rect.center))
+        p_surf = f_small.render("+", True, theme.TEXT)
+        surface.blit(p_surf, p_surf.get_rect(center=plus_rect.center))
 
         # Piano display
         if self._piano_display:
@@ -1311,6 +1331,19 @@ class DeviceWorkspaceScreen:
             return
         top = self._controls_top + 2
 
+        # LATCH button
+        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 260, top, 70, 26)
+        if latch_rect.collidepoint(mx, my):
+            self._keys_latch = not self._keys_latch
+            if not self._keys_latch:
+                # Turning latch OFF — release all latched notes
+                for note in list(self._latched_notes):
+                    if kb._target_midi:
+                        kb._forward_note_off(note)
+                    kb.active_notes.pop(note, None)
+                self._latched_notes.clear()
+            return
+
         # Octave shift buttons
         minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 160, top, 50, 26)
         plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 56, top, 50, 26)
@@ -1332,10 +1365,27 @@ class DeviceWorkspaceScreen:
                 # Auto-enable on first touch if not already
                 if not kb.enabled:
                     kb.enabled = True
-                # Send note-on (note-off happens on MOUSEBUTTONUP)
-                if kb._target_midi:
-                    kb._forward_note_on(note, 100)
-                    kb.active_notes[note] = 100
-                    if kb.on_note_on:
-                        kb.on_note_on(note, 100)
-                self._touch_note = note
+
+                if self._keys_latch:
+                    # Latch mode: toggle — tap on = hold, tap again = release
+                    if note in self._latched_notes:
+                        # Release this note
+                        if kb._target_midi:
+                            kb._forward_note_off(note)
+                        kb.active_notes.pop(note, None)
+                        self._latched_notes.discard(note)
+                    else:
+                        # Latch this note on
+                        if kb._target_midi:
+                            kb._forward_note_on(note, 100)
+                        kb.active_notes[note] = 100
+                        self._latched_notes.add(note)
+                    self._touch_note = -1  # no note-off on finger lift
+                else:
+                    # Normal mode: note-on now, note-off on finger lift
+                    if kb._target_midi:
+                        kb._forward_note_on(note, 100)
+                        kb.active_notes[note] = 100
+                        if kb.on_note_on:
+                            kb.on_note_on(note, 100)
+                    self._touch_note = note
