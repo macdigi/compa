@@ -322,6 +322,8 @@ class DeviceWorkspaceScreen:
                     if hasattr(self.app, 'chromatic_kb'):
                         if new_tab == "keys":
                             self.app.chromatic_kb.enabled = True
+                            # Retarget to THIS workspace's device
+                            self._retarget_keys_for_device()
                         elif old_tab == "keys":
                             self.app.chromatic_kb.enabled = False
                             self.app.chromatic_kb._all_notes_off()
@@ -1483,6 +1485,33 @@ class DeviceWorkspaceScreen:
                         if kb.on_note_on:
                             kb.on_note_on(note, 100)
                     self._touch_note = note
+
+    def _retarget_keys_for_device(self):
+        """Point the chromatic keyboard at THIS workspace's device.
+
+        The global focus might be on a different device (e.g. P-6 is
+        focused but the user opened SP-404's workspace and switched to
+        the KEYS tab). We need to retarget to the workspace device.
+        """
+        kb = getattr(self.app, 'chromatic_kb', None)
+        if kb is None:
+            return
+        midi = self.app._midi_connections.get(self._device_key)
+        if midi is None:
+            return
+
+        if self._device_key == "SP-404MKII":
+            kb.set_target(midi, 0, pitchbend_mode=True)
+            kb.set_pad(channel=0, note=36, root_midi=60)
+            print(f"KEYS: retargeted to SP-404 (pitch-bend mode)", flush=True)
+        elif self._device_key == "P-6":
+            ch_map = getattr(self._device_profile, "midi_channels", None)
+            channel = ch_map.get("granular", 3) if ch_map else 3
+            kb.set_target(midi, channel, pitchbend_mode=False)
+            print(f"KEYS: retargeted to P-6 Ch{channel + 1}", flush=True)
+        else:
+            channel = getattr(midi, 'ch_sampler', 10)
+            kb.set_target(midi, channel, pitchbend_mode=False)
 
     def _select_chromatic_pad(self, bank_idx: int, pad_idx: int):
         """Select a pad as the active sound for chromatic play.
