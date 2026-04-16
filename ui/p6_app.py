@@ -42,6 +42,7 @@ from engine.compa_link import CompaServer, CompaBrowser
 from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
 from engine.network_manager import WifiManager, BluetoothManager
+from engine.chromatic_keyboard import ChromaticKeyboard
 from engine.p6_librarian import P6Librarian
 from engine.sp404_librarian import SP404Librarian
 from ui.splash import run_splash
@@ -264,6 +265,9 @@ class P6App:
         from ui.components.keyboard import OnScreenKeyboard
         self.keyboard = OnScreenKeyboard(self)
 
+        # ── Chromatic keyboard (any generic USB MIDI keyboard) ──────
+        self.chromatic_kb = ChromaticKeyboard()
+
         # ── WiFi + Bluetooth managers (end-user connectivity) ───────
         self.wifi = WifiManager()
         self.bluetooth = BluetoothManager()
@@ -480,6 +484,14 @@ class P6App:
                 print("Spectra Mapper: detected but connect failed")
         else:
             print("Spectra Mapper: not detected")
+
+        # Chromatic keyboard — auto-detect any generic MIDI keyboard
+        self.chromatic_kb.start()
+        self._retarget_chromatic_keyboard()
+        if self.chromatic_kb.connected:
+            print(f"Chromatic KB: {self.chromatic_kb.device_name}", flush=True)
+        else:
+            print("Chromatic KB: scanning for keyboards", flush=True)
 
     # ── Evdev touch input (for SPI LCD / FB mode) ─────────────────────
 
@@ -1050,6 +1062,28 @@ class P6App:
         d = self.device_manager.active
         return d.short_name if d else "---"
 
+    def _retarget_chromatic_keyboard(self):
+        """Point the chromatic keyboard at the focused device's chromatic channel."""
+        kb = self.chromatic_kb
+        focus_key = self.device_manager.focus_key
+        focused_midi = self._midi_connections.get(focus_key)
+        if not focused_midi:
+            return
+
+        dev = self.device_manager.active
+        if dev and dev.short_name == "SP-404MKII":
+            # SP-404 MK2 chromatic play is on MIDI Ch 16 (0-indexed: 15)
+            channel = 15
+        elif dev and dev.short_name == "P-6":
+            # P-6 granular engine on Ch 4 (0-indexed: 3)
+            ch_map = getattr(dev, "midi_channels", None)
+            channel = ch_map.get("granular", 3) if ch_map else 3
+        else:
+            # Generic fallback: use sampler channel
+            channel = getattr(focused_midi, 'ch_sampler', 10)
+
+        kb.set_target(focused_midi, channel)
+
     def switch_focus(self, short_name: str) -> bool:
         """Switch which device the UI controls.
 
@@ -1085,6 +1119,9 @@ class P6App:
             self.twister.set_target(focused_midi)
             self.twister._rebuild_pages()
             print(f"Twister → {short_name}", flush=True)
+
+        # Retarget chromatic keyboard to the new focused device
+        self._retarget_chromatic_keyboard()
 
         # Rewire MIDI router to focused device
         if self.atom_sq and self.p6:

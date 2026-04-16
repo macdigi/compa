@@ -13,6 +13,7 @@ Layout (top to bottom):
 
 import numpy as np
 import pygame
+from ui.components.piano_display import PianoDisplay, note_name
 from .. import theme
 from ..components.knob import Knob
 
@@ -50,6 +51,11 @@ class DeviceWorkspaceScreen:
 
         # Fullscreen oscilloscope toggle
         self._scope_fullscreen = False
+
+        # Piano display for KEYS tab (built lazily in on_enter)
+        self._piano_display: PianoDisplay | None = None
+        # Touch-to-play note-off tracking
+        self._touch_note: int = -1
 
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
@@ -113,9 +119,22 @@ class DeviceWorkspaceScreen:
 
         self._build_knobs()
 
+        # Build piano display for the KEYS tab
+        piano_rect = pygame.Rect(
+            10, self._controls_top + 30,
+            theme.SCREEN_WIDTH - 20,
+            self._controls_h - 40,
+        )
+        self._piano_display = PianoDisplay(piano_rect, octaves=2,
+                                            start_octave=3)
+
     def on_exit(self):
         if not self.app.recorder.is_recording:
             self.app.recorder.stop_monitoring()
+        # Disable chromatic mode when leaving workspace
+        if hasattr(self.app, 'chromatic_kb'):
+            self.app.chromatic_kb.enabled = False
+            self.app.chromatic_kb._all_notes_off()
 
     def _build_tabs(self):
         key = self._device_key
@@ -123,6 +142,7 @@ class DeviceWorkspaceScreen:
             tabs = [
                 ("control", "CONTROL"),
                 ("twister", "TWISTER"),
+                ("keys", "KEYS"),
                 ("sequence", "SEQUENCE"),
                 ("looper", "LOOPER"),
                 ("dj", "DJ"),
@@ -133,6 +153,7 @@ class DeviceWorkspaceScreen:
         elif key == "P-6":
             self._tabs = [
                 ("control", "CONTROL"),
+                ("keys", "KEYS"),
                 ("pattern", "PATTERN"),
             ]
         elif key == "Force":
@@ -281,8 +302,17 @@ class DeviceWorkspaceScreen:
                 return
             for i, (key, label) in enumerate(self._tabs):
                 if self._tab_rect(i).collidepoint(mx, my):
+                    old_tab = self._tabs[self._current_tab][0] if self._tabs else ""
                     self._current_tab = i
-                    if key == "control":
+                    new_tab = key
+                    # Enable/disable chromatic keyboard based on tab
+                    if hasattr(self.app, 'chromatic_kb'):
+                        if new_tab == "keys":
+                            self.app.chromatic_kb.enabled = True
+                        elif old_tab == "keys":
+                            self.app.chromatic_kb.enabled = False
+                            self.app.chromatic_kb._all_notes_off()
+                    if new_tab == "control":
                         self._build_knobs()
                     return
 
@@ -300,6 +330,18 @@ class DeviceWorkspaceScreen:
                 self._handle_pattern_clicks(mx, my)
             elif tab_key == "dj":
                 self._handle_dj_clicks(mx, my)
+            elif tab_key == "keys":
+                self._handle_keys_clicks(mx, my)
+
+        # Touch-to-play note-off on MOUSEBUTTONUP (KEYS tab)
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
+            if tab_key == "keys" and self._touch_note >= 0:
+                kb = getattr(self.app, 'chromatic_kb', None)
+                if kb and kb._target_midi:
+                    kb._forward_note_off(self._touch_note)
+                    kb.active_notes.pop(self._touch_note, None)
+                self._touch_note = -1
 
         # Knob drag handling (all events, but not if in header area)
         tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
@@ -393,6 +435,9 @@ class DeviceWorkspaceScreen:
         else:
             self._smooth_l *= 0.95
             self._smooth_r *= 0.95
+        # Decay piano display notes for fade-out animation
+        if self._piano_display:
+            self._piano_display.decay_active()
 
         # Sync SP-404 live CC values into workspace knobs + FX state
         if self._device_key == "SP-404MKII":
@@ -447,6 +492,8 @@ class DeviceWorkspaceScreen:
             self._draw_looper(surface, f_large, f_med, f_small)
         elif tab_key == "dj":
             self._draw_dj(surface, f_large, f_med, f_small)
+        elif tab_key == "keys":
+            self._draw_keyboard_tab(surface, f_med, f_small, f_tiny)
         else:
             y = self._controls_top + 20
             surf = f_med.render(f"{tab_key.upper()}", True, theme.TEXT_DIM)
@@ -1193,3 +1240,102 @@ class DeviceWorkspaceScreen:
         surface.blit(surf, surf.get_rect(centerx=xf_rect.centerx, top=xf_y + 4))
         surf = f_tiny.render("B", True, theme.TEXT_DIM)
         surface.blit(surf, (xf_rect.right - 14, xf_y + 4))
+
+    # ── KEYS tab (chromatic keyboard) ────────────────────────────────
+
+    def _draw_keyboard_tab(self, surface, f_med, f_small, f_tiny):
+        """Draw the chromatic keyboard tab with piano display + note info."""
+        kb = getattr(self.app, 'chromatic_kb', None)
+        top = self._controls_top + 2
+
+        # Header row: keyboard name + active notes + octave controls
+        if kb and kb.connected:
+            name = kb.device_name
+        else:
+            name = "No keyboard — touch to play"
+        name_surf = f_small.render(name, True, self._device_color)
+        surface.blit(name_surf, (10, top + 3))
+
+        # Active notes text (center)
+        if kb and kb.active_notes:
+            note_strs = [note_name(n) for n in sorted(kb.active_notes.keys())]
+            notes_text = "  ".join(note_strs[:8])
+            nt_surf = f_med.render(notes_text, True, self._device_color)
+            surface.blit(nt_surf, nt_surf.get_rect(
+                centerx=theme.SCREEN_WIDTH // 2, top=top + 2))
+
+        # Octave shift buttons (right)
+        oct_val = kb.octave_shift if kb else 0
+        oct_label = f"OCT {oct_val:+d}" if oct_val != 0 else "OCT 0"
+        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 160, top, 50, 26)
+        oct_rect = pygame.Rect(theme.SCREEN_WIDTH - 106, top, 46, 26)
+        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 56, top, 50, 26)
+
+        pygame.draw.rect(surface, theme.BUTTON_BG, minus_rect, border_radius=5)
+        pygame.draw.rect(surface, theme.BG_LIGHTER, oct_rect, border_radius=5)
+        pygame.draw.rect(surface, theme.BUTTON_BG, plus_rect, border_radius=5)
+
+        surface.blit(f_small.render("-", True, theme.TEXT),
+                     f_small.render("-", True, theme.TEXT).get_rect(
+                         center=minus_rect.center))
+        surface.blit(f_tiny.render(oct_label, True, theme.TEXT_DIM),
+                     f_tiny.render(oct_label, True, theme.TEXT_DIM).get_rect(
+                         center=oct_rect.center))
+        surface.blit(f_small.render("+", True, theme.TEXT),
+                     f_small.render("+", True, theme.TEXT).get_rect(
+                         center=plus_rect.center))
+
+        # Piano display
+        if self._piano_display:
+            # Sync active notes from the chromatic keyboard engine
+            if kb:
+                self._piano_display._active_notes = dict(kb.active_notes)
+            self._piano_display.draw(surface)
+
+        # Channel info (bottom-left)
+        if kb and kb._target_midi:
+            ch_text = f"MIDI Ch {kb._target_channel + 1}"
+            if kb.enabled:
+                ch_text += " · ACTIVE"
+            else:
+                ch_text += " · TAP TO ENABLE"
+        else:
+            ch_text = "No MIDI output target"
+        ch_surf = f_tiny.render(ch_text, True, theme.TEXT_DIM)
+        surface.blit(ch_surf, (10, self._controls_top + self._controls_h - 16))
+
+    def _handle_keys_clicks(self, mx, my):
+        """Handle clicks within the KEYS tab."""
+        kb = getattr(self.app, 'chromatic_kb', None)
+        if kb is None:
+            return
+        top = self._controls_top + 2
+
+        # Octave shift buttons
+        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 160, top, 50, 26)
+        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 56, top, 50, 26)
+        if minus_rect.collidepoint(mx, my):
+            kb.octave_shift = max(-3, kb.octave_shift - 1)
+            if self._piano_display:
+                self._piano_display.shift_octave(-1)
+            return
+        if plus_rect.collidepoint(mx, my):
+            kb.octave_shift = min(3, kb.octave_shift + 1)
+            if self._piano_display:
+                self._piano_display.shift_octave(1)
+            return
+
+        # Touch-to-play on the piano display
+        if self._piano_display:
+            note = self._piano_display.handle_event_at(mx, my)
+            if note >= 0:
+                # Auto-enable on first touch if not already
+                if not kb.enabled:
+                    kb.enabled = True
+                # Send note-on (note-off happens on MOUSEBUTTONUP)
+                if kb._target_midi:
+                    kb._forward_note_on(note, 100)
+                    kb.active_notes[note] = 100
+                    if kb.on_note_on:
+                        kb.on_note_on(note, 100)
+                self._touch_note = note
