@@ -1,6 +1,12 @@
+<pre align="center">
+  ___ ___  __  __ ___  _
+ / __/ _ \|  \/  | _ \/ \
+| (_| (_) | |\/| |  _/ _ \
+ \___\___/|_|  |_|_|/_/ \_\
+</pre>
+
 <p align="center">
-  <strong>C O M P A</strong><br>
-  Universal Touchscreen Companion for USB Music Hardware
+  <strong>SP-404 MK II &amp; P-6 Companion</strong>
 </p>
 
 <p align="center">
@@ -267,7 +273,7 @@ Full file manager with dual-pane peer-to-peer transfer between Compas on the sam
 
 ### Kit Builder
 
-Assign samples to a 128-pad grid (4 banks × 32 pads) and export as Akai MPC (.xpm) or Ableton (.adg) drum kits.
+Assign samples to a 128-pad grid (8 banks × 16 pads) and export as Akai MPC (.xpm) or Ableton (.adg) drum kits.
 
 <p align="center">
   <img src="docs/screenshots/compa_kit.png" alt="Kit builder" width="100%">
@@ -468,12 +474,40 @@ compa/
 
 ## Contributing
 
-Compa is currently in private development. The repo will open up once the core feature set stabilizes. In the meantime:
+Contributions welcome — pull requests, bug reports, new device profiles, and radio stations all appreciated.
 
-1. **Report issues** -- open a GitHub issue with your Pi model, device, and steps to reproduce.
-2. **Device profiles** -- if you have a USB music device not listed above, a device profile contribution is the easiest way to expand Compa's hardware support. See `engine/device_profiles.py` for the pattern.
-3. **Radio stations** -- submit station URLs via PR to `docs/radio_stations.json`.
-4. **Code style** -- Python 3.11+, type hints, dataclasses. No external frameworks beyond pygame/numpy/sounddevice/rtmidi.
+### Getting Started
+
+1. Fork the repo and clone your fork:
+   ```bash
+   git clone https://github.com/YOUR-USERNAME/compa.git
+   cd compa
+   ```
+2. Create a branch for your change: `git checkout -b feature/my-change`
+3. Run Compa on your Pi or test locally with pygame (see `setup/`)
+4. Commit, push, and open a pull request against `main`
+
+### Ways to Contribute
+
+- **Report issues** — open a GitHub issue with your Pi model, connected device(s), firmware version, and steps to reproduce. Screenshots and `journalctl -u compa` logs help a lot.
+- **Device profiles** — expand Compa's hardware support by adding a new profile. See [`engine/device_profiles.py`](engine/device_profiles.py) for the pattern. USB VID/PID, MIDI channels, CC maps, and audio channel counts are all configurable per-device.
+- **Radio stations** — submit station URLs via PR to [`docs/radio_stations.json`](docs/radio_stations.json). Include name, genre, bitrate, and a working URL.
+- **Documentation** — fixing typos, improving setup instructions, clarifying device-specific quirks, or adding diagrams to this README all make the project more accessible.
+- **Features & bug fixes** — check the [issues tab](https://github.com/macdigi/compa/issues) for `good first issue` or `help wanted` labels, or propose something new.
+
+### Code Style
+
+- Python 3.11+ with type hints and dataclasses where appropriate
+- No external frameworks beyond `pygame`, `numpy`, `sounddevice`, `python-rtmidi`, `soundfile`, `zeroconf`
+- Keep audio callbacks lock-free (no allocations, no file I/O — see `engine/audio_engine.py` for the pattern)
+- Target 30 FPS for UI — don't spin the CPU unnecessarily
+- Respect the 1 GB RAM budget on Pi 3B
+
+### Testing
+
+Compa runs on any Linux with pygame/SDL2. Most of the engine modules can be tested on macOS or Ubuntu without the Pi hardware. For the UI, use `SDL_VIDEODRIVER=dummy` to render off-screen for snapshot tests.
+
+Hardware-specific features (MIDI, audio) need a real device, but you can often stub the `P6Midi` / `AudioEngine` interfaces for unit testing logic.
 
 ---
 
