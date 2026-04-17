@@ -32,14 +32,24 @@ OUTPUT_PATH = "/tmp/compa_video.mp4"
 class VideoRecorder:
     """Pipes pygame surface frames into a live-encoding ffmpeg process."""
 
-    def __init__(self, screen_size: tuple[int, int], fps: int = 30,
+    def __init__(self, screen_size: tuple[int, int], fps: int = 15,
                  output_path: str = OUTPUT_PATH):
+        """
+        fps defaults to 15 because the Pi 3B can only sustain ~8-15
+        frames/second through libx264 ultrafast at 1024x600. If you ask
+        for 30 here, the UI keeps drawing at 30 but the encoder backs
+        up, and the output MP4 ends up playing back 2-3x too fast.
+        15 fps is smooth enough for a demo and matches what the Pi can
+        actually produce.
+        """
         self._size = screen_size
         self._fps = fps
+        self._frame_interval = 1.0 / fps
         self._output = output_path
         self._proc: Optional[subprocess.Popen] = None
         self._frames = 0
         self._start_time = 0.0
+        self._last_capture = 0.0
 
     @property
     def recording(self) -> bool:
@@ -87,6 +97,7 @@ class VideoRecorder:
             )
             self._frames = 0
             self._start_time = time.monotonic()
+            self._last_capture = 0.0
             log.info("Video recording started → %s", self._output)
             print(f"Video recording: {self._output}", flush=True)
             return True
@@ -97,9 +108,18 @@ class VideoRecorder:
             return False
 
     def capture(self, surface: pygame.Surface):
-        """Push one frame. Called from the main draw loop after flip()."""
+        """Push one frame. Called from the main draw loop after flip().
+
+        Throttles to self._fps — the UI may draw at 30 fps but we only
+        feed every Nth frame into ffmpeg so the encoder doesn't fall
+        behind on the Pi 3B.
+        """
         if self._proc is None or self._proc.stdin is None:
             return
+        now = time.monotonic()
+        if now - self._last_capture < self._frame_interval:
+            return  # too soon — skip this frame to stay on target fps
+        self._last_capture = now
         try:
             # tostring returns RGB bytes in left-to-right, top-to-bottom order
             # pygame 2.x renamed to tobytes but tostring still works
