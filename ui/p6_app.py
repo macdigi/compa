@@ -43,6 +43,7 @@ from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
 from engine.network_manager import WifiManager, BluetoothManager
 from engine.chromatic_keyboard import ChromaticKeyboard
+from ui.video_recorder import VideoRecorder, DemoScheduler, build_demo_sequence
 from engine.p6_librarian import P6Librarian
 from engine.sp404_librarian import SP404Librarian
 from ui.splash import run_splash
@@ -267,6 +268,11 @@ class P6App:
 
         # ── Chromatic keyboard (any generic USB MIDI keyboard) ──────
         self.chromatic_kb = ChromaticKeyboard()
+
+        # ── Video recorder (live screen capture to MP4) ─────────────
+        self.video_recorder = VideoRecorder(
+            screen_size=(self._display_w, self._display_h), fps=self.fps)
+        self.demo_scheduler: DemoScheduler | None = None
 
         # ── WiFi + Bluetooth managers (end-user connectivity) ───────
         self.wifi = WifiManager()
@@ -1582,6 +1588,30 @@ class P6App:
             pygame.image.save(self.screen, "/tmp/compa_screen.png")
             print("Screenshot captured", flush=True)
 
+        # Video recording triggers
+        if os.path.exists("/tmp/compa_record_start"):
+            os.remove("/tmp/compa_record_start")
+            self.video_recorder.start()
+
+        if os.path.exists("/tmp/compa_record_stop"):
+            os.remove("/tmp/compa_record_stop")
+            self.video_recorder.stop()
+
+        # Auto-demo: starts recording, drives the sequence, then stops
+        if os.path.exists("/tmp/compa_record_demo"):
+            os.remove("/tmp/compa_record_demo")
+            if not self.video_recorder.recording:
+                if self.video_recorder.start():
+                    self.demo_scheduler = DemoScheduler(build_demo_sequence())
+                    self.demo_scheduler.start(self)
+
+        # Advance the auto-demo if it's running
+        if self.demo_scheduler is not None:
+            self.demo_scheduler.tick(self)
+            if self.demo_scheduler.finished:
+                self.video_recorder.stop()
+                self.demo_scheduler = None
+
         # Screenshot all screens at once
         if os.path.exists("/tmp/compa_screenshot_all"):
             os.remove("/tmp/compa_screenshot_all")
@@ -1654,6 +1684,12 @@ class P6App:
         # Keyboard overlays absolutely everything (including the audio player)
         if getattr(self, 'keyboard', None) and self.keyboard.visible:
             self.keyboard.draw(self.screen)
+
+        # Capture this frame into the video pipe BEFORE flipping display.
+        # We copy the fully composed surface (nav + HUD + modals all included).
+        if getattr(self, 'video_recorder', None) and self.video_recorder.recording:
+            self.video_recorder.capture(self.screen)
+
         pygame.display.flip()
 
         # Draw software cursor in FB + mouse mode
@@ -1816,6 +1852,9 @@ class P6App:
 
     def _shutdown(self):
         print("Shutting down Compa...")
+        # Finalize any in-progress video recording first so the MP4 is valid
+        if getattr(self, 'video_recorder', None) and self.video_recorder.recording:
+            self.video_recorder.stop()
         self.recorder.stop_monitor_output()
         if self.audio_route and self.audio_route.is_active:
             self.audio_route.stop()

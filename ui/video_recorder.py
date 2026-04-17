@@ -1,0 +1,284 @@
+"""Real-time screen video recording via ffmpeg pipe.
+
+Captures every rendered pygame frame, pipes it to an ffmpeg subprocess
+that encodes H.264 MP4 on the fly. No disk I/O between frames — the
+raw RGB data goes directly into ffmpeg's stdin, so Pi 3B can keep up
+at 30fps with the `ultrafast` preset.
+
+Also provides an auto-demo scheduler that drives Compa through a
+scripted sequence of screens, focuses, and tabs while recording, so
+users can produce a marketing-ready walkthrough video with a single
+trigger file.
+
+Trigger files (checked each _update() tick):
+  /tmp/compa_record_start  — begin capturing every frame
+  /tmp/compa_record_stop   — finalize, encode, write to /tmp/compa_video.mp4
+  /tmp/compa_record_demo   — run the full auto-demo (~35s) then stop
+"""
+
+import logging
+import os
+import subprocess
+import time
+from typing import Callable, Optional
+
+import pygame
+
+log = logging.getLogger(__name__)
+
+OUTPUT_PATH = "/tmp/compa_video.mp4"
+
+
+class VideoRecorder:
+    """Pipes pygame surface frames into a live-encoding ffmpeg process."""
+
+    def __init__(self, screen_size: tuple[int, int], fps: int = 30,
+                 output_path: str = OUTPUT_PATH):
+        self._size = screen_size
+        self._fps = fps
+        self._output = output_path
+        self._proc: Optional[subprocess.Popen] = None
+        self._frames = 0
+        self._start_time = 0.0
+
+    @property
+    def recording(self) -> bool:
+        return self._proc is not None
+
+    @property
+    def frames_written(self) -> int:
+        return self._frames
+
+    @property
+    def duration_seconds(self) -> float:
+        if not self._start_time:
+            return 0.0
+        return time.monotonic() - self._start_time
+
+    def start(self) -> bool:
+        """Spawn ffmpeg and open the stdin pipe. Returns True on success."""
+        if self._proc is not None:
+            return True
+        try:
+            # Remove any previous output so ffmpeg doesn't prompt
+            if os.path.exists(self._output):
+                os.remove(self._output)
+
+            self._proc = subprocess.Popen(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "rgb24",
+                    "-s", f"{self._size[0]}x{self._size[1]}",
+                    "-r", str(self._fps),
+                    "-i", "-",
+                    # H.264 with ultrafast preset for Pi 3B real-time encoding
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-crf", "23",
+                    # Make sure width/height are even (libx264 requirement)
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    self._output,
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            self._frames = 0
+            self._start_time = time.monotonic()
+            log.info("Video recording started → %s", self._output)
+            print(f"Video recording: {self._output}", flush=True)
+            return True
+        except Exception as e:
+            log.error("ffmpeg spawn failed: %s", e)
+            print(f"Video record failed to start: {e}", flush=True)
+            self._proc = None
+            return False
+
+    def capture(self, surface: pygame.Surface):
+        """Push one frame. Called from the main draw loop after flip()."""
+        if self._proc is None or self._proc.stdin is None:
+            return
+        try:
+            # tostring returns RGB bytes in left-to-right, top-to-bottom order
+            # pygame 2.x renamed to tobytes but tostring still works
+            if hasattr(pygame.image, "tobytes"):
+                data = pygame.image.tobytes(surface, "RGB")
+            else:
+                data = pygame.image.tostring(surface, "RGB")
+            self._proc.stdin.write(data)
+            self._frames += 1
+        except BrokenPipeError:
+            # ffmpeg died — stop silently
+            log.warning("ffmpeg pipe broke after %d frames", self._frames)
+            self._proc = None
+        except Exception as e:
+            log.debug("capture error: %s", e)
+
+    def stop(self) -> Optional[str]:
+        """Close the pipe, wait for ffmpeg to finalize, return the path."""
+        if self._proc is None:
+            return None
+        try:
+            if self._proc.stdin:
+                self._proc.stdin.close()
+            # Give ffmpeg time to finalize (write moov atom etc.)
+            try:
+                self._proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                log.warning("ffmpeg did not finalize in time, killing")
+                self._proc.kill()
+                self._proc.wait(timeout=5)
+        except Exception as e:
+            log.error("stop error: %s", e)
+
+        # Check if ffmpeg produced errors
+        if self._proc.stderr:
+            try:
+                err = self._proc.stderr.read().decode(errors="ignore").strip()
+                if err:
+                    log.info("ffmpeg stderr: %s", err[:500])
+            except Exception:
+                pass
+
+        duration = self.duration_seconds
+        frames = self._frames
+        self._proc = None
+        self._frames = 0
+        self._start_time = 0.0
+
+        if os.path.exists(self._output):
+            size_mb = os.path.getsize(self._output) / (1024 * 1024)
+            msg = (f"Video saved: {self._output} "
+                   f"({frames} frames, {duration:.1f}s, {size_mb:.1f} MB)")
+            log.info(msg)
+            print(msg, flush=True)
+            return self._output
+
+        log.warning("ffmpeg produced no output file")
+        return None
+
+
+# ── Auto-demo scheduler ───────────────────────────────────────────────
+
+
+class DemoStep:
+    """One step in the auto-demo sequence.
+
+    action(app) is called once when the step begins. duration is how
+    long (seconds) the step runs before advancing to the next.
+    """
+
+    def __init__(self, duration: float, label: str,
+                 action: Callable[["object"], None]):
+        self.duration = duration
+        self.label = label
+        self.action = action
+
+
+def build_demo_sequence() -> list[DemoStep]:
+    """The scripted walkthrough — ~35s covering every major area."""
+
+    def goto(screen_name: str) -> Callable:
+        def _fn(app):
+            app.switch_screen(screen_name)
+        return _fn
+
+    def workspace_for(focus_key: str, tab_key: str = "control") -> Callable:
+        def _fn(app):
+            # Switch focus if needed
+            if app.device_manager.focus_key != focus_key:
+                app.switch_focus(focus_key)
+            app.switch_screen("device_workspace")
+            workspace = app.screens.get("device_workspace")
+            if workspace is None:
+                return
+            if hasattr(workspace, "on_enter"):
+                workspace.on_enter()
+            # Pick the tab
+            for i, (key, _lbl) in enumerate(workspace._tabs):
+                if key == tab_key:
+                    workspace._current_tab = i
+                    if tab_key == "control" and hasattr(workspace, "_build_knobs"):
+                        workspace._build_knobs()
+                    if tab_key == "keys" and hasattr(app, "chromatic_kb"):
+                        app.chromatic_kb.enabled = True
+                        workspace._retarget_keys_for_device()
+                    break
+        return _fn
+
+    return [
+        DemoStep(3.5, "Session dashboard", goto("session")),
+        DemoStep(3.0, "SP-404 control",    workspace_for("SP-404MKII", "control")),
+        DemoStep(3.0, "SP-404 Twister",    workspace_for("SP-404MKII", "twister")),
+        DemoStep(3.0, "SP-404 Keys",       workspace_for("SP-404MKII", "keys")),
+        DemoStep(2.5, "Back to session",   goto("session")),
+        DemoStep(3.0, "P-6 control",       workspace_for("P-6", "control")),
+        DemoStep(3.0, "P-6 Keys",          workspace_for("P-6", "keys")),
+        DemoStep(3.0, "P-6 Pattern",       workspace_for("P-6", "pattern")),
+        DemoStep(2.5, "Back to session",   goto("session")),
+        DemoStep(3.0, "Record",            goto("record")),
+        DemoStep(3.0, "Radio",             goto("radio")),
+        DemoStep(2.5, "Files",             goto("files")),
+        DemoStep(2.5, "IO & Connectivity", goto("io")),
+        DemoStep(2.0, "Settings",          goto("settings")),
+        DemoStep(3.0, "Final dashboard",   goto("session")),
+    ]
+
+
+class DemoScheduler:
+    """Drives an auto-demo sequence. Tick() every frame to advance steps."""
+
+    def __init__(self, steps: list[DemoStep]):
+        self._steps = steps
+        self._index = -1
+        self._step_start = 0.0
+        self._running = False
+        self._finished = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    @property
+    def total_duration(self) -> float:
+        return sum(s.duration for s in self._steps)
+
+    def start(self, app):
+        self._running = True
+        self._finished = False
+        self._index = -1
+        self._step_start = time.monotonic()
+        self._advance(app)
+
+    def tick(self, app):
+        if not self._running or self._finished:
+            return
+        now = time.monotonic()
+        if self._index < 0:
+            self._advance(app)
+            return
+        current = self._steps[self._index]
+        if now - self._step_start >= current.duration:
+            self._advance(app)
+
+    def _advance(self, app):
+        self._index += 1
+        if self._index >= len(self._steps):
+            self._running = False
+            self._finished = True
+            print("Demo sequence complete", flush=True)
+            return
+        step = self._steps[self._index]
+        self._step_start = time.monotonic()
+        print(f"Demo [{self._index + 1}/{len(self._steps)}] {step.label} "
+              f"({step.duration:.1f}s)", flush=True)
+        try:
+            step.action(app)
+        except Exception as e:
+            log.error("Demo step failed: %s", e)
