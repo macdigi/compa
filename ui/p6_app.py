@@ -1596,6 +1596,47 @@ class P6App:
             self.switch_screen(original)
             print("All screenshots captured", flush=True)
 
+        # Extended screenshot: device workspace with every focus + tab combo
+        if os.path.exists("/tmp/compa_screenshot_workspaces"):
+            os.remove("/tmp/compa_screenshot_workspaces")
+            original_screen = self.current_screen_name
+            original_focus = self.device_manager.focus_key
+
+            workspace = self.screens.get("device_workspace")
+            self.switch_screen("device_workspace")
+
+            for short_name in list(self.device_manager.connected.keys()):
+                self.switch_focus(short_name)
+                if hasattr(workspace, "on_enter"):
+                    workspace.on_enter()
+                # Capture each tab
+                for i, (tab_key, _tab_label) in enumerate(workspace._tabs):
+                    workspace._current_tab = i
+                    if tab_key == "control" and hasattr(workspace, "_build_knobs"):
+                        workspace._build_knobs()
+                    if tab_key == "keys" and hasattr(self, "chromatic_kb"):
+                        self.chromatic_kb.enabled = True
+                    # Let a few frames render so oscilloscope has data
+                    for _ in range(4):
+                        self.screen.fill(theme.BG)
+                        if hasattr(workspace, "update"):
+                            workspace.update()
+                        workspace.draw(self.screen)
+                        self._draw_nav()
+                        pygame.display.flip()
+                        self.clock.tick(self.fps)
+                    safe = short_name.replace("/", "_").replace(" ", "_")
+                    out = f"/tmp/compa_workspace_{safe}_{tab_key}.png"
+                    pygame.image.save(self.screen, out)
+                    print(f"Screenshot: {out}", flush=True)
+                    if tab_key == "keys" and hasattr(self, "chromatic_kb"):
+                        self.chromatic_kb.enabled = False
+
+            # Restore
+            self.switch_focus(original_focus)
+            self.switch_screen(original_screen)
+            print("Workspace screenshots captured", flush=True)
+
         if hasattr(self.current_screen, "update"):
             self.current_screen.update()
         for btn, screen_name in self.nav_buttons:

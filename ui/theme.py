@@ -23,14 +23,14 @@ THEMES = {
         "knob_fill": (235, 120, 30),
         "pad_active": (235, 120, 30),
     },
-    "sp404": {  # SP-404 MK2 — teal/cyan on dark (like the SP's screen)
-        "accent": (0, 200, 180),
-        "accent_dim": (0, 120, 110),
-        "accent_bright": (50, 240, 210),
-        "nav_active": (0, 200, 180),
-        "border_focus": (0, 220, 195),
-        "knob_fill": (0, 200, 180),
-        "pad_active": (0, 200, 180),
+    "sp404": {  # SP-404 MK2 — orange (Compa's default warm tone)
+        "accent": (235, 120, 30),
+        "accent_dim": (160, 80, 18),
+        "accent_bright": (255, 155, 50),
+        "nav_active": (235, 120, 30),
+        "border_focus": (255, 130, 40),
+        "knob_fill": (235, 120, 30),
+        "pad_active": (235, 120, 30),
     },
     "p6": {  # Roland P-6 — bright yellow on black (matches hardware)
         "accent": (255, 230, 0),
