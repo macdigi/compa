@@ -126,6 +126,37 @@ class P6SettingsScreen:
         t = threading.Thread(target=_pull, daemon=True)
         t.start()
 
+    def _start_recording(self):
+        rec = getattr(self.app, "video_recorder", None)
+        if rec and not rec.recording:
+            rec.start()
+
+    def _stop_recording(self):
+        """Stop recording in a background thread — re-encoding takes ~20s."""
+        rec = getattr(self.app, "video_recorder", None)
+        if rec is None or not rec.recording:
+            return
+        import threading
+        # Also cancel any running demo so both stop together
+        if getattr(self.app, "demo_scheduler", None) is not None:
+            self.app.demo_scheduler = None
+
+        def _worker():
+            path = rec.stop()
+            if path:
+                self.app.push_hud(f"Video saved: {os.path.basename(path)}",
+                                   None)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _start_demo(self):
+        """Trigger the auto-demo walkthrough via the file trigger."""
+        try:
+            with open("/tmp/compa_record_demo", "w") as f:
+                f.write("")
+        except Exception as e:
+            print(f"Demo trigger failed: {e}", flush=True)
+
     def _check_updates(self):
         """Check for Compa updates in the background."""
         if not hasattr(self.app, 'updater'):
@@ -417,6 +448,48 @@ class P6SettingsScreen:
             "action": lambda: self.app.switch_screen("io"),
             "value": io_status,
         })
+
+        # Video Recording
+        rec = getattr(self.app, "video_recorder", None)
+        demo = getattr(self.app, "demo_scheduler", None)
+        if rec is not None:
+            self._rows.append({"label": "", "type": "section",
+                               "value": "VIDEO RECORDING"})
+            # Record / stop toggle
+            if rec.recording:
+                elapsed = rec.duration_seconds
+                frames = rec.frames_written
+                if demo is not None:
+                    total = demo.total_duration
+                    status = f"Demo running · {elapsed:.0f}/{total:.0f}s · {frames} frames"
+                else:
+                    status = f"Recording · {elapsed:.0f}s · {frames} frames"
+                self._rows.append({
+                    "label": "  Record screen", "type": "button",
+                    "btn_label": "STOP",
+                    "action": self._stop_recording,
+                    "value": status,
+                })
+            else:
+                last_video_path = "/tmp/compa_video.mp4"
+                if os.path.exists(last_video_path):
+                    size_mb = os.path.getsize(last_video_path) / (1024 * 1024)
+                    status = f"Last: /tmp/compa_video.mp4 ({size_mb:.1f} MB)"
+                else:
+                    status = "MP4 saved to /tmp/compa_video.mp4"
+                self._rows.append({
+                    "label": "  Record screen", "type": "button",
+                    "btn_label": "RECORD",
+                    "action": self._start_recording,
+                    "value": status,
+                })
+                # Auto-demo button only when idle
+                self._rows.append({
+                    "label": "  Auto-demo walkthrough", "type": "button",
+                    "btn_label": "DEMO",
+                    "action": self._start_demo,
+                    "value": "~43s cycle through all screens",
+                })
 
         # Audio and display info
         self._rows.extend([
