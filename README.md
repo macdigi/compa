@@ -29,6 +29,7 @@ No desktop environment. No web browser. Just a direct pygame UI on KMSDRM, built
 
 - [Features](#features)
 - [Supported Hardware](#supported-hardware)
+- [MIDI Controllers](#midi-controllers)
 - [Multi-Device Hub](#multi-device-hub)
 - [Screens](#screens)
 - [Cross-Device Workflow](#cross-device-workflow)
@@ -114,6 +115,15 @@ Record on one device, convert, load on another. Cross-device sample sharing in s
 - Transport control: Play / Record / Stop per device
 - Real-time oscilloscope and level meters per device card
 
+### MIDI Controllers
+- **Plug-and-play MIDI input** — any USB MIDI keyboard or controller is auto-detected
+- **Midi Fighter Twister deep integration** — 16 knobs mapped to SP-404 FX slots with RGB LEDs showing effect color
+- **Chromatic keyboard (KEYS tab)** — play any SP-404 pad or P-6 sample melodically across two octaves
+- **Touch-to-play piano** on the screen — works without a hardware keyboard
+- **LATCH mode** for holding chords, **octave shift ±3**, **velocity-sensitive**
+- Routes to the focused device on its designated chromatic channel (SP-404 Ch16, P-6 Ch4)
+- Hot-plug aware — disconnect and reconnect without restarting
+
 ### Utility
 - One-button **backup / restore** for device contents
 - Session notes (auto-saved)
@@ -131,6 +141,10 @@ Record on one device, convert, load on another. Cross-device sample sharing in s
 | **Roland P-6** | 2-in / 2-out, 44.1 kHz | Granular, Filter, Envelope, Mixer, FX (40+ CCs) | 64 patterns | Full backup/restore | Slicer and format converter |
 | **Roland SP-404 MK2** | 2-in / 4-out, 48 kHz | 5-bus FX with named effects, DJ mode, Looper (25+ CCs) | 16 patterns | SD card backup | Slicer and format converter |
 | **Akai Force / MPC** | -- | -- | -- | -- | USB file transfer (Computer Mode), XPM drum program export |
+| **Midi Fighter Twister** | -- | Deep: 16 knobs → SP-404 FX slots, RGB LED feedback | -- | -- | -- |
+| **Midi Fighter Spectra** | -- | Pad mapping for SP-404 with HOLD (deeper integration in progress) | -- | -- | -- |
+| **PreSonus ATOM SQ** | -- | Pad trigger, transport, touch-strip CC, PAD/PATTERN/CONTROL layers | -- | -- | -- |
+| **Any USB MIDI keyboard** | -- | Chromatic play via KEYS tab (Alesis, Arturia, AKAI, Novation, etc.) | -- | -- | -- |
 | **Any USB audio device** | Record / playback | -- | -- | -- | -- |
 
 ### SP-404 MK2 Effects Coverage
@@ -142,6 +156,64 @@ Compa includes the complete SP-404 MK2 effects list with named presets per bus:
 - **Input FX** -- 18 effects focused on vocal and amp processing
 
 All effect selection is via CC with human-readable names displayed on screen.
+
+---
+
+## MIDI Controllers
+
+Compa works with any USB MIDI controller — plug in and it's detected automatically within 2 seconds. Compa recognizes specific controllers with deep integrations, and treats everything else as a generic MIDI keyboard.
+
+### Midi Fighter Twister (deep integration)
+
+The DJ TechTools Midi Fighter Twister gets a full SP-404 FX control surface:
+
+- **16 encoders = 16 SP-404 effect slots** — each knob is pre-assigned to an effect (To-Gu-Ro, Scatter, Tape Echo, Stopper, etc.)
+- **Press a knob to activate the effect** on the currently selected bus. Press again to turn it off.
+- **Turn the knob to sweep Ctrl 1** of that effect in real time
+- **RGB LEDs reflect effect color** — each FX slot has a color that matches the effect type (red/orange for distortion, blue/cyan for modulation, green for filters, purple for time-based)
+- **Focus mode** — press a knob to focus on one effect; all other LEDs dim so you can see what's active
+- **Multi-page support** — scroll through banks of effects (the P-6 gets its own 16-knob page for granular parameters)
+- **Auto-map on startup** — no configuration needed. Plug it in, it's mapped.
+- **Customizable** — swap which effect is on which knob via the settings screen
+
+The Twister is the recommended physical controller for anyone using Compa with an SP-404 MK2. It's faster than navigating FX menus on the SP itself and the LED feedback makes live performance much more readable.
+
+### Chromatic MIDI Keyboards
+
+Plug in any USB MIDI keyboard — Alesis V49, Arturia KeyStep, AKAI MPK Mini, Novation Launchkey, PreSonus ATOM SQ, etc. — and play any loaded sample melodically:
+
+- **Two-octave range** from the KEYS tab of a device workspace
+- **Plays the focused device** on its designated chromatic channel: SP-404 MK2 on MIDI Ch 16, P-6 on MIDI Ch 4 (granular engine)
+- **Visual piano display** shows active notes with velocity color
+- **Latch mode** — tap keys to hold chords
+- **Octave shift ±3** — extends the playable range across the MIDI spectrum
+- **Touch-to-play** on the screen — works even without a hardware keyboard
+- **Pad selector** — tap any pad across all banks to audition the sound before committing
+- **All notes off** when switching tabs or leaving the workspace (no stuck notes)
+
+For the SP-404, Ch16 chromatic is a hardware-only mode on the SP itself — tap the pad on the SP, press SHIFT + PAD 4 (CHROMATIC), then Compa's keyboard plays that sample across the keys. For the P-6, chromatic routing is fully MIDI-controlled and works immediately.
+
+### General USB MIDI Input
+
+Anything else plugged in:
+
+- Auto-detected and routed through the chromatic keyboard module
+- Notes and CC forwarded to the focused device on its chromatic channel
+- Pitch bend supported on devices that accept it (SP-404 Ch16 / Ch11 vocoder)
+- Excludes known devices (SP-404, P-6, ATOM SQ, Twister, Spectra, Force) so their own dedicated connections aren't duplicated
+- Disconnect and reconnect freely — Compa rescans every 2 seconds
+
+### Midi Fighter Spectra
+
+Basic pad mapping today with color-coded banks for SP-404 effects and HOLD functionality. A deeper integration is in progress based on recent firmware discoveries — expect this section to grow.
+
+### ATOM SQ
+
+The PreSonus ATOM SQ is a dedicated performance controller with its own routing module:
+- 32 pads map to SP-404 sample triggering
+- Transport buttons control Compa's master clock
+- Touch-strip routes to CC for expressive control
+- Layer system switches between PAD / PATTERN / CONTROL modes
 
 ---
 
