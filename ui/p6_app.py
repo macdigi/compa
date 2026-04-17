@@ -270,10 +270,10 @@ class P6App:
         self.chromatic_kb = ChromaticKeyboard()
 
         # ── Video recorder (live screen capture to MP4) ─────────────
-        # fps=15 — Pi 3B can't sustain full 30fps H.264 encoding.
-        # Videos look fine and wall-clock time is accurate.
+        # Captures to MJPEG in RAM, re-encodes to H.264 on stop.
+        # Pi 3B can handle MJPEG at the full UI frame rate.
         self.video_recorder = VideoRecorder(
-            screen_size=(self._display_w, self._display_h), fps=15)
+            screen_size=(self._display_w, self._display_h), fps=self.fps)
         self.demo_scheduler: DemoScheduler | None = None
 
         # ── WiFi + Bluetooth managers (end-user connectivity) ───────

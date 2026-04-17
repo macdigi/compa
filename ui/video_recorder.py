@@ -32,20 +32,27 @@ OUTPUT_PATH = "/tmp/compa_video.mp4"
 class VideoRecorder:
     """Pipes pygame surface frames into a live-encoding ffmpeg process."""
 
-    def __init__(self, screen_size: tuple[int, int], fps: int = 15,
+    def __init__(self, screen_size: tuple[int, int], fps: int = 30,
                  output_path: str = OUTPUT_PATH):
-        """
-        fps defaults to 15 because the Pi 3B can only sustain ~8-15
-        frames/second through libx264 ultrafast at 1024x600. If you ask
-        for 30 here, the UI keeps drawing at 30 but the encoder backs
-        up, and the output MP4 ends up playing back 2-3x too fast.
-        15 fps is smooth enough for a demo and matches what the Pi can
-        actually produce.
+        """Two-stage pipeline: capture to MJPEG, re-encode to H.264.
+
+        Pi 3B's H.264 encoder tops out around 8-10 fps at 1024x600,
+        so encoding in real time produces videos that play back 3x
+        too fast. MJPEG is orders of magnitude faster because each
+        frame is just a JPEG — no inter-frame prediction — so the
+        Pi can write at the full UI frame rate. After recording
+        stops, we re-encode the MJPEG intermediate to H.264 at
+        whatever pace ffmpeg wants (not real-time), producing a
+        final MP4 that matches wall-clock duration exactly.
+
+        The MJPEG intermediate is written to /dev/shm (tmpfs) so no
+        SD card wear, then deleted after re-encoding.
         """
         self._size = screen_size
         self._fps = fps
         self._frame_interval = 1.0 / fps
         self._output = output_path
+        self._mjpeg_tmp = "/dev/shm/compa_capture.mkv"
         self._proc: Optional[subprocess.Popen] = None
         self._frames = 0
         self._start_time = 0.0
@@ -66,14 +73,19 @@ class VideoRecorder:
         return time.monotonic() - self._start_time
 
     def start(self) -> bool:
-        """Spawn ffmpeg and open the stdin pipe. Returns True on success."""
+        """Spawn the MJPEG-capture ffmpeg and open the stdin pipe."""
         if self._proc is not None:
             return True
         try:
-            # Remove any previous output so ffmpeg doesn't prompt
+            # Clean up any leftover temp or output files
             if os.path.exists(self._output):
                 os.remove(self._output)
+            if os.path.exists(self._mjpeg_tmp):
+                os.remove(self._mjpeg_tmp)
 
+            # Stage 1: raw RGB → MJPEG inside a Matroska container.
+            # MJPEG per-frame JPEG encoding is fast enough on Pi 3B
+            # to hit full 30 fps without throttling.
             self._proc = subprocess.Popen(
                 [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -82,14 +94,10 @@ class VideoRecorder:
                     "-s", f"{self._size[0]}x{self._size[1]}",
                     "-r", str(self._fps),
                     "-i", "-",
-                    # H.264 with ultrafast preset for Pi 3B real-time encoding
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-pix_fmt", "yuv420p",
-                    "-crf", "23",
-                    # Make sure width/height are even (libx264 requirement)
-                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                    self._output,
+                    "-c:v", "mjpeg",
+                    "-q:v", "5",  # quality scale (2-31, lower=better; 5 ≈ good)
+                    "-pix_fmt", "yuvj420p",
+                    self._mjpeg_tmp,
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
@@ -98,8 +106,9 @@ class VideoRecorder:
             self._frames = 0
             self._start_time = time.monotonic()
             self._last_capture = 0.0
-            log.info("Video recording started → %s", self._output)
-            print(f"Video recording: {self._output}", flush=True)
+            log.info("Video recording started (MJPEG intermediate)")
+            print("Video recording: /dev/shm/compa_capture.mkv → re-encode on stop",
+                  flush=True)
             return True
         except Exception as e:
             log.error("ffmpeg spawn failed: %s", e)
@@ -137,28 +146,26 @@ class VideoRecorder:
             log.debug("capture error: %s", e)
 
     def stop(self) -> Optional[str]:
-        """Close the pipe, wait for ffmpeg to finalize, return the path."""
+        """Close MJPEG capture, re-encode to H.264 MP4, return the path."""
         if self._proc is None:
             return None
         try:
             if self._proc.stdin:
                 self._proc.stdin.close()
-            # Give ffmpeg time to finalize (write moov atom etc.)
             try:
                 self._proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                log.warning("ffmpeg did not finalize in time, killing")
+                log.warning("mjpeg ffmpeg did not finalize in time, killing")
                 self._proc.kill()
                 self._proc.wait(timeout=5)
         except Exception as e:
             log.error("stop error: %s", e)
 
-        # Check if ffmpeg produced errors
         if self._proc.stderr:
             try:
                 err = self._proc.stderr.read().decode(errors="ignore").strip()
                 if err:
-                    log.info("ffmpeg stderr: %s", err[:500])
+                    log.info("mjpeg ffmpeg stderr: %s", err[:500])
             except Exception:
                 pass
 
@@ -168,6 +175,50 @@ class VideoRecorder:
         self._frames = 0
         self._start_time = 0.0
 
+        # Stage 2: re-encode MJPEG → H.264 MP4 at the actual captured rate.
+        if not os.path.exists(self._mjpeg_tmp):
+            log.warning("no MJPEG intermediate produced")
+            return None
+
+        # Calculate actual captured fps and use it as the nominal rate
+        # so playback matches wall-clock time exactly.
+        actual_fps = frames / duration if duration > 0 else self._fps
+        log.info("Re-encoding %d frames (%.1fs, %.1f fps actual) → H.264",
+                 frames, duration, actual_fps)
+        print(f"Re-encoding {frames} frames at {actual_fps:.1f} fps → H.264...",
+              flush=True)
+
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-r", f"{actual_fps:.3f}",
+                    "-i", self._mjpeg_tmp,
+                    "-c:v", "libx264",
+                    "-preset", "medium",
+                    "-crf", "20",
+                    "-pix_fmt", "yuv420p",
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    "-r", f"{actual_fps:.3f}",
+                    self._output,
+                ],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                log.error("re-encode failed: %s", result.stderr[:500])
+                print(f"Re-encode failed: {result.stderr[:200]}", flush=True)
+        except subprocess.TimeoutExpired:
+            log.error("re-encode timed out after 3 minutes")
+            print("Re-encode timed out", flush=True)
+        except Exception as e:
+            log.error("re-encode error: %s", e)
+
+        # Clean up the MJPEG intermediate
+        try:
+            os.remove(self._mjpeg_tmp)
+        except Exception:
+            pass
+
         if os.path.exists(self._output):
             size_mb = os.path.getsize(self._output) / (1024 * 1024)
             msg = (f"Video saved: {self._output} "
@@ -176,7 +227,7 @@ class VideoRecorder:
             print(msg, flush=True)
             return self._output
 
-        log.warning("ffmpeg produced no output file")
+        log.warning("no final MP4 produced")
         return None
 
 
