@@ -20,5 +20,5 @@
   <text x="40" y="62" xml:space="preserve" class="logo"> / __/ _ \|  \/  | _ \/ \  </text>
   <text x="40" y="92" xml:space="preserve" class="logo">| (_| (_) | |\/| |  _/ _ \ </text>
   <text x="40" y="122" xml:space="preserve" class="logo"> \___\___/|_|  |_|_|/_/ \_\</text>
-  <text x="40" y="150" class="tag">SP-404 MKII + P-6 COMPANION</text>
+  <text x="258" y="150" text-anchor="middle" class="tag">SP-404 MKII + P-6 COMPANION</text>
 </svg>
