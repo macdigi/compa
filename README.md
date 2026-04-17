@@ -1,12 +1,5 @@
-<pre align="center">
-  ___ ___  __  __ ___  _
- / __/ _ \|  \/  | _ \/ \
-| (_| (_) | |\/| |  _/ _ \
- \___\___/|_|  |_|_|/_/ \_\
-</pre>
-
 <p align="center">
-  <strong>SP-404 MK II &amp; P-6 Companion</strong>
+  <img src="docs/compa_logo.svg" alt="COMPA — SP-404 MKII + P-6 Companion" width="520">
 </p>
 
 <p align="center">
@@ -19,7 +12,9 @@
 
 ---
 
-Compa turns a Raspberry Pi and touchscreen into a multi-device control surface, recorder, sampler, and transfer hub for your hardware. Plug in up to three USB devices, and Compa auto-detects each one, adapts its interface, and connects everything through a single unified workflow: **Record, Slice, Build Kit, Push to Device.**
+Compa is a touchscreen companion for the **Roland SP-404 MKII and P-6**. It runs on a Raspberry Pi and turns the two grooveboxes into a tighter, more playable setup — direct control over both devices from one screen, a chromatic keyboard that plays either one melodically, live recording with a 60-second recall buffer, and a full kit-building pipeline that exports to **Akai MPC (.xpm)**, **Akai Force**, and **Ableton Live (.adg)**.
+
+The workflow is unified: **record anything → slice it → build a kit → push it to your MPC/Force or Ableton.** The SP-404 and P-6 stay at the center of the setup; Compa adds the parts they're missing — a real screen, cross-device routing, sample transfer, and deep external MIDI controller support.
 
 No desktop environment. No web browser. Just a direct pygame UI on KMSDRM, built for live use with your fingers.
 
@@ -165,18 +160,33 @@ Compa works with any USB MIDI controller — plug in and it's detected automatic
 
 ### Midi Fighter Twister (deep integration)
 
-The DJ TechTools Midi Fighter Twister gets a full SP-404 FX control surface:
+The DJ TechTools Midi Fighter Twister is the recommended physical controller for Compa. It auto-detects on plug-in and maps itself to whichever device you have focused — **SP-404 effects on one page, P-6 granular engine on another**. Flip between devices with Compa's focus toggle and the Twister retargets instantly.
 
-- **16 encoders = 16 SP-404 effect slots** — each knob is pre-assigned to an effect (To-Gu-Ro, Scatter, Tape Echo, Stopper, etc.)
+**On SP-404 MK2 — 16 effect slots with live switching:**
+
+- **16 encoders = 16 SP-404 effect slots** — each knob pre-assigned to an effect (To-Gu-Ro, Scatter, Tape Echo, Stopper, Downer, Ha-Dou, etc.)
 - **Press a knob to activate the effect** on the currently selected bus. Press again to turn it off.
 - **Turn the knob to sweep Ctrl 1** of that effect in real time
-- **RGB LEDs reflect effect color** — each FX slot has a color that matches the effect type (red/orange for distortion, blue/cyan for modulation, green for filters, purple for time-based)
-- **Focus mode** — press a knob to focus on one effect; all other LEDs dim so you can see what's active
-- **Multi-page support** — scroll through banks of effects (the P-6 gets its own 16-knob page for granular parameters)
-- **Auto-map on startup** — no configuration needed. Plug it in, it's mapped.
-- **Customizable** — swap which effect is on which knob via the settings screen
+- **RGB LEDs reflect effect color** — red/orange for distortion and dynamics, blue/cyan for modulation and reverb, green for filters, purple/pink for time-based effects
+- **Focus mode** — press a knob to focus on one effect; all other LEDs dim so you can see exactly what's active
+- **Bus-aware** — the knobs follow whichever bus (1-4 or Input FX) is selected, so you can build different FX chains per bus
 
-The Twister is the recommended physical controller for anyone using Compa with an SP-404 MK2. It's faster than navigating FX menus on the SP itself and the LED feedback makes live performance much more readable.
+**On P-6 — full granular engine control:**
+
+- **14 knobs mapped to the P-6's granular parameters** — Position, Size, Density, Pitch, Spray, Reverse, Freeze, Filter Cutoff/Resonance, Attack/Decay, LFO Rate/Depth, Pan
+- **2 dynamic Ctrl knobs** — the remaining knobs adapt to whatever screen you're on (pattern control, pad mute, etc.)
+- **LED colors match the P-6's yellow accent** so the hardware feels like part of the same family
+- **Live CC sends on channel 15** (P-6 Auto channel), so every knob tweak is captured by the P-6 as automation data
+- **Preset recall** — save and recall the full 14-parameter granular state in Compa's session, then sweep back and forth with the Twister
+
+**Shared across both devices:**
+
+- **Multi-page support** — scroll through extended banks of effects and parameters with knob 4's press
+- **Auto-map on startup** — no configuration needed. Plug it in, it's mapped.
+- **Customizable slot assignments** — swap which effect is on which knob via the settings screen
+- **Clean handoff between devices** — switching focus on Compa instantly retargets the Twister, rebuilds the LED colors, and the same 16 knobs now control the other device
+
+The Twister makes live FX switching and granular performance actually readable on stage — no more menu-diving on the SP or blind knob-twiddling on the P-6.
 
 ### Chromatic MIDI Keyboards
 

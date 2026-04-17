@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 160" width="580" height="160" role="img" aria-label="COMPA">
+  <style>
+    .logo {
+      font-family: 'JetBrains Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
+      font-size: 26px;
+      font-weight: 700;
+      fill: #EB781E;
+      letter-spacing: 0.5px;
+      white-space: pre;
+    }
+    .tag {
+      font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+      font-size: 16px;
+      font-weight: 500;
+      fill: #888a92;
+      letter-spacing: 3px;
+    }
+  </style>
+  <text x="40" y="32" xml:space="preserve" class="logo">  ___ ___  __  __ ___  _   </text>
+  <text x="40" y="62" xml:space="preserve" class="logo"> / __/ _ \|  \/  | _ \/ \  </text>
+  <text x="40" y="92" xml:space="preserve" class="logo">| (_| (_) | |\/| |  _/ _ \ </text>
+  <text x="40" y="122" xml:space="preserve" class="logo"> \___\___/|_|  |_|_|/_/ \_\</text>
+  <text x="40" y="150" class="tag">SP-404 MKII + P-6 COMPANION</text>
+</svg>
