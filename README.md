@@ -195,7 +195,100 @@ Compa is designed around a single continuous flow that works across any combinat
 
 ## Screenshots
 
-> Screenshots coming soon. Compa runs at 800x480 on a 7" touchscreen with a dark theme and hardware-inspired accent colors.
+Running on a Raspberry Pi 3B with a 7" DSI touchscreen. Dark theme with per-device accent colors — orange for SP-404, yellow for P-6, red for Force.
+
+### Boot Splash
+
+<p align="center">
+  <img src="docs/screenshots/compa_splash_logo.png" alt="COMPA splash — SP + P-6 Companion" width="49%">
+  <img src="docs/screenshots/compa_splash_raredata.png" alt="by RARE DATA" width="49%">
+</p>
+
+### Main Dashboard
+
+The session screen shows every connected device side-by-side with live oscilloscopes, BPM, pattern info, and recall buffer status.
+
+<p align="center">
+  <img src="docs/screenshots/compa_session.png" alt="Session dashboard" width="100%">
+</p>
+
+### Device Workspaces
+
+Tap a device card and Compa opens a full-screen workspace with a live oscilloscope and per-device control tabs.
+
+**SP-404 MK2** — Bus FX knobs, 16-slot Twister grid, chromatic keyboard, sequencer, looper, DJ mode:
+
+<p align="center">
+  <img src="docs/screenshots/compa_workspace_SP-404MKII_control.png" alt="SP-404 Control" width="49%">
+  <img src="docs/screenshots/compa_workspace_SP-404MKII_twister.png" alt="SP-404 Twister" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/compa_workspace_SP-404MKII_keys.png" alt="SP-404 Chromatic Keyboard" width="49%">
+  <img src="docs/screenshots/compa_workspace_SP-404MKII_looper.png" alt="SP-404 Looper" width="49%">
+</p>
+
+**Roland P-6** — Granular engine control, chromatic keyboard, pattern sequencer:
+
+<p align="center">
+  <img src="docs/screenshots/compa_workspace_P-6_control.png" alt="P-6 Control" width="49%">
+  <img src="docs/screenshots/compa_workspace_P-6_keys.png" alt="P-6 Chromatic Keyboard" width="49%">
+</p>
+
+### Chromatic Keyboard (KEYS tab)
+
+Plug in any USB MIDI keyboard (Alesis V49, Arturia KeyStep, AKAI MPK, etc.) and play any pad chromatically. Visual piano with active-note highlighting, octave shift, LATCH mode, and touch-to-play on the screen.
+
+<p align="center">
+  <img src="docs/screenshots/compa_workspace_SP-404MKII_keys.png" alt="Chromatic keyboard with pad selector" width="100%">
+</p>
+
+### Recording & Samples
+
+<p align="center">
+  <img src="docs/screenshots/compa_record.png" alt="Recorder with slice dialog" width="49%">
+  <img src="docs/screenshots/compa_sample.png" alt="Sample browser" width="49%">
+</p>
+
+### Internet Radio
+
+Built-in browser for 90+ curated stations — jazz, lo-fi, hip-hop, ambient, world. Route the stream into any connected device for resampling.
+
+<p align="center">
+  <img src="docs/screenshots/compa_radio.png" alt="Radio browser" width="100%">
+</p>
+
+### Files & Network
+
+Full file manager with dual-pane peer-to-peer transfer between Compas on the same LAN.
+
+<p align="center">
+  <img src="docs/screenshots/compa_files.png" alt="File browser" width="100%">
+</p>
+
+### Kit Builder
+
+Assign samples to a 128-pad grid (4 banks × 32 pads) and export as Akai MPC (.xpm) or Ableton (.adg) drum kits.
+
+<p align="center">
+  <img src="docs/screenshots/compa_kit.png" alt="Kit builder" width="100%">
+</p>
+
+### Settings & Connectivity
+
+Per-device color picker, MIDI controller mapping, WiFi/Bluetooth config, touchscreen keyboard for password entry.
+
+<p align="center">
+  <img src="docs/screenshots/compa_settings.png" alt="Settings" width="49%">
+  <img src="docs/screenshots/compa_io.png" alt="IO & Connectivity" width="49%">
+</p>
+
+### Built-in Manual
+
+Every screen, feature, and workflow documented in the help system — searchable on-device.
+
+<p align="center">
+  <img src="docs/screenshots/compa_help.png" alt="Built-in manual" width="100%">
+</p>
 
 ---
 
