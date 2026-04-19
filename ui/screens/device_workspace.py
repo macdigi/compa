@@ -68,6 +68,11 @@ class DeviceWorkspaceScreen:
         # SP-404 chromatic workflow state
         self._sp404_chromatic_ready = False  # True after user does SHIFT+CHROMATIC
 
+        # Keep chromatic keyboard active even when leaving the KEYS tab or
+        # this workspace. When True, the user can navigate to any screen
+        # while still playing notes through a connected MIDI keyboard.
+        self._keys_persistent = False
+
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
     @property
@@ -145,12 +150,14 @@ class DeviceWorkspaceScreen:
     def on_exit(self):
         if not self.app.recorder.is_recording:
             self.app.recorder.stop_monitoring()
-        # Disable chromatic mode + release all latched notes
-        if hasattr(self.app, 'chromatic_kb'):
+        # Disable chromatic mode + release all latched notes — unless the
+        # user explicitly enabled KEEP ACTIVE so they can keep playing
+        # notes while looking at another screen.
+        if hasattr(self.app, 'chromatic_kb') and not self._keys_persistent:
             self.app.chromatic_kb.enabled = False
             self.app.chromatic_kb._all_notes_off()
-        self._latched_notes.clear()
-        self._keys_latch = False
+            self._latched_notes.clear()
+            self._keys_latch = False
 
     def _build_tabs(self):
         key = self._device_key
@@ -327,7 +334,8 @@ class DeviceWorkspaceScreen:
                             self.app.chromatic_kb.enabled = True
                             # Retarget to THIS workspace's device
                             self._retarget_keys_for_device()
-                        elif old_tab == "keys":
+                        elif old_tab == "keys" and not self._keys_persistent:
+                            # Only disable if the user hasn't marked it persistent
                             self.app.chromatic_kb.enabled = False
                             self.app.chromatic_kb._all_notes_off()
                             self._latched_notes.clear()
@@ -722,21 +730,23 @@ class DeviceWorkspaceScreen:
             surf = f_tiny.render("BPM", True, theme.TEXT_DIM)
             surface.blit(surf, (scope_rect.x + bw + 10, bpm_y))
 
-            # Transport indicator
+            # Transport indicator — measure its width so Pattern can clear it
             tx = scope_rect.x + bw + 40
             if midi.state.playing:
                 pygame.draw.polygon(surface, theme.GREEN,
                     [(tx, bpm_y - 4), (tx, bpm_y + 8), (tx + 10, bpm_y + 2)])
+                transport_w = 12  # triangle + small gap
             else:
-                surf = f_tiny.render("STOP", True, theme.TEXT_DIM)
-                surface.blit(surf, (tx, bpm_y))
+                transport_surf = f_tiny.render("STOP", True, theme.TEXT_DIM)
+                surface.blit(transport_surf, (tx, bpm_y))
+                transport_w = transport_surf.get_width()
 
-            # Pattern
+            # Pattern — positioned after transport with generous spacing
             pat = midi.state.active_pattern + 1
             pat_max = getattr(self._device_profile, "pattern_count", 0)
             if pat_max > 0:
                 surf = f_tiny.render(f"Ptn {pat}/{pat_max}", True, theme.TEXT_DIM)
-                surface.blit(surf, (tx + 30, bpm_y))
+                surface.blit(surf, (tx + transport_w + 10, bpm_y))
 
         # Border
         pygame.draw.rect(surface, (28, 28, 38), scope_rect, 1, border_radius=4)
@@ -1288,6 +1298,15 @@ class DeviceWorkspaceScreen:
             nt_surf = f_small.render(notes_text, True, self._device_color)
             surface.blit(nt_surf, (160, top + 4))
 
+        # KEEP button — if ON, keyboard keeps playing when you leave KEYS tab
+        keep_rect = pygame.Rect(theme.SCREEN_WIDTH - 365, top, 60, 24)
+        keep_bg = theme.GREEN if self._keys_persistent else theme.BUTTON_BG
+        keep_tc = theme.BG if self._keys_persistent else theme.TEXT
+        pygame.draw.rect(surface, keep_bg, keep_rect, border_radius=5)
+        surface.blit(f_tiny.render("KEEP", True, keep_tc),
+                     f_tiny.render("KEEP", True, keep_tc).get_rect(
+                         center=keep_rect.center))
+
         # LATCH button
         latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 300, top, 60, 24)
         latch_bg = theme.YELLOW if self._keys_latch else theme.BUTTON_BG
@@ -1387,6 +1406,10 @@ class DeviceWorkspaceScreen:
             line1 = "On SP: select pad > SHIFT + PAD 4 (CHROMATIC) > play keys here"
             surface.blit(f_tiny.render(line1, True, theme.TEXT_DIM),
                          (10, bottom_y))
+        elif self._device_key == "P-6":
+            line1 = "On P-6: hold PATTERN + GRANULAR > select pad > play keys here"
+            surface.blit(f_tiny.render(line1, True, theme.TEXT_DIM),
+                         (10, bottom_y))
         elif kb and kb._target_midi:
             ch_text = f"MIDI Ch {kb._target_channel + 1}"
             if kb.enabled:
@@ -1407,6 +1430,12 @@ class DeviceWorkspaceScreen:
         top = self._controls_top + 2
 
         # ── Row 1 controls ───────────────────────────────────────────
+
+        # KEEP button
+        keep_rect = pygame.Rect(theme.SCREEN_WIDTH - 365, top, 60, 24)
+        if keep_rect.collidepoint(mx, my):
+            self._keys_persistent = not self._keys_persistent
+            return
 
         # LATCH button
         latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 300, top, 60, 24)
