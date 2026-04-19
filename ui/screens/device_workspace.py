@@ -1482,6 +1482,10 @@ class DeviceWorkspaceScreen:
                             bank_btn_w, pad_row_h)
             if r.collidepoint(mx, my):
                 self._keys_bank = bi
+                # Sync to app-level state so external MIDI controllers
+                # (Spectra etc) that use pad.trigger.* hit the right bank
+                if hasattr(self.app, "current_bank"):
+                    self.app.current_bank[self._device_key] = bi
                 return
 
         # Pad buttons

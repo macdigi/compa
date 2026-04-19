@@ -1,0 +1,22 @@
+{
+  "name": "Arturia KeyStep 37",
+  "port_match": ["KeyStep 37", "KeyStep-37", "KeyStep37"],
+  "description": "37-key keyboard with 8 touch strips and transport. Keys play chromatically, strips → Twister knobs 1-8, transport → Compa master clock.",
+  "mappings": [
+    { "source": { "kind": "note_range", "channel": 0, "low": 0, "high": 127 },
+      "action": "chromatic.note", "label": "Keys (chromatic)" },
+
+    { "source": { "kind": "cc", "channel": 0, "index": 1 },
+      "action": "twister.turn.1", "label": "Mod wheel" },
+
+    { "source": { "kind": "pitch_bend", "channel": 0, "index": 0 },
+      "action": "twister.turn.2", "label": "Pitch bend" },
+
+    { "source": { "kind": "cc", "channel": 0, "index": 116 },
+      "action": "transport.play", "label": "Play" },
+    { "source": { "kind": "cc", "channel": 0, "index": 117 },
+      "action": "transport.stop", "label": "Stop" },
+    { "source": { "kind": "cc", "channel": 0, "index": 118 },
+      "action": "transport.record", "label": "Record" }
+  ]
+}

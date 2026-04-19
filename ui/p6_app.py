@@ -28,6 +28,7 @@ from ui.screens.transfer_screen import TransferScreen
 from ui.screens.file_browser_screen import FileBrowserScreen
 from ui.screens.device_workspace import DeviceWorkspaceScreen
 from ui.screens.io_settings_screen import IOSettingsScreen
+from ui.screens.controller_screen import ControllerScreen
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
@@ -43,6 +44,7 @@ from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
 from engine.network_manager import WifiManager, BluetoothManager
 from engine.chromatic_keyboard import ChromaticKeyboard
+from engine.controller_mapper import ControllerMapper
 from ui.video_recorder import VideoRecorder, DemoScheduler, build_demo_sequence
 from engine.p6_librarian import P6Librarian
 from engine.sp404_librarian import SP404Librarian
@@ -269,6 +271,25 @@ class P6App:
         # ── Chromatic keyboard (any generic USB MIDI keyboard) ──────
         self.chromatic_kb = ChromaticKeyboard()
 
+        # ── Controller mapper (generic MIDI controller profiles) ────
+        # Loads JSON profiles from setup/midi_profiles/ and handles
+        # user overrides in sessions/controller_overrides/. Claims any
+        # port matching a profile before ChromaticKeyboard sees it.
+        self.controller_mapper = ControllerMapper(
+            app=self,
+            profiles_dir=os.path.join(PROJECT_ROOT, "setup", "midi_profiles"),
+            overrides_dir=os.path.join(PROJECT_ROOT, "sessions",
+                                        "controller_overrides"),
+        )
+        self.controller_mapper.load_profiles()
+        # ChromaticKeyboard asks the mapper which ports are claimed so
+        # it doesn't try to grab the same port.
+        self.chromatic_kb._controller_mapper = self.controller_mapper
+
+        # Per-device current bank — used by pad.trigger.* actions and
+        # kept in sync with the KEYS tab pad selector.
+        self.current_bank: dict[str, int] = {}
+
         # ── Video recorder (live screen capture to MP4) ─────────────
         # Captures to MJPEG in RAM, re-encodes to H.264 on stop.
         # Pi 3B can handle MJPEG at the full UI frame rate.
@@ -345,6 +366,7 @@ class P6App:
             "device_workspace": DeviceWorkspaceScreen(self),
             "files": FileBrowserScreen(self),
             "io": IOSettingsScreen(self),
+            "controller": ControllerScreen(self),
         }
         self.current_screen_name = "session"
 
@@ -492,6 +514,17 @@ class P6App:
                 print("Spectra Mapper: detected but connect failed")
         else:
             print("Spectra Mapper: not detected")
+
+        # Controller mapper — starts scanning before ChromaticKeyboard so
+        # profiled controllers get claimed first and the keyboard module
+        # only sees unprofiled devices.
+        self.controller_mapper.start()
+        print(f"ControllerMapper: {len(self.controller_mapper._profiles)} "
+              f"profiles loaded", flush=True)
+
+        # Initialize current_bank for each connected device
+        for short_name in self.device_manager.connected.keys():
+            self.current_bank.setdefault(short_name, 0)
 
         # Chromatic keyboard — auto-detect any generic MIDI keyboard
         self.chromatic_kb.start()
@@ -1133,6 +1166,12 @@ class P6App:
 
         # Retarget chromatic keyboard to the new focused device
         self._retarget_chromatic_keyboard()
+
+        # Notify controller mapper so knob/pad actions retarget
+        if hasattr(self, "controller_mapper"):
+            self.controller_mapper.on_focus_changed(short_name)
+            # Make sure the new device has a current_bank entry
+            self.current_bank.setdefault(short_name, 0)
 
         # Rewire MIDI router to focused device
         if self.atom_sq and self.p6:
@@ -1857,6 +1896,12 @@ class P6App:
         # Finalize any in-progress video recording first so the MP4 is valid
         if getattr(self, 'video_recorder', None) and self.video_recorder.recording:
             self.video_recorder.stop()
+        # Stop the controller mapper + chromatic keyboard threads cleanly
+        if hasattr(self, "controller_mapper"):
+            try:
+                self.controller_mapper.stop()
+            except Exception:
+                pass
         self.recorder.stop_monitor_output()
         if self.audio_route and self.audio_route.is_active:
             self.audio_route.stop()

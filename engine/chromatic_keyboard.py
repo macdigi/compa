@@ -167,6 +167,21 @@ class ChromaticKeyboard:
         for hint in EXCLUDED_PORT_HINTS:
             if hint.lower() in lower:
                 return True
+        # Anything already claimed by the controller mapper — or that
+        # WOULD be claimed by a loaded profile on the next scan — is
+        # off-limits. This prevents timing races where the chromatic
+        # keyboard grabs a profiled controller in the 2s window before
+        # the mapper's scan runs.
+        mapper = getattr(self, "_controller_mapper", None)
+        if mapper is not None:
+            try:
+                for claimed in mapper.claimed_port_hints():
+                    if claimed.lower() == lower:
+                        return True
+                if mapper.port_matches_any_profile(port_name):
+                    return True
+            except Exception:
+                pass
         return False
 
     def _scan_and_connect(self) -> bool:

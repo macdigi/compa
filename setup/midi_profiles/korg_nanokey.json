@@ -1,0 +1,9 @@
+{
+  "name": "Korg nanoKEY",
+  "port_match": ["nanoKEY", "nano KEY"],
+  "description": "Slim 25-key USB keyboard. Keys play chromatically through the focused device. No pads, no knobs.",
+  "mappings": [
+    { "source": { "kind": "note_range", "channel": 0, "low": 0, "high": 127 },
+      "action": "chromatic.note", "label": "Keys (chromatic)" }
+  ]
+}

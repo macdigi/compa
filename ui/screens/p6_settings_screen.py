@@ -286,10 +286,30 @@ class P6SettingsScreen:
 
         # MIDI Controller Mapping
         self._rows.append({"label": "", "type": "section", "value": "MIDI CONTROLLER"})
+
+        # New unified mapper — profile-based + MIDI Learn
+        cm = getattr(self.app, "controller_mapper", None)
+        if cm is not None:
+            connected = cm.connected_controllers()
+            if connected:
+                names = ", ".join(b.profile.name for b in connected)[:50]
+                status = f"{len(connected)} connected: {names}"
+            else:
+                status = f"{len(cm._profiles)} profiles · plug in to use"
+            self._rows.append({
+                "label": "  Controller mappings", "type": "button",
+                "btn_label": "CONFIGURE",
+                "action": lambda: self.app.switch_screen("controller"),
+                "value": status,
+            })
+
+        # Legacy MidiMapper (kept for backward compat with existing Twister
+        # auto-map flow; will be retired once ControllerMapper covers all
+        # previous use cases)
         mapper = self.app.midi_mapper
         if mapper.is_running:
             self._rows.append({
-                "label": f"  {mapper.controller_name}", "type": "button",
+                "label": f"  Legacy: {mapper.controller_name}", "type": "button",
                 "btn_label": "STOP",
                 "action": self._stop_mapper,
             })
