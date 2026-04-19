@@ -290,10 +290,12 @@ class P6SettingsScreen:
         # New unified mapper — profile-based + MIDI Learn
         cm = getattr(self.app, "controller_mapper", None)
         if cm is not None:
-            connected = cm.connected_controllers()
-            if connected:
-                names = ", ".join(b.profile.name for b in connected)[:50]
-                status = f"{len(connected)} connected: {names}"
+            # Local var name — NOT `connected` — to avoid shadowing the
+            # outer `connected` dict used by audio routing/clock relay.
+            cm_bindings = cm.connected_controllers()
+            if cm_bindings:
+                names = ", ".join(b.profile.name for b in cm_bindings)[:50]
+                status = f"{len(cm_bindings)} connected: {names}"
             else:
                 status = f"{len(cm._profiles)} profiles · plug in to use"
             self._rows.append({
