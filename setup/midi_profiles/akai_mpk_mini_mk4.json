@@ -1,6 +1,7 @@
 {
   "name": "AKAI MPK Mini MK4",
-  "port_match": ["MPK Mini MK4", "MPK Mini Mk 4", "MPK Mini mk4"],
+  "port_match": ["MPK mini IV", "MPK Mini MK4", "MPK Mini Mk 4",
+                 "MPK Mini mk4", "MPK mini MK IV", "MPK Mini MK IV"],
   "description": "25-key mini keyboard — keys play chromatically, 8 pads trigger Compa pads, 8 knobs control Twister slots 1-8.",
   "mappings": [
     { "source": { "kind": "note_range", "channel": 0, "low": 0, "high": 127 },
