@@ -129,9 +129,14 @@ class VideoRecorder:
             # Stage 1: raw RGB → MJPEG inside a Matroska container.
             # MJPEG per-frame JPEG encoding is fast enough on Pi 3B
             # to hit full 30 fps without throttling.
+            # stderr → DEVNULL (not PIPE) so we don't deadlock when
+            # ffmpeg's progress/warning output fills the pipe buffer.
+            # Errors show up in the journal via ffmpeg's own logging.
+            log_path = self._mjpeg_tmp + ".ffmpeg.log"
+            self._ffmpeg_log = open(log_path, "w")
             self._proc = subprocess.Popen(
                 [
-                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
                     "-f", "rawvideo",
                     "-pix_fmt", "rgb24",
                     "-s", f"{self._size[0]}x{self._size[1]}",
@@ -143,8 +148,8 @@ class VideoRecorder:
                     self._mjpeg_tmp,
                 ],
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stdout=self._ffmpeg_log,
+                stderr=subprocess.STDOUT,
             )
             self._frames = 0
             self._start_time = time.monotonic()
@@ -204,11 +209,19 @@ class VideoRecorder:
         except Exception as e:
             log.error("stop error: %s", e)
 
-        if self._proc.stderr:
+        # Close the ffmpeg log file + read anything useful it wrote
+        if hasattr(self, "_ffmpeg_log") and self._ffmpeg_log:
             try:
-                err = self._proc.stderr.read().decode(errors="ignore").strip()
-                if err:
-                    log.info("mjpeg ffmpeg stderr: %s", err[:500])
+                self._ffmpeg_log.close()
+            except Exception:
+                pass
+        log_path = self._mjpeg_tmp + ".ffmpeg.log"
+        if os.path.exists(log_path):
+            try:
+                with open(log_path) as f:
+                    log_content = f.read().strip()
+                if log_content:
+                    print(f"ffmpeg log: {log_content[:500]}", flush=True)
             except Exception:
                 pass
 
