@@ -17,6 +17,7 @@ Trigger files (checked each _update() tick):
 """
 
 import logging
+import datetime
 import os
 import subprocess
 import time
@@ -26,14 +27,43 @@ import pygame
 
 log = logging.getLogger(__name__)
 
-OUTPUT_PATH = "/tmp/compa_video.mp4"
+# Default output directory — persistent, survives reboots, and is a
+# Samba share so the user can pull videos directly from their Mac.
+DEFAULT_VIDEO_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "videos",
+)
+
+
+def default_output_path() -> str:
+    """Generate a timestamped filename inside the videos directory.
+
+    Ensures the directory exists and returns a path like
+    ~/compa/videos/compa_20260420_143205.mp4 so multiple recordings
+    never overwrite each other.
+    """
+    os.makedirs(DEFAULT_VIDEO_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(DEFAULT_VIDEO_DIR, f"compa_{ts}.mp4")
+
+
+def latest_video_path() -> Optional[str]:
+    """Return the most recent compa_*.mp4 file, or None if none exist."""
+    if not os.path.isdir(DEFAULT_VIDEO_DIR):
+        return None
+    candidates = [f for f in os.listdir(DEFAULT_VIDEO_DIR)
+                  if f.startswith("compa_") and f.endswith(".mp4")]
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return os.path.join(DEFAULT_VIDEO_DIR, candidates[0])
 
 
 class VideoRecorder:
     """Pipes pygame surface frames into a live-encoding ffmpeg process."""
 
     def __init__(self, screen_size: tuple[int, int], fps: int = 30,
-                 output_path: str = OUTPUT_PATH):
+                 output_path: Optional[str] = None):
         """Two-stage pipeline: capture to MJPEG, re-encode to H.264.
 
         Pi 3B's H.264 encoder tops out around 8-10 fps at 1024x600,
@@ -47,11 +77,18 @@ class VideoRecorder:
 
         The MJPEG intermediate is written to /dev/shm (tmpfs) so no
         SD card wear, then deleted after re-encoding.
+
+        If output_path is None, each call to start() generates a new
+        timestamped filename under DEFAULT_VIDEO_DIR so recordings
+        never overwrite each other.
         """
         self._size = screen_size
         self._fps = fps
         self._frame_interval = 1.0 / fps
-        self._output = output_path
+        # None = pick a fresh timestamped path on each start().
+        # Caller can also pass a fixed path to override.
+        self._fixed_output = output_path
+        self._output: Optional[str] = output_path
         self._mjpeg_tmp = "/dev/shm/compa_capture.mkv"
         self._proc: Optional[subprocess.Popen] = None
         self._frames = 0
@@ -77,9 +114,15 @@ class VideoRecorder:
         if self._proc is not None:
             return True
         try:
-            # Clean up any leftover temp or output files
-            if os.path.exists(self._output):
-                os.remove(self._output)
+            # Pick a fresh timestamped path each time unless the caller
+            # pinned a specific output path.
+            if self._fixed_output:
+                self._output = self._fixed_output
+                if os.path.exists(self._output):
+                    os.remove(self._output)
+            else:
+                self._output = default_output_path()
+            # Clean up any leftover MJPEG temp
             if os.path.exists(self._mjpeg_tmp):
                 os.remove(self._mjpeg_tmp)
 

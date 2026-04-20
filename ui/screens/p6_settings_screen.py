@@ -493,12 +493,13 @@ class P6SettingsScreen:
                     "value": status,
                 })
             else:
-                last_video_path = "/tmp/compa_video.mp4"
-                if os.path.exists(last_video_path):
-                    size_mb = os.path.getsize(last_video_path) / (1024 * 1024)
-                    status = f"Last: /tmp/compa_video.mp4 ({size_mb:.1f} MB)"
+                from ui.video_recorder import latest_video_path
+                latest = latest_video_path()
+                if latest:
+                    size_mb = os.path.getsize(latest) / (1024 * 1024)
+                    status = f"Last: {os.path.basename(latest)} ({size_mb:.1f} MB)"
                 else:
-                    status = "MP4 saved to /tmp/compa_video.mp4"
+                    status = "Saved to ~/compa/videos/"
                 self._rows.append({
                     "label": "  Record screen", "type": "button",
                     "btn_label": "RECORD",
