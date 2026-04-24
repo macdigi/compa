@@ -1,0 +1,5 @@
+# Ableton Push 2 — grant plugdev group rw so pyusb can open interface 0
+# (the vendor-specific display endpoint) without root. Kernel continues
+# to own interfaces 1 and 2 (USB audio control + MIDI streaming), which
+# is what we want.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2982", ATTR{idProduct}=="1967", MODE="0660", GROUP="plugdev"

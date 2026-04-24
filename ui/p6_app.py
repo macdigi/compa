@@ -41,6 +41,12 @@ from engine.twister_genius import TwisterGenius
 from engine.spectra_mapper import SpectraMapper
 from engine.push2 import Push2, find_push2_ports
 from engine.controller_actions import dispatch as _dispatch_action
+try:
+    from engine.push2_display import Push2Display
+    from ui.push2_render import Push2Renderer
+except Exception as _push2_disp_err:
+    Push2Display = None
+    Push2Renderer = None
 from engine.compa_link import CompaServer, CompaBrowser
 from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
@@ -238,6 +244,8 @@ class P6App:
         # ── MIDI devices (init before screens so state objects exist) ──
         self.atom_sq: AtomSQ | None = None
         self.push2: Push2 | None = None
+        self.push2_display = None
+        self.push2_renderer = None
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -462,6 +470,18 @@ class P6App:
                 print(f"Push 2 connected (User={got_user}, Live={got_live})")
         except Exception as e:
             print(f"Push 2 init failed: {e}")
+
+        # Push 2 display (Phase 2: vendor-specific USB bulk framebuffer)
+        if self.push2 is not None and Push2Display is not None:
+            try:
+                self.push2_display = Push2Display()
+                self.push2_renderer = Push2Renderer(self, self.push2_display)
+                self.push2_renderer.start()
+                print("Push 2 display active")
+            except Exception as e:
+                print(f"Push 2 display init failed: {e}")
+                self.push2_display = None
+                self.push2_renderer = None
 
         # Connect MIDI for ALL detected devices
         for short_name, profile in self.device_manager.connected.items():
@@ -1951,6 +1971,16 @@ class P6App:
             pass  # Router doesn't need shutdown
         if self.atom_sq:
             self.atom_sq.shutdown()
+        if self.push2_renderer:
+            try:
+                self.push2_renderer.shutdown()
+            except Exception:
+                pass
+        if self.push2_display:
+            try:
+                self.push2_display.close()
+            except Exception:
+                pass
         if self.push2:
             try:
                 self.push2.shutdown()
