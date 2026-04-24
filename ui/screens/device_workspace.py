@@ -115,7 +115,10 @@ class DeviceWorkspaceScreen:
             # Already focused — but Twister/recorder may not be retargeted yet
             # (happens on first boot when default focus matches dev_key)
             focused_midi = self.app._midi_connections.get(dev_key)
-            if self.app.twister.connected and focused_midi:
+            if focused_midi:
+                # Always update the Twister's target + rebuild pages so the
+                # P-6 4x4 control layout renders regardless of whether the
+                # Twister hardware is physically connected.
                 self.app.twister.set_target(focused_midi)
                 self.app.twister._rebuild_pages()
 
@@ -433,9 +436,11 @@ class DeviceWorkspaceScreen:
             return
 
     def _handle_p6_clicks(self, mx, my):
-        # Twister page selector (vertical column, right side)
+        # Twister page selector (vertical column, right side) — clickable
+        # via touchscreen regardless of whether the Twister hardware is
+        # connected.
         tw = self.app.twister
-        if tw.connected and tw.page_count > 1:
+        if tw.page_count > 1:
             fx_y = self._controls_top + 2
             n_pages = tw.page_count
             pg_w = 40
@@ -842,7 +847,7 @@ class DeviceWorkspaceScreen:
         surface.blit(surf, (10, fx_y + 3))
 
         # ── Page selector (vertical column, right side) ──────────────
-        if tw.connected and tw.page_count > 1:
+        if tw.page_count > 1:
             n_pages = tw.page_count
             pg_w = 40
             pg_h = min(36, (self._controls_h - 40) // n_pages - 3)
@@ -860,7 +865,9 @@ class DeviceWorkspaceScreen:
                 surface.blit(surf, surf.get_rect(center=r.center))
 
         # ── 4x4 Parameter knobs (from Twister's current P-6 page) ────
-        if tw.connected and tw.is_p6_mode and tw.slots:
+        # Layout is always available when targeting the P-6; the Twister
+        # hardware just decorates page switching / live knob feedback.
+        if tw.is_p6_mode and tw.slots:
             slots = tw.slots
             n = min(16, len(slots))
             live = self.app.live_cc.get(14, {})  # P-6 auto channel (ch15, idx 14)
