@@ -68,6 +68,7 @@ COLOR_RED = 127
 COLOR_GREEN = 126
 COLOR_BLUE = 125
 COLOR_YELLOW = 8
+COLOR_ACCENT = 127   # High-contrast accent used for press-flash against white base
 
 # Bank colors — using 4 clearly distinct palette slots
 BANK_COLORS = [COLOR_RED, COLOR_BLUE, COLOR_GREEN, COLOR_YELLOW]
@@ -135,6 +136,10 @@ class Push2:
         self.on_pad: Optional[Callable[[int, int], None]] = None
         self.on_button: Optional[Callable[[str, int], None]] = None
 
+        # Per-pad base color. Press-flash sends a transient color without
+        # touching this; note-off restores the base so kit colors persist.
+        self._base_colors: list[int] = [COLOR_OFF] * 64
+
         self._stop = threading.Event()
         self._threads = []
 
@@ -177,12 +182,28 @@ class Push2:
             except Exception as e:
                 log.debug("live_out send failed: %s", e)
 
-    def set_pad_color(self, pad_idx: int, color: int) -> None:
+    def _send_pad_raw(self, pad_idx: int, color: int) -> None:
+        """Send a pad color WITHOUT updating the remembered base. Used
+        for transient press-flashes so the underlying kit color stays."""
         if not (0 <= pad_idx < 64):
             return
         note = PAD_NOTE_LO + pad_idx
         color = max(0, min(127, color))
         self._send_both([0x90 | PAD_CHANNEL, note, color])
+
+    def set_pad_color(self, pad_idx: int, color: int) -> None:
+        """Set pad color and remember it as the base (the color a pad
+        returns to after a press-flash)."""
+        if not (0 <= pad_idx < 64):
+            return
+        color = max(0, min(127, color))
+        self._base_colors[pad_idx] = color
+        self._send_pad_raw(pad_idx, color)
+
+    def restore_pad(self, pad_idx: int) -> None:
+        """Re-send the remembered base color for a pad."""
+        if 0 <= pad_idx < 64:
+            self._send_pad_raw(pad_idx, self._base_colors[pad_idx])
 
     def clear_all_pads(self) -> None:
         for i in range(64):
@@ -204,8 +225,9 @@ class Push2:
             color = BANK_COLORS[bank] if loaded else BANK_COLORS_DIM[bank]
             self.set_pad_color(i, color)
 
-    def flash_pad(self, pad_idx: int, color: int = COLOR_WHITE_BRIGHT) -> None:
-        self.set_pad_color(pad_idx, color)
+    def flash_pad(self, pad_idx: int, color: int = COLOR_ACCENT) -> None:
+        """Transient flash that does not update the base color."""
+        self._send_pad_raw(pad_idx, color)
 
     # ── Input polling ───────────────────────────────────────────────
 
@@ -224,19 +246,24 @@ class Push2:
         status = data[0] & 0xF0
         channel = data[0] & 0x0F
 
-        if status == 0x90 and len(data) >= 3 and channel == PAD_CHANNEL:
-            note, velocity = data[1], data[2]
+        # Pad note on/off — auto-flash on press, auto-restore on release.
+        if len(data) >= 3 and channel == PAD_CHANNEL and status in (0x90, 0x80):
+            note = data[1]
+            velocity = data[2]
             if PAD_NOTE_LO <= note <= PAD_NOTE_HI:
                 idx = note - PAD_NOTE_LO
-                if self.on_pad is not None and velocity > 0:
-                    try:
-                        self.on_pad(idx, velocity)
-                    except Exception as e:
-                        log.warning("Push 2 pad callback failed: %s", e)
+                is_press = (status == 0x90 and velocity > 0)
+                if is_press:
+                    self._send_pad_raw(idx, COLOR_ACCENT)
+                    if self.on_pad is not None:
+                        try:
+                            self.on_pad(idx, velocity)
+                        except Exception as e:
+                            log.warning("Push 2 pad callback failed: %s", e)
+                else:
+                    # Note-off OR note-on velocity 0 — restore base.
+                    self.restore_pad(idx)
             return
-
-        if status == 0x80 and len(data) >= 3 and channel == PAD_CHANNEL:
-            return  # note-off ignored
 
         if status == 0xB0 and len(data) >= 3 and channel == PAD_CHANNEL:
             cc, value = data[1], data[2]

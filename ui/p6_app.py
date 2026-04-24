@@ -1013,12 +1013,10 @@ class P6App:
     def _on_push2_pad(self, idx: int, velocity: int):
         """Push 2 pad hit. Phase 1: bottom 2 rows (0-15) trigger Compa
         pads 1-16 in the current bank. Rows 3-8 reserved for Phase 3
-        bank-explicit triggering (B/C/D)."""
+        bank-explicit triggering (B/C/D). Press-flash and release-restore
+        are handled inside the Push 2 driver itself."""
         if 0 <= idx < 16:
             _dispatch_action(f"pad.trigger.{idx + 1}", velocity, self)
-            if self.push2:
-                from engine.push2 import COLOR_WHITE
-                self.push2.flash_pad(idx, COLOR_WHITE)
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
