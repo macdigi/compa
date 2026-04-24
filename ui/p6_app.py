@@ -1058,6 +1058,14 @@ class P6App:
             self._push2_cycle_page(-1)
         elif name == "page_right":
             self._push2_cycle_page(+1)
+        elif name.startswith("top_select_"):
+            # Top-row select buttons 1-N jump directly to page N-1.
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1
+            except Exception:
+                return
+            if 0 <= idx < self.push2_page_count():
+                self.push2_page = idx
 
     def push2_slot_window(self) -> list:
         """Return the 8 Twister slots currently visible on the Push 2,

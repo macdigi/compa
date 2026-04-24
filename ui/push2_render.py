@@ -89,6 +89,12 @@ class Push2Renderer:
         self._smooth_l = 0.0
         self._smooth_r = 0.0
 
+        # Last button-LED state we sent. Initialized to a sentinel so
+        # the first pass through _update_button_leds always paints.
+        self._last_play_led = -1
+        self._last_record_led = -1
+        self._last_topselect_leds = [-1] * 8
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -113,6 +119,7 @@ class Push2Renderer:
             try:
                 self._render_frame(self.surface)
                 self.display.send_surface(self.surface)
+                self._update_button_leds()
             except Exception as e:
                 log.warning("Push 2 frame failed: %s", e)
                 time.sleep(0.3)
@@ -120,6 +127,49 @@ class Push2Renderer:
             sleep_for = FRAME_INTERVAL - elapsed
             if sleep_for > 0:
                 time.sleep(sleep_for)
+
+    def _update_button_leds(self) -> None:
+        """Push state-driven LED updates to the Push 2. Only sends MIDI
+        when a value actually changed so we don't flood the bus."""
+        push2 = getattr(self.app, "push2", None)
+        if push2 is None:
+            return
+
+        # Transport: green Play when playing, dim white when idle;
+        # red Record when recording, dim white when idle.
+        playing = self._safe_playing()
+        recording = False
+        try:
+            recording = bool(self.app.recorder.is_recording)
+        except Exception:
+            pass
+        play_color = 126 if playing else 3
+        rec_color = 127 if recording else 3
+
+        if self._last_play_led != play_color:
+            push2.set_button("play", play_color)
+            self._last_play_led = play_color
+        if self._last_record_led != rec_color:
+            push2.set_button("record", rec_color)
+            self._last_record_led = rec_color
+
+        # Top select buttons 1-N act as direct page jumps — current page
+        # lit bright white, other available pages lit dim, unused slots off.
+        try:
+            current = self.app.push2_page
+            count = self.app.push2_page_count()
+        except Exception:
+            current, count = 0, 1
+        for i in range(8):
+            if i >= count:
+                color = 0
+            elif i == current:
+                color = 122   # bright white — active page
+            else:
+                color = 8     # dim amber — available page
+            if self._last_topselect_leds[i] != color:
+                push2.set_button(f"top_select_{i + 1}", color)
+                self._last_topselect_leds[i] = color
 
     # ── Scene composition ─────────────────────────────────────────
 
