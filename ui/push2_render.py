@@ -172,6 +172,17 @@ class Push2Renderer:
         lw = self._logo_surface.get_width()
         surf.blit(self._logo_surface, (SURF_W - lw - 10, 4))
 
+        # ── Page indicator (tiny, under the device pill) ──────────
+        try:
+            page = self.app.push2_page
+            page_count = self.app.push2_page_count()
+        except Exception:
+            page, page_count = 0, 1
+        if page_count > 1:
+            txt = f"PAGE {page + 1}/{page_count}"
+            psurf = self._font_tiny.render(txt, True, DIM)
+            surf.blit(psurf, (14, 32))
+
     def _load_logo_png(self, target_h: int) -> pygame.Surface:
         """Load docs/logo/compa_logo_ascii_only.png and scale it to
         `target_h` pixels tall, preserving aspect ratio. Returns a
@@ -284,20 +295,40 @@ class Push2Renderer:
     # ── Encoder label row ─────────────────────────────────────────
 
     def _draw_encoder_labels(self, surf, top, height):
-        labels = self._encoder_labels()
+        slots = self._encoder_slots()
         dev_color = self._device_color()
         col_w = SURF_W // 8
-        for i, label in enumerate(labels):
+        for i, slot in enumerate(slots):
             x = i * col_w
-            rect = pygame.Rect(x + 6, top + 2, col_w - 12, height - 6)
-            # Subtle background so labels read as 8 slots, not a text row.
+            rect = pygame.Rect(x + 6, top + 2, col_w - 12, height - 4)
+            # Outer slot card.
             pygame.draw.rect(surf, (14, 14, 20), rect, border_radius=4)
-            # Device-color tick on the left edge of each slot
+            # Device-color tick on the left edge of each slot.
             pygame.draw.rect(surf, dev_color,
                              (rect.x, rect.y, 2, rect.height),
                              border_radius=1)
-            lbl_surf = self._font_med.render(label[:11], True, TEXT)
-            surf.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
+
+            label = (slot.get("name") or "—")[:11]
+            value = slot.get("value")
+
+            # Ableton-Push-style value bar — fills from left behind
+            # the label as the CC rises. Uses a dimmed device color so
+            # the label text still reads clearly on top.
+            if value is not None:
+                fill_w = int((rect.width - 4) * (max(0, min(127, value)) / 127.0))
+                if fill_w > 0:
+                    fill_col = (dev_color[0] // 3, dev_color[1] // 3, dev_color[2] // 3)
+                    pygame.draw.rect(surf, fill_col,
+                                     (rect.x + 2, rect.y + 2, fill_w, rect.height - 4),
+                                     border_radius=3)
+
+            lbl_surf = self._font_small.render(label, True, TEXT)
+            surf.blit(lbl_surf, (rect.x + 6, rect.y + 2))
+
+            if value is not None:
+                val_surf = self._font_tiny.render(f"{int(value)}", True, dev_color)
+                surf.blit(val_surf, (rect.right - val_surf.get_width() - 4,
+                                     rect.bottom - val_surf.get_height() - 2))
 
     # ── Data accessors (all fail-safe: render loop must never raise) ─
 
@@ -342,8 +373,25 @@ class Push2Renderer:
         except Exception:
             return None
 
-    def _encoder_labels(self) -> list[str]:
-        tw = getattr(self.app, "twister", None)
-        if tw and getattr(tw, "slots", None):
-            return [str(getattr(s, "name", "—"))[:11] for s in tw.slots[:8]]
-        return ["—"] * 8
+    def _encoder_slots(self) -> list[dict]:
+        """Return 8 dicts describing each encoder slot: {name, value}.
+        Uses app.push2_slot_window() so encoder labels track the
+        current Push 2 page (cycled via page-left / page-right)."""
+        try:
+            live = self.app.live_cc.get(14, {}) or {}
+        except Exception:
+            live = {}
+        try:
+            slots = self.app.push2_slot_window() or []
+        except Exception:
+            slots = []
+        out = []
+        for s in slots[:8]:
+            cc = getattr(s, "_p6_cc", None)
+            out.append({
+                "name": str(getattr(s, "name", "—")),
+                "value": live.get(cc) if cc is not None else None,
+            })
+        while len(out) < 8:
+            out.append({"name": "—", "value": None})
+        return out

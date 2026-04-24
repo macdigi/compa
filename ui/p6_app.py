@@ -246,6 +246,9 @@ class P6App:
         self.push2: Push2 | None = None
         self.push2_display = None
         self.push2_renderer = None
+        # Which 8-slot window of Twister's flattened slots the Push 2
+        # is currently showing. Wraps 0..push2_page_count()-1.
+        self.push2_page: int = 0
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -469,6 +472,8 @@ class P6App:
                 got_user = p2_ports.get("user_in") is not None
                 got_live = p2_ports.get("live_in") is not None
                 print(f"Push 2 connected (User={got_user}, Live={got_live})")
+                # Light the page buttons so the user can see they're live.
+                self._push2_paint_page_buttons()
         except Exception as e:
             print(f"Push 2 init failed: {e}")
 
@@ -1049,25 +1054,66 @@ class P6App:
             _dispatch_action("transport.record", value, self)
         elif name == "stop_clip":
             _dispatch_action("transport.stop", value, self)
+        elif name == "page_left":
+            self._push2_cycle_page(-1)
+        elif name == "page_right":
+            self._push2_cycle_page(+1)
+
+    def push2_slot_window(self) -> list:
+        """Return the 8 Twister slots currently visible on the Push 2,
+        taking self.push2_page into account. Empty list when there's
+        nothing to show yet."""
+        tw = getattr(self, "twister", None)
+        pages = getattr(tw, "_pages", None) if tw else None
+        if not pages:
+            return []
+        flat = [s for page in pages for s in page]
+        if not flat:
+            return []
+        total = len(flat)
+        page_count = max(1, (total + 7) // 8)
+        self.push2_page = max(0, min(self.push2_page, page_count - 1))
+        start = self.push2_page * 8
+        return flat[start:start + 8]
+
+    def push2_page_count(self) -> int:
+        tw = getattr(self, "twister", None)
+        pages = getattr(tw, "_pages", None) if tw else None
+        if not pages:
+            return 1
+        flat_len = sum(len(p) for p in pages)
+        return max(1, (flat_len + 7) // 8)
+
+    def _push2_cycle_page(self, delta: int):
+        count = self.push2_page_count()
+        self.push2_page = (self.push2_page + delta) % count
+        self._push2_paint_page_buttons()
+
+    def _push2_paint_page_buttons(self):
+        """Light page-left / page-right buttons dim when a move in
+        that direction is available (we always loop, so both are on)."""
+        if not self.push2:
+            return
+        count = self.push2_page_count()
+        # Always dim when only one page, brighter when there are more.
+        color = 22 if count > 1 else 3   # 22 = muted cyan-ish, 3 = very dim
+        try:
+            self.push2.set_button("page_left", color)
+            self.push2.set_button("page_right", color)
+        except Exception:
+            pass
 
     def _on_push2_encoder(self, idx: int, delta: int):
-        """Push 2 performance encoder turn. Mirrors whichever parameter
-        the matching label shows (pulled from Twister's current page
-        slots, which exist even when the Twister hardware is absent).
-
-        Maps each of encoders 0-7 to the Twister slot at the same
-        index and nudges that slot's P-6 CC by the turn delta."""
-        tw = getattr(self, "twister", None)
-        if not tw or not getattr(tw, "slots", None):
+        """Push 2 performance encoder turn. Adjusts the P-6 CC for the
+        slot at the current page's offset."""
+        slots = self.push2_slot_window()
+        if idx >= len(slots):
             return
-        if idx >= len(tw.slots):
-            return
-        slot = tw.slots[idx]
+        slot = slots[idx]
         cc = getattr(slot, "_p6_cc", None)
         if cc is None:
             return
-        # P-6 auto channel is ch15 (0-indexed = 14) per engine.twister_genius.
-        ch = 14
+        ch = 14  # P-6 auto channel (ch15 1-indexed)
         current = self.live_cc.get(ch, {}).get(cc, 64)
         new_val = max(0, min(127, current + delta))
         if new_val == current:
@@ -1075,11 +1121,9 @@ class P6App:
         try:
             if self.p6:
                 self.p6.send_cc(cc, new_val, channel=ch)
-            # Echo into live_cc immediately so the next encoder tick
-            # reads the new value instead of racing the P-6's MIDI echo.
             self.live_cc.setdefault(ch, {})[cc] = new_val
-        except Exception as e:
-            log.debug("Push 2 encoder dispatch failed: %s", e) if False else None
+        except Exception:
+            pass
 
     # ── Transport callbacks ──────────────────────────────────────────
 

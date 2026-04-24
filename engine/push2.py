@@ -43,20 +43,58 @@ PAD_NOTE_HI = 99
 PAD_CHANNEL = 0  # ch1 in 1-indexed
 
 _BUTTON_CC = {
+    # Transport
     85: "play",
     86: "record",
     3: "tap_tempo",
     9: "metronome",
+    29: "stop_clip",
+    # Modifier / mode
     49: "shift",
     48: "select",
+    88: "duplicate",
     118: "delete",
     119: "undo",
-    88: "duplicate",
     89: "automate",
     60: "mute",
     61: "solo",
-    29: "stop_clip",
+    # Mode buttons (right column)
+    30: "setup",
+    31: "layout",
+    59: "user",
+    # Navigation (arrow row, right of encoders)
+    62: "page_left",
+    63: "page_right",
+    54: "octave_down",
+    55: "octave_up",
+    # D-pad (upper-left of pad grid area)
+    44: "nav_left",
+    45: "nav_right",
+    46: "nav_up",
+    47: "nav_down",
+    # 8 select buttons ABOVE the display
+    102: "top_select_1",
+    103: "top_select_2",
+    104: "top_select_3",
+    105: "top_select_4",
+    106: "top_select_5",
+    107: "top_select_6",
+    108: "top_select_7",
+    109: "top_select_8",
+    # 8 select buttons BELOW the display (above the pads)
+    20: "bot_select_1",
+    21: "bot_select_2",
+    22: "bot_select_3",
+    23: "bot_select_4",
+    24: "bot_select_5",
+    25: "bot_select_6",
+    26: "bot_select_7",
+    27: "bot_select_8",
 }
+
+# Reverse map — name → CC number, for sending LED color commands to
+# the same CC that fires on press.
+_BUTTON_NAME_TO_CC = {name: cc for cc, name in _BUTTON_CC.items()}
 
 # 8 main performance encoders (below the display). In the default
 # relative-mode firmware, turning CW sends 1-63, turning CCW sends
@@ -238,6 +276,17 @@ class Push2:
         """Transient flash that does not update the base color."""
         self._send_pad_raw(pad_idx, color)
 
+    # ── Button LED control ───────────────────────────────────────────
+
+    def set_button(self, name: str, color: int) -> None:
+        """Light a named Push 2 button. `color` is a palette index 0-127
+        (0 = off). Silently no-ops if the name isn't known."""
+        cc = _BUTTON_NAME_TO_CC.get(name)
+        if cc is None:
+            return
+        color = max(0, min(127, color))
+        self._send_both([0xB0 | PAD_CHANNEL, cc, color])
+
     # ── Input polling ───────────────────────────────────────────────
 
     def _poll(self, midi_in, label: str) -> None:
@@ -272,15 +321,14 @@ class Push2:
                 else:
                     # Note-off OR note-on velocity 0 — restore base.
                     self.restore_pad(idx)
+                return
             return
 
-        if status == 0xB0 and len(data) >= 3 and channel == PAD_CHANNEL:
+        if status == 0xB0 and len(data) >= 3:
             cc, value = data[1], data[2]
-            # Performance encoders first — they share the CC space with
-            # buttons but live in a distinct range (71-78).
-            if ENCODER_CC_LO <= cc <= ENCODER_CC_HI:
+            # Encoders — relative mode, only on PAD_CHANNEL.
+            if channel == PAD_CHANNEL and ENCODER_CC_LO <= cc <= ENCODER_CC_HI:
                 if self.on_encoder is not None:
-                    # Relative-mode 2's-complement: CW=1..63, CCW=127..65
                     delta = value - 128 if value >= 64 else value
                     if delta != 0:
                         try:
@@ -288,7 +336,7 @@ class Push2:
                         except Exception as e:
                             log.warning("Push 2 encoder callback failed: %s", e)
                 return
-            name = _BUTTON_CC.get(cc)
+            name = _BUTTON_CC.get(cc) if channel == PAD_CHANNEL else None
             if name and self.on_button is not None:
                 try:
                     self.on_button(name, value)
