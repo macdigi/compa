@@ -58,6 +58,12 @@ _BUTTON_CC = {
     29: "stop_clip",
 }
 
+# 8 main performance encoders (below the display). In the default
+# relative-mode firmware, turning CW sends 1-63, turning CCW sends
+# 127-65 as 2's-complement of -1..-63.
+ENCODER_CC_LO = 71
+ENCODER_CC_HI = 78
+
 # ── Pad color palette (default Push 2 palette indices) ──────────────
 # Verified-visible entries from the Push 2 default palette. 122 is the
 # canonical "bright white" used as a safe universal Phase 1 color.
@@ -123,8 +129,10 @@ class Push2:
 
     Accepts a dict from find_push2_ports() with up to 4 opened ports.
     Callbacks:
-      on_pad(index: int, velocity: int)   — pad index 0-63, velocity 0-127
-      on_button(name: str, value: int)    — "play" / "record" / ...
+      on_pad(index: int, velocity: int)     — pad index 0-63, velocity 0-127
+      on_button(name: str, value: int)      — "play" / "record" / ...
+      on_encoder(index: int, delta: int)    — encoder 0-7, delta in ticks
+                                              (positive = CW, negative = CCW)
     """
 
     def __init__(self, ports: dict) -> None:
@@ -135,6 +143,7 @@ class Push2:
 
         self.on_pad: Optional[Callable[[int, int], None]] = None
         self.on_button: Optional[Callable[[str, int], None]] = None
+        self.on_encoder: Optional[Callable[[int, int], None]] = None
 
         # Per-pad base color. Press-flash sends a transient color without
         # touching this; note-off restores the base so kit colors persist.
@@ -267,6 +276,18 @@ class Push2:
 
         if status == 0xB0 and len(data) >= 3 and channel == PAD_CHANNEL:
             cc, value = data[1], data[2]
+            # Performance encoders first — they share the CC space with
+            # buttons but live in a distinct range (71-78).
+            if ENCODER_CC_LO <= cc <= ENCODER_CC_HI:
+                if self.on_encoder is not None:
+                    # Relative-mode 2's-complement: CW=1..63, CCW=127..65
+                    delta = value - 128 if value >= 64 else value
+                    if delta != 0:
+                        try:
+                            self.on_encoder(cc - ENCODER_CC_LO, delta)
+                        except Exception as e:
+                            log.warning("Push 2 encoder callback failed: %s", e)
+                return
             name = _BUTTON_CC.get(cc)
             if name and self.on_button is not None:
                 try:

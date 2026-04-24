@@ -465,6 +465,7 @@ class P6App:
                 self.push2 = Push2(p2_ports)
                 self.push2.on_pad = self._on_push2_pad
                 self.push2.on_button = self._on_push2_button
+                self.push2.on_encoder = self._on_push2_encoder
                 got_user = p2_ports.get("user_in") is not None
                 got_live = p2_ports.get("live_in") is not None
                 print(f"Push 2 connected (User={got_user}, Live={got_live})")
@@ -1048,6 +1049,37 @@ class P6App:
             _dispatch_action("transport.record", value, self)
         elif name == "stop_clip":
             _dispatch_action("transport.stop", value, self)
+
+    def _on_push2_encoder(self, idx: int, delta: int):
+        """Push 2 performance encoder turn. Mirrors whichever parameter
+        the matching label shows (pulled from Twister's current page
+        slots, which exist even when the Twister hardware is absent).
+
+        Maps each of encoders 0-7 to the Twister slot at the same
+        index and nudges that slot's P-6 CC by the turn delta."""
+        tw = getattr(self, "twister", None)
+        if not tw or not getattr(tw, "slots", None):
+            return
+        if idx >= len(tw.slots):
+            return
+        slot = tw.slots[idx]
+        cc = getattr(slot, "_p6_cc", None)
+        if cc is None:
+            return
+        # P-6 auto channel is ch15 (0-indexed = 14) per engine.twister_genius.
+        ch = 14
+        current = self.live_cc.get(ch, {}).get(cc, 64)
+        new_val = max(0, min(127, current + delta))
+        if new_val == current:
+            return
+        try:
+            if self.p6:
+                self.p6.send_cc(cc, new_val, channel=ch)
+            # Echo into live_cc immediately so the next encoder tick
+            # reads the new value instead of racing the P-6's MIDI echo.
+            self.live_cc.setdefault(ch, {})[cc] = new_val
+        except Exception as e:
+            log.debug("Push 2 encoder dispatch failed: %s", e) if False else None
 
     # ── Transport callbacks ──────────────────────────────────────────
 
