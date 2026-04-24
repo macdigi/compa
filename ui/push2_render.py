@@ -94,6 +94,11 @@ class Push2Renderer:
         self._last_play_led = -1
         self._last_record_led = -1
         self._last_topselect_leds = [-1] * 8
+        self._last_octave_leds = (-1, -1)   # (down, up)
+
+        # Track pad-frame state so we repaint pads only when device or
+        # pad_page changes (not every frame).
+        self._last_pad_frame_key: tuple | None = None
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
@@ -153,8 +158,7 @@ class Push2Renderer:
             push2.set_button("record", rec_color)
             self._last_record_led = rec_color
 
-        # Top select buttons 1-N act as direct page jumps — current page
-        # lit bright white, other available pages lit dim, unused slots off.
+        # Top select buttons = direct encoder-page jumps.
         try:
             current = self.app.push2_page
             count = self.app.push2_page_count()
@@ -170,6 +174,40 @@ class Push2Renderer:
             if self._last_topselect_leds[i] != color:
                 push2.set_button(f"top_select_{i + 1}", color)
                 self._last_topselect_leds[i] = color
+
+        # Octave up/down drive pad-page paging for SP-404. Light dim
+        # when there's more than one pad page to move between.
+        try:
+            pad_pages = self.app.push2_pad_page_count()
+        except Exception:
+            pad_pages = 1
+        octave_color = 22 if pad_pages > 1 else 0
+        if self._last_octave_leds != (octave_color, octave_color):
+            push2.set_button("octave_down", octave_color)
+            push2.set_button("octave_up", octave_color)
+            self._last_octave_leds = (octave_color, octave_color)
+
+        # Repaint pad frame when the bank window changes.
+        try:
+            dev_key = self.app.device_manager.focus_key
+        except Exception:
+            dev_key = None
+        try:
+            pad_page = self.app.push2_pad_page
+        except Exception:
+            pad_page = 0
+        frame_key = (dev_key, pad_page)
+        if frame_key != self._last_pad_frame_key:
+            self._repaint_pad_frame(push2, dev_key, pad_page)
+            self._last_pad_frame_key = frame_key
+
+    def _repaint_pad_frame(self, push2, dev_key, pad_page) -> None:
+        if dev_key == "SP-404MKII":
+            push2.light_bank_frame_for_page(pad_page, num_banks=10)
+        else:
+            # P-6 and others: show all 4 stripe colors but only the
+            # bottom row-pair is actually wired to trigger.
+            push2.light_bank_frame()
 
     # ── Scene composition ─────────────────────────────────────────
 
@@ -223,15 +261,37 @@ class Push2Renderer:
         surf.blit(self._logo_surface, (SURF_W - lw - 10, 4))
 
         # ── Page indicator (tiny, under the device pill) ──────────
+        # Row 1: encoder page, row 2: pad-bank page (SP-404 only).
         try:
             page = self.app.push2_page
             page_count = self.app.push2_page_count()
         except Exception:
             page, page_count = 0, 1
+        y = 32
         if page_count > 1:
-            txt = f"PAGE {page + 1}/{page_count}"
+            txt = f"CTRL {page + 1}/{page_count}"
             psurf = self._font_tiny.render(txt, True, DIM)
-            surf.blit(psurf, (14, 32))
+            surf.blit(psurf, (14, y))
+            y += psurf.get_height() + 1
+
+        try:
+            pad_page = self.app.push2_pad_page
+            pad_pages = self.app.push2_pad_page_count()
+        except Exception:
+            pad_page, pad_pages = 0, 1
+        if pad_pages > 1:
+            # Label the current bank letter range: A-D / E-H / I-J
+            first = pad_page * 4
+            last = min(first + 3, first + 1)  # 4 banks per page except last
+            # Derive real end from device bank count when we know it.
+            try:
+                total = 10 if self.app.device_manager.focus_key == "SP-404MKII" else 4
+            except Exception:
+                total = 10
+            last = min(first + 3, total - 1)
+            letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
+            pbsurf = self._font_tiny.render(f"BANK {letters}", True, dev_color)
+            surf.blit(pbsurf, (14, y))
 
     def _load_logo_png(self, target_h: int) -> pygame.Surface:
         """Load docs/logo/compa_logo_ascii_only.png and scale it to
@@ -424,9 +484,17 @@ class Push2Renderer:
             return None
 
     def _encoder_slots(self) -> list[dict]:
-        """Return 8 dicts describing each encoder slot: {name, value}.
-        Uses app.push2_slot_window() so encoder labels track the
-        current Push 2 page (cycled via page-left / page-right)."""
+        """Return 8 dicts describing each encoder slot: {name, value}."""
+        try:
+            dev_key = self.app.device_manager.focus_key
+        except Exception:
+            dev_key = None
+
+        if dev_key == "SP-404MKII":
+            return self._sp404_encoder_slots()
+        return self._p6_encoder_slots()
+
+    def _p6_encoder_slots(self) -> list[dict]:
         try:
             live = self.app.live_cc.get(14, {}) or {}
         except Exception:
@@ -442,6 +510,28 @@ class Push2Renderer:
                 "name": str(getattr(s, "name", "—")),
                 "value": live.get(cc) if cc is not None else None,
             })
+        while len(out) < 8:
+            out.append({"name": "—", "value": None})
+        return out
+
+    def _sp404_encoder_slots(self) -> list[dict]:
+        """SP-404 encoder row: Ctrl 1-6 of the currently active bus,
+        plus two placeholder slots. Active bus is tracked on the
+        Twister object (shared source of truth with the touchscreen
+        FX knobs)."""
+        ctrl_ccs = [16, 17, 18, 80, 81, 82]
+        names = ["Ctrl 1", "Ctrl 2", "Ctrl 3", "Ctrl 4", "Ctrl 5", "Ctrl 6"]
+        try:
+            bus = int(self.app.twister.active_bus)
+        except Exception:
+            bus = 0
+        try:
+            live = self.app.live_cc.get(bus, {}) or {}
+        except Exception:
+            live = {}
+        out = []
+        for i, cc in enumerate(ctrl_ccs):
+            out.append({"name": names[i], "value": live.get(cc)})
         while len(out) < 8:
             out.append({"name": "—", "value": None})
         return out

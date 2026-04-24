@@ -114,9 +114,24 @@ COLOR_BLUE = 125
 COLOR_YELLOW = 8
 COLOR_ACCENT = 127   # High-contrast accent used for press-flash against white base
 
-# Bank colors — using 4 clearly distinct palette slots
+# Bank colors — 4 per pad page, cycling through distinct palette slots.
 BANK_COLORS = [COLOR_RED, COLOR_BLUE, COLOR_GREEN, COLOR_YELLOW]
-BANK_COLORS_DIM = [1, 50, 20, 9]  # Alternate palette slots for dim variant
+
+# Full 10-bank SP-404 MK2 palette (A–J). Page 0 = A-D, page 1 = E-H,
+# page 2 = I-J. Picked for visual distinction across pages so the
+# user sees which pad page they're on at a glance.
+SP_BANK_COLORS = [
+    127,  # A: red
+    125,  # B: blue
+    126,  # C: green
+    8,    # D: yellow
+    9,    # E: orange
+    60,   # F: magenta/pink
+    40,   # G: teal
+    5,    # H: lime
+    73,   # I: purple
+    122,  # J: white
+]
 
 
 # ── Port discovery ───────────────────────────────────────────────────
@@ -190,11 +205,11 @@ class Push2:
         self._stop = threading.Event()
         self._threads = []
 
-        # Light ALL 64 pads bright white on init so the user can
-        # visually confirm the driver is working. Real bank coloring
-        # comes after the user presses a pad or calls light_bank_frame.
+        # Paint the 4-bank frame on init so the bottom-to-top bank
+        # layout reads visually at a glance (rows 1-2 = A, 3-4 = B,
+        # 5-6 = C, 7-8 = D). App-level code may overwrite per-device.
         self.clear_all_pads()
-        self.light_all(COLOR_WHITE)
+        self.light_bank_frame()
 
         # Spin up a poll thread per input port we managed to open.
         if self.user_in is not None:
@@ -265,6 +280,25 @@ class Push2:
         for pad in range(64):
             bank = pad // 16
             self.set_pad_color(pad, BANK_COLORS[bank])
+
+    def light_bank_frame_for_page(self, pad_page: int, num_banks: int,
+                                  colors: list[int] | None = None) -> None:
+        """Paint the pad grid for the given pad page, respecting how
+        many banks the focused device actually has.
+
+        pad_page 0 = banks 0-3 (A-D), pad_page 1 = banks 4-7 (E-H),
+        pad_page 2 = banks 8-9 (I-J). Each bank occupies 2 rows × 8
+        cols = 16 pads. Pads whose effective bank is beyond num_banks
+        are blanked."""
+        palette = colors or SP_BANK_COLORS
+        for pad in range(64):
+            row_pair = pad // 16        # 0..3
+            effective_bank = pad_page * 4 + row_pair
+            if effective_bank < 0 or effective_bank >= num_banks:
+                self.set_pad_color(pad, COLOR_OFF)
+            else:
+                idx = effective_bank if effective_bank < len(palette) else 0
+                self.set_pad_color(pad, palette[idx])
 
     def set_pads_from_compa_banks(self, has_sample_flags: list[bool]) -> None:
         for i, loaded in enumerate(has_sample_flags[:64]):

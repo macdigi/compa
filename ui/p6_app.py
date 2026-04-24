@@ -249,6 +249,8 @@ class P6App:
         # Which 8-slot window of Twister's flattened slots the Push 2
         # is currently showing. Wraps 0..push2_page_count()-1.
         self.push2_page: int = 0
+        # Pad-bank page. 0 = A-D, 1 = E-H, 2 = I-J (SP-404 MK2 has 10 banks).
+        self.push2_pad_page: int = 0
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -1037,12 +1039,59 @@ class P6App:
     # ── Push 2 callbacks ─────────────────────────────────────────────
 
     def _on_push2_pad(self, idx: int, velocity: int):
-        """Push 2 pad hit. Phase 1: bottom 2 rows (0-15) trigger Compa
-        pads 1-16 in the current bank. Rows 3-8 reserved for Phase 3
-        bank-explicit triggering (B/C/D). Press-flash and release-restore
-        are handled inside the Push 2 driver itself."""
-        if 0 <= idx < 16:
-            _dispatch_action(f"pad.trigger.{idx + 1}", velocity, self)
+        """Push 2 pad hit.
+
+        For SP-404 MK2: pad_page selects a window of 4 banks (A-D /
+        E-H / I-J). Row-pairs 0-3 of the Push 2 grid map to banks at
+        offset (pad_page*4 + 0..3). Unused row-pairs on the last page
+        no-op.
+
+        For P-6: only the bottom two rows fire, using pad.trigger.N
+        (respects P-6's own current_bank)."""
+        bank_offset = idx // 16
+        pad_in_bank = idx % 16
+        dev_key = getattr(self.device_manager, "focus_key", None)
+
+        if dev_key == "SP-404MKII":
+            effective_bank = self.push2_pad_page * 4 + bank_offset
+            if effective_bank >= self._push2_sp_bank_count():
+                return
+            midi = self._midi_connections.get("SP-404MKII")
+            if midi is None:
+                return
+            from engine.controller_actions import _compute_pad_note
+            note, channel = _compute_pad_note(
+                "SP-404MKII", effective_bank, pad_in_bank, midi,
+            )
+            if note < 0:
+                return
+            try:
+                if velocity > 0:
+                    midi.send_note_on(note, velocity, channel=channel)
+                else:
+                    midi.send_note_off(note, channel=channel)
+            except Exception:
+                pass
+            return
+
+        if bank_offset == 0:
+            _dispatch_action(f"pad.trigger.{pad_in_bank + 1}", velocity, self)
+
+    def _push2_sp_bank_count(self) -> int:
+        """SP-404 MK2 supports 10 banks (A-J). Constant for now; could
+        read dynamically in the future."""
+        return 10
+
+    def push2_pad_page_count(self) -> int:
+        """How many 4-bank windows cover the focused device's banks."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        if dev_key == "SP-404MKII":
+            return (self._push2_sp_bank_count() + 3) // 4
+        return 1
+
+    def _push2_cycle_pad_page(self, delta: int) -> None:
+        count = self.push2_pad_page_count()
+        self.push2_pad_page = (self.push2_pad_page + delta) % count
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
@@ -1058,6 +1107,10 @@ class P6App:
             self._push2_cycle_page(-1)
         elif name == "page_right":
             self._push2_cycle_page(+1)
+        elif name == "octave_up":
+            self._push2_cycle_pad_page(+1)
+        elif name == "octave_down":
+            self._push2_cycle_pad_page(-1)
         elif name.startswith("top_select_"):
             # Top-row select buttons 1-N jump directly to page N-1.
             try:
@@ -1068,9 +1121,12 @@ class P6App:
                 self.push2_page = idx
 
     def push2_slot_window(self) -> list:
-        """Return the 8 Twister slots currently visible on the Push 2,
-        taking self.push2_page into account. Empty list when there's
-        nothing to show yet."""
+        """Return the 8 Twister slots currently visible on the Push 2
+        when in P-6 mode. Empty list for non-P-6 devices (they have
+        their own encoder dispatch logic)."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        if dev_key != "P-6":
+            return []
         tw = getattr(self, "twister", None)
         pages = getattr(tw, "_pages", None) if tw else None
         if not pages:
@@ -1085,6 +1141,9 @@ class P6App:
         return flat[start:start + 8]
 
     def push2_page_count(self) -> int:
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        if dev_key != "P-6":
+            return 1
         tw = getattr(self, "twister", None)
         pages = getattr(tw, "_pages", None) if tw else None
         if not pages:
@@ -1111,9 +1170,42 @@ class P6App:
         except Exception:
             pass
 
+    # SP-404 MK2 FX control CCs (Ctrl 1-6).
+    _SP404_CTRL_CCS = [16, 17, 18, 80, 81, 82]
+
     def _on_push2_encoder(self, idx: int, delta: int):
-        """Push 2 performance encoder turn. Adjusts the P-6 CC for the
-        slot at the current page's offset."""
+        """Push 2 performance encoder turn.
+
+        P-6: nudge the CC of the Twister slot at the current encoder
+        page's offset (8 params per page, 4 pages).
+        SP-404 MK2: encoders 1-6 adjust Ctrl 1-6 of the currently
+        active bus — same scheme as the SP's FX knobs on the Compa
+        touchscreen. Encoders 7-8 no-op for now."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+
+        if dev_key == "SP-404MKII":
+            if idx >= len(self._SP404_CTRL_CCS):
+                return
+            cc = self._SP404_CTRL_CCS[idx]
+            try:
+                bus = int(self.twister.active_bus)
+            except Exception:
+                bus = 0
+            current = self.live_cc.get(bus, {}).get(cc, 64)
+            new_val = max(0, min(127, current + delta))
+            if new_val == current:
+                return
+            midi = self._midi_connections.get("SP-404MKII")
+            if midi is None:
+                return
+            try:
+                midi.send_cc(cc, new_val, channel=bus)
+                self.live_cc.setdefault(bus, {})[cc] = new_val
+            except Exception:
+                pass
+            return
+
+        # P-6 path (original behavior).
         slots = self.push2_slot_window()
         if idx >= len(slots):
             return
@@ -1121,7 +1213,7 @@ class P6App:
         cc = getattr(slot, "_p6_cc", None)
         if cc is None:
             return
-        ch = 14  # P-6 auto channel (ch15 1-indexed)
+        ch = 14
         current = self.live_cc.get(ch, {}).get(cc, 64)
         new_val = max(0, min(127, current + delta))
         if new_val == current:
