@@ -39,6 +39,8 @@ from engine.midi_lfo import MidiLFO
 from engine.midi_mapper import MidiMapper
 from engine.twister_genius import TwisterGenius
 from engine.spectra_mapper import SpectraMapper
+from engine.push2 import Push2, find_push2_ports
+from engine.controller_actions import dispatch as _dispatch_action
 from engine.compa_link import CompaServer, CompaBrowser
 from engine.updater import Updater
 from engine.usb_storage import AkaiStorageManager
@@ -235,6 +237,7 @@ class P6App:
 
         # ── MIDI devices (init before screens so state objects exist) ──
         self.atom_sq: AtomSQ | None = None
+        self.push2: Push2 | None = None
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -446,6 +449,19 @@ class P6App:
                 print("ATOM SQ connected")
         except Exception as e:
             print(f"ATOM SQ init failed: {e}")
+
+        # Ableton Push 2 (Phase 1: pad triggers + transport buttons)
+        try:
+            p2_ports = find_push2_ports()
+            if p2_ports.get("user_in") is not None or p2_ports.get("live_in") is not None:
+                self.push2 = Push2(p2_ports)
+                self.push2.on_pad = self._on_push2_pad
+                self.push2.on_button = self._on_push2_button
+                got_user = p2_ports.get("user_in") is not None
+                got_live = p2_ports.get("live_in") is not None
+                print(f"Push 2 connected (User={got_user}, Live={got_live})")
+        except Exception as e:
+            print(f"Push 2 init failed: {e}")
 
         # Connect MIDI for ALL detected devices
         for short_name, profile in self.device_manager.connected.items():
@@ -991,6 +1007,29 @@ class P6App:
             COLOR_PURPLE: (160, 80, 200), COLOR_PINK: (220, 80, 160),
         }
         return mapping.get(slot.color, theme.ACCENT)
+
+    # ── Push 2 callbacks ─────────────────────────────────────────────
+
+    def _on_push2_pad(self, idx: int, velocity: int):
+        """Push 2 pad hit. Phase 1: bottom 2 rows (0-15) trigger Compa
+        pads 1-16 in the current bank. Rows 3-8 reserved for Phase 3
+        bank-explicit triggering (B/C/D)."""
+        if 0 <= idx < 16:
+            _dispatch_action(f"pad.trigger.{idx + 1}", velocity, self)
+            if self.push2:
+                from engine.push2 import COLOR_WHITE
+                self.push2.flash_pad(idx, COLOR_WHITE)
+
+    def _on_push2_button(self, name: str, value: int):
+        """Push 2 transport / function buttons."""
+        if value <= 0:
+            return  # release — no-op for now
+        if name == "play":
+            _dispatch_action("transport.play", value, self)
+        elif name == "record":
+            _dispatch_action("transport.record", value, self)
+        elif name == "stop_clip":
+            _dispatch_action("transport.stop", value, self)
 
     # ── Transport callbacks ──────────────────────────────────────────
 
@@ -1914,6 +1953,11 @@ class P6App:
             pass  # Router doesn't need shutdown
         if self.atom_sq:
             self.atom_sq.shutdown()
+        if self.push2:
+            try:
+                self.push2.shutdown()
+            except Exception:
+                pass
         # Shut down ALL MIDI connections
         for sn, conn in self._midi_connections.items():
             try:

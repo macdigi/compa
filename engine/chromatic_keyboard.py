@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 # These are devices that Compa already handles through their own modules.
 EXCLUDED_PORT_HINTS = {
     "SP-404", "P-6", "Through", "RtMidi", "ATOM", "ATM SQ",
-    "Force", "Midi Fighter Twister", "Midi Fighter Spectra",
+    "Force", "Push 2", "Ableton Push", "Midi Fighter Twister", "Midi Fighter Spectra",
 }
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
