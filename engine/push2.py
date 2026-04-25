@@ -536,6 +536,71 @@ class Push2:
             return None
         return pattern
 
+    # ── Combined Pattern mode layout (launch + step seq) ────────────
+
+    def light_combined_pattern_layout(
+            self, current_pattern: int, total_patterns: int,
+            pattern_launch_page: int,
+            seq, step_offset: int,
+            launch_bright: int, launch_dim: int) -> None:
+        """Top 2 rows = pattern launch; bottom 6 rows = step sequencer.
+
+        Top:
+          row 7 (idx 56-63, very top) = patterns page*16+0..7
+          row 6 (idx 48-55, just below) = patterns page*16+8..15
+          - launch_bright on the active pattern, launch_dim on
+            available patterns, off when beyond total_patterns
+
+        Bottom (step seq for currently active pattern):
+          row 5 = pad 1, row 4 = pad 2, ... row 0 = pad 6
+          col N = step (step_offset + N)
+          - programmed step → row's color
+          - playhead column → bright white if on, dim white if off
+          - off step + not playhead → off
+        """
+        current = (seq.current_step
+                   if seq is not None and getattr(seq, "playing", False)
+                   else -1)
+        num_pads = getattr(seq, "num_pads", 0) if seq is not None else 0
+        num_steps = getattr(seq, "num_steps", 0) if seq is not None else 0
+        base_pat = pattern_launch_page * 16
+
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            if row >= 6:
+                top_down = 1 - (row - 6)              # row 7 → 0, row 6 → 1
+                pat = base_pat + top_down * 8 + col + 1
+                if pat > total_patterns:
+                    color = COLOR_OFF
+                elif pat == current_pattern:
+                    color = launch_bright
+                else:
+                    color = launch_dim
+                self.set_pad_color(idx, color)
+                continue
+            # Step area
+            pad = 5 - row
+            step = step_offset + col
+            if seq is None or pad >= num_pads or step >= num_steps:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            try:
+                is_on = bool(seq.grid[pad][step].active)
+            except Exception:
+                is_on = False
+            is_current = step == current
+            row_color = self.PATTERN_ROW_COLORS[pad % len(self.PATTERN_ROW_COLORS)]
+            if is_on and is_current:
+                color = 122
+            elif is_on:
+                color = row_color
+            elif is_current:
+                color = 3
+            else:
+                color = COLOR_OFF
+            self.set_pad_color(idx, color)
+
     # ── Step-sequencer mode layout (kept for future re-expose) ──────
 
     # Color per row in the pattern grid so each pad is visually distinct.

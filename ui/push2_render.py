@@ -98,6 +98,11 @@ class Push2Renderer:
         self._last_octave_leds = (-1, -1)   # (down, up)
         # (up, down, left, right) — last D-pad LED colors sent.
         self._last_nav_leds = (-1, -1, -1, -1)
+        # Last Double-Loop LED color sent (lit bright in pattern mode).
+        self._last_dl_led = -1
+        # Last Undo LED color sent (lit when there's a pattern-mode
+        # action available to undo).
+        self._last_undo_led = -1
         # Whether we've painted the "always-dim" named-button set yet.
         self._lit_static_buttons = False
 
@@ -227,18 +232,38 @@ class Push2Renderer:
             push2.set_button("octave_up", octave_color)
             self._last_octave_leds = (octave_color, octave_color)
 
-        # Page-left / page-right LEDs in pattern mode reflect step pages.
+        # Page-left / page-right LEDs in pattern mode — both always lit
+        # dim cyan when there's more than one step page (paging cycles
+        # around at the ends).
         if mode_for_oct == "pattern":
             try:
                 seq = self.app._push2_pattern_sequencer()
-                offset = int(self.app.push2_pattern_step_offset)
                 num_steps = getattr(seq, "num_steps", 16) if seq else 16
             except Exception:
-                offset = 0
                 num_steps = 16
-            push2.set_button("page_left", 22 if offset > 0 else 3)
-            push2.set_button("page_right",
-                             22 if offset + 8 < num_steps else 3)
+            page_color = 22 if num_steps > 8 else 3
+            push2.set_button("page_left", page_color)
+            push2.set_button("page_right", page_color)
+
+        # Double Loop LED — bright pink in pattern mode (action: cycle
+        # PiSequencer length 16→32→64→16). Dim everywhere else.
+        dl_color = 60 if mode_for_oct == "pattern" else 3
+        if self._last_dl_led != dl_color:
+            push2.set_button("double_loop", dl_color)
+            self._last_dl_led = dl_color
+
+        # Undo LED — bright cyan in pattern mode when there's a
+        # step-count change available to revert.
+        undo_color = 3
+        if mode_for_oct == "pattern":
+            try:
+                if self.app._push2_last_num_steps is not None:
+                    undo_color = 50      # bright blue/cyan
+            except Exception:
+                pass
+        if self._last_undo_led != undo_color:
+            push2.set_button("undo", undo_color)
+            self._last_undo_led = undo_color
 
         # D-pad LEDs (only sent when the desired color tuple changes,
         # to avoid spamming the bus with 80+ MIDI messages/sec).
@@ -316,8 +341,10 @@ class Push2Renderer:
                         hi = pn + br
             keys_state = (base_note, lo, hi, scale_idx, root_pc)
 
-        # Pattern-mode state — current active pattern + total so the
-        # grid repaints whenever the device switches pattern.
+        # Pattern-mode state — current active pattern + total + page +
+        # step offset + a hash of the active sequencer's grid. Forces
+        # a repaint when any of these change (pattern switch, step
+        # toggle, page paging, or playhead movement).
         pattern_state: tuple = ()
         if mode == "pattern":
             cur_pat = 0
@@ -331,7 +358,24 @@ class Push2Renderer:
                 total = int(self.app.push2_max_patterns())
             except Exception:
                 total = 64
-            pattern_state = (cur_pat, total, dev_key)
+            try:
+                lp = int(self.app.push2_pattern_launch_page)
+            except Exception:
+                lp = 0
+            try:
+                offset = int(self.app.push2_pattern_step_offset)
+            except Exception:
+                offset = 0
+            seq = getattr(self.app, "_push2_pattern_sequencer",
+                          lambda: None)()
+            if seq is not None:
+                grid_hash = self._sequencer_grid_hash(seq)
+                cstep = int(getattr(seq, "current_step", 0))
+                playing = bool(getattr(seq, "playing", False))
+            else:
+                grid_hash, cstep, playing = 0, 0, False
+            pattern_state = (cur_pat, total, dev_key, lp, offset,
+                             grid_hash, cstep, playing)
 
         frame_key = (mode, dev_key, pad_page, keys_state, pattern_state)
         if frame_key != self._last_pad_frame_key:
@@ -341,17 +385,19 @@ class Push2Renderer:
 
     @staticmethod
     def _sequencer_grid_hash(seq) -> int:
-        """Cheap hash of the sequencer grid's active flags — used to
-        detect step toggles so the Push 2 repaints immediately."""
+        """Hash of the sequencer grid's active flags — drives the
+        renderer's repaint trigger. Each (pad, step) gets a unique
+        bit so any toggle changes the hash, regardless of how many
+        steps the pattern actually has (up to 64)."""
         try:
             num_pads = getattr(seq, "num_pads", 0)
             num_steps = getattr(seq, "num_steps", 0)
             h = 0
             for p in range(min(num_pads, 8)):
                 row = seq.grid[p]
-                for s in range(min(num_steps, 16)):
+                for s in range(min(num_steps, 64)):
                     if row[s].active:
-                        h ^= (1 << ((p * 16 + s) & 63))
+                        h |= 1 << (p * 64 + s)
             return h
         except Exception:
             return 0
@@ -382,13 +428,25 @@ class Push2Renderer:
             cur_pat = pattern_state[0] if len(pattern_state) > 0 else 0
             total = pattern_state[1] if len(pattern_state) > 1 else 64
             ps_dev = pattern_state[2] if len(pattern_state) > 2 else dev_key
+            lp = pattern_state[3] if len(pattern_state) > 3 else 0
+            offset = pattern_state[4] if len(pattern_state) > 4 else 0
+            seq = getattr(self.app, "_push2_pattern_sequencer",
+                          lambda: None)()
             if ps_dev == "P-6":
-                bright, dim = 8, 15      # yellow / dim yellow
+                bright, dim = 8, 15
             elif ps_dev == "SP-404MKII":
-                bright, dim = 9, 11      # orange / dim orange
+                bright, dim = 9, 11
             else:
                 bright, dim = 122, 3
-            push2.light_pattern_launch_layout(cur_pat, total, bright, dim)
+            push2.light_combined_pattern_layout(
+                current_pattern=cur_pat,
+                total_patterns=total,
+                pattern_launch_page=lp,
+                seq=seq,
+                step_offset=offset,
+                launch_bright=bright,
+                launch_dim=dim,
+            )
             return
         if mode == "dj":
             push2.light_dj_layout()
@@ -516,7 +574,29 @@ class Push2Renderer:
                 total = int(self.app.push2_max_patterns())
             except Exception:
                 total = 64
-            txt = f"PAT  {cur_pat}/{total}  ·  tap a pad to launch"
+            try:
+                lp = int(self.app.push2_pattern_launch_page)
+                lpc = int(self.app.push2_pattern_launch_page_count())
+            except Exception:
+                lp, lpc = 0, 1
+            try:
+                offset = int(self.app.push2_pattern_step_offset)
+            except Exception:
+                offset = 0
+            launch_first = lp * 16 + 1
+            launch_last = min(launch_first + 15, total)
+            page_seg = f"  ·  {lp + 1}/{lpc}" if lpc > 1 else ""
+            seq = getattr(self.app, "_push2_pattern_sequencer",
+                          lambda: None)()
+            num_steps = (int(getattr(seq, "num_steps", 16))
+                         if seq is not None else 16)
+            playing = bool(getattr(seq, "playing", False)) if seq else False
+            play_glyph = "▶" if playing else " "
+            seq_text = (f"{play_glyph} steps {offset + 1}-"
+                        f"{min(offset + 8, num_steps)}/{num_steps}")
+            txt = (f"PAT {cur_pat}/{total}  "
+                   f"launch {launch_first}-{launch_last}{page_seg}  ·  "
+                   f"{seq_text}")
             psurf = self._font_tiny.render(txt, True, dev_color)
             surf.blit(psurf, (14, y))
             return

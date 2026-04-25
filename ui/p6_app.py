@@ -280,6 +280,16 @@ class P6App:
         # Pattern-launch page (Push 2's 8 launch buttons → patterns
         # page*8..page*8+7). D-pad left/right cycles in non-keys modes.
         self.push2_launch_page: int = 0
+        # Combined-pattern-mode launch page — Push 2's top 2 rows show
+        # 16 patterns at a time; this is the index in 16-pattern groups.
+        self.push2_pattern_launch_page: int = 0
+        # Per-(device, pattern) step grids. PiSequencer only holds the
+        # currently-loaded pattern; we snapshot here on pattern launch
+        # so each pattern keeps its own steps when the user switches.
+        self._compa_step_grids: dict[tuple[str, int], list] = {}
+        # Most recent num_steps value before the last Double Loop
+        # press, so Undo can revert it. None = nothing to undo.
+        self._push2_last_num_steps: int | None = None
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
@@ -1200,15 +1210,15 @@ class P6App:
         return getattr(screen, "sequencer", None) if screen else None
 
     def _ensure_push2_pattern_setup(self):
-        """Make sure the PiSequencer is wired to the currently-focused
-        device — sets MIDI output, configures pad layout, and clears
-        stale step data when the device changes so the P-6 and SP
-        each have their own pattern.
+        """Wire the PiSequencer to the currently-focused device. On
+        device change: save the outgoing device's grid for its current
+        pattern, configure the sequencer for the new device, and load
+        the new device's stored grid for its current pattern (or clear
+        if none).
 
-        Tempo comes from the Compa MasterClock (set up once on app
-        init), NOT from the device's MIDI clock. That keeps step
-        timing stable independent of which sample is currently firing
-        on the device side.
+        Tempo comes from the Compa MasterClock, not the device's MIDI
+        clock, so step timing stays stable independent of which sample
+        is firing.
 
         Idempotent: subsequent calls with the same focus are no-ops."""
         seq = self._push2_pattern_sequencer()
@@ -1217,11 +1227,20 @@ class P6App:
         cur_dev = getattr(self.device_manager, "focus_key", "") or ""
         if self._push2_pattern_device == cur_dev:
             return
-        # Device focus changed (or first time) — reset + rewire.
+        # Save outgoing device's grid for its currently-active pattern
+        # before switching, so re-focus restores it.
+        prev_dev = self._push2_pattern_device
+        if prev_dev:
+            try:
+                prev_midi = self._midi_connections.get(prev_dev)
+                if prev_midi is not None:
+                    self._save_step_grid(prev_dev,
+                                          int(prev_midi.state.active_pattern))
+            except Exception:
+                pass
         try:
             if seq.playing:
                 seq.stop()
-            seq.clear_all()
         except Exception:
             pass
         try:
@@ -1234,36 +1253,124 @@ class P6App:
                 seq.set_midi_out(midi)
             except Exception:
                 pass
-            # Detach any prior device-clock hook so the device's BPM
-            # never racing the master clock.
             try:
                 midi.on_clock_tick = None
             except Exception:
                 pass
+        # Load step grid for the new device's currently-active pattern.
+        try:
+            cur_pat = int(midi.state.active_pattern) if midi else 0
+        except Exception:
+            cur_pat = 0
         self._push2_pattern_device = cur_dev
+        self._load_step_grid(cur_dev, cur_pat)
 
     def _on_push2_pattern_pad(self, idx: int, velocity: int):
-        """Pattern-mode pad — launch the corresponding pattern on the
-        focused device. Layout matches the Compa PATTERN tab grid:
-        pattern 1 at top-left. P-6 fills 8x8 (64 patterns); SP-404
-        fills bottom-left 4x4 (16 patterns)."""
+        """Combined Pattern-mode layout:
+          rows 6-7 (top 16 pads): pattern launch — page-aware via
+            push2_pattern_launch_page (16 patterns per page).
+            Row 6 (lower of the two) = patterns offset+0..7,
+            Row 7 (top) = patterns offset+8..15.
+          rows 0-5 (bottom 48 pads): step sequencer for the currently
+            active pattern. Row 5 = pad 1 (top), row 0 = pad 6 (bottom).
+            Cols = 8 visible steps; page-left/right pages 1-8 ↔ 9-16.
+
+        Pattern launch saves the current pattern's PiSequencer grid
+        and loads the target pattern's stored grid (or clears if none
+        saved yet), so each pattern keeps its own step data."""
         if velocity == 0:
             return
-        from engine.push2 import Push2
-        total = self.push2_max_patterns()
-        pattern = Push2.pattern_launch_pad_to_pattern(idx, total)
-        if pattern is None:
+        row = idx // 8
+        col = idx % 8
+
+        if row >= 6:
+            # ── Pattern launch (top 2 rows) ───────────────────────
+            # Top row (idx 56-63 = row 7) = patterns 1-8 of the page,
+            # row below (row 6) = patterns 9-16. Reading top-down.
+            top_down = 1 - (row - 6)                 # row 7 → 0, row 6 → 1
+            base = self.push2_pattern_launch_page * 16
+            pat_idx = base + top_down * 8 + col      # 0-indexed
+            if pat_idx >= self.push2_max_patterns():
+                return
+            self._push2_pattern_launch(pat_idx)
             return
-        midi = self.p6
-        if midi is None:
+
+        # ── Step sequencer (bottom 6 rows) ────────────────────────
+        pad = 5 - row                               # row 5 → pad 0
+        step = self.push2_pattern_step_offset + col
+        seq = self._push2_pattern_sequencer()
+        if seq is None:
+            return
+        if pad >= getattr(seq, "num_pads", 0):
+            return
+        if step >= getattr(seq, "num_steps", 0):
             return
         try:
-            midi.send_program_change(pattern - 1)
-            # Keep local state in sync so the Push 2 display + Compa UI
-            # both reflect the new active pattern even when the device
-            # doesn't echo the PC back.
-            if hasattr(midi, "state"):
-                midi.state.active_pattern = pattern - 1
+            seq.toggle_step(pad, step)
+        except Exception:
+            pass
+
+    def _push2_pattern_launch(self, pat_idx: int):
+        """Save the current pattern's step grid, switch the device,
+        then load the target pattern's stored grid (or clear)."""
+        midi = self.p6
+        dev_key = getattr(self.device_manager, "focus_key", "") or ""
+        if midi is not None:
+            try:
+                cur = int(midi.state.active_pattern)
+                self._save_step_grid(dev_key, cur)
+            except Exception:
+                pass
+            try:
+                midi.send_program_change(pat_idx)
+                if hasattr(midi, "state"):
+                    midi.state.active_pattern = pat_idx
+            except Exception:
+                pass
+        self._load_step_grid(dev_key, pat_idx)
+
+    def _save_step_grid(self, dev_key: str, pat_idx: int):
+        """Snapshot PiSequencer.grid for (device, pattern). No-op if
+        no sequencer wired."""
+        seq = self._push2_pattern_sequencer()
+        if seq is None or not dev_key:
+            return
+        try:
+            snapshot = [
+                [(cell.active, cell.velocity)
+                 for cell in row]
+                for row in seq.grid[:seq.num_pads]
+            ]
+            self._compa_step_grids[(dev_key, pat_idx)] = snapshot
+        except Exception:
+            pass
+
+    def _load_step_grid(self, dev_key: str, pat_idx: int):
+        """Restore step grid for (device, pattern) into PiSequencer.
+        Clears the sequencer when no snapshot exists for that slot."""
+        seq = self._push2_pattern_sequencer()
+        if seq is None or not dev_key:
+            return
+        saved = self._compa_step_grids.get((dev_key, pat_idx))
+        if saved is None:
+            try:
+                seq.clear_all()
+            except Exception:
+                pass
+            return
+        try:
+            for p, row in enumerate(saved):
+                if p >= seq.num_pads:
+                    break
+                for s, (active, vel) in enumerate(row):
+                    if s >= seq.num_steps:
+                        break
+                    seq.grid[p][s].active = bool(active)
+                    seq.grid[p][s].velocity = int(vel)
+            # Clear pads/steps we didn't restore.
+            for p in range(len(saved), seq.num_pads):
+                for s in range(seq.num_steps):
+                    seq.grid[p][s].active = False
         except Exception:
             pass
 
@@ -1401,6 +1508,10 @@ class P6App:
     def push2_launch_page_count(self) -> int:
         return max(1, (self.push2_max_patterns() + 7) // 8)
 
+    def push2_pattern_launch_page_count(self) -> int:
+        """Pages of 16 patterns each — used by combined-pattern mode."""
+        return max(1, (self.push2_max_patterns() + 15) // 16)
+
     def _push2_sp_bank_count(self) -> int:
         """SP-404 MK2 supports 10 banks (A-J). Constant for now; could
         read dynamically in the future."""
@@ -1452,10 +1563,34 @@ class P6App:
                 if seq is not None and seq.playing:
                     seq.stop()
             _dispatch_action("transport.stop", value, self)
-        elif name == "page_left":
-            self._push2_cycle_page(-1)
-        elif name == "page_right":
-            self._push2_cycle_page(+1)
+        elif name == "double_loop" and self.push2_mode == "pattern":
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                cur = int(getattr(seq, "num_steps", 16))
+                self._push2_last_num_steps = cur
+                seq.num_steps = 32 if cur < 32 else (64 if cur < 64 else 16)
+                self.push2_pattern_step_offset = 0
+        elif name == "undo" and self.push2_mode == "pattern":
+            # In pattern mode, Undo reverts the most recent step-count
+            # change made via Double Loop.
+            if self._push2_last_num_steps is not None:
+                seq = self._push2_pattern_sequencer()
+                if seq is not None:
+                    seq.num_steps = int(self._push2_last_num_steps)
+                    self.push2_pattern_step_offset = 0
+                self._push2_last_num_steps = None
+        elif name in ("page_left", "page_right"):
+            if self.push2_mode == "pattern":
+                seq = self._push2_pattern_sequencer()
+                if seq is not None:
+                    num_steps = int(getattr(seq, "num_steps", 16))
+                    pages = max(1, (num_steps + 7) // 8)
+                    cur_page = self.push2_pattern_step_offset // 8
+                    delta = +1 if name == "page_right" else -1
+                    new_page = (cur_page + delta) % pages
+                    self.push2_pattern_step_offset = new_page * 8
+            else:
+                self._push2_cycle_page(+1 if name == "page_right" else -1)
         elif name == "octave_up":
             if self.push2_mode == "keys":
                 self.push2_keys_base_note = min(
@@ -1576,12 +1711,20 @@ class P6App:
         elif name == "nav_right":
             if self.push2_mode == "keys":
                 self.push2_keys_root = (self.push2_keys_root + 1) % 12
+            elif self.push2_mode == "pattern":
+                pages = self.push2_pattern_launch_page_count()
+                self.push2_pattern_launch_page = (
+                    self.push2_pattern_launch_page + 1) % pages
             else:
                 pages = self.push2_launch_page_count()
                 self.push2_launch_page = (self.push2_launch_page + 1) % pages
         elif name == "nav_left":
             if self.push2_mode == "keys":
                 self.push2_keys_root = (self.push2_keys_root - 1) % 12
+            elif self.push2_mode == "pattern":
+                pages = self.push2_pattern_launch_page_count()
+                self.push2_pattern_launch_page = (
+                    self.push2_pattern_launch_page - 1) % pages
             else:
                 pages = self.push2_launch_page_count()
                 self.push2_launch_page = (self.push2_launch_page - 1) % pages
