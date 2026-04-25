@@ -415,6 +415,9 @@ class Push2Renderer:
         held = (getattr(self.app, "_push2_keys_active", None) or {}) \
                 if mode_now == "keys" else {}
 
+        # Special-encoder popup beats BPM but loses to held notes.
+        encoder_overlay = self._special_encoder_overlay() if not held else None
+
         if held:
             # Replace BPM with the currently-held note(s) so the user
             # can see exactly which key is sounding without guessing.
@@ -428,6 +431,17 @@ class Push2Renderer:
                 ns = self._font_big.render(names, True, dev_color)
             cx = SURF_W // 2 - ns.get_width() // 2
             surf.blit(ns, (cx, 4))
+        elif encoder_overlay is not None:
+            label, value, sub = encoder_overlay
+            big = self._font_hero.render(value, True, dev_color)
+            bx = SURF_W // 2 - big.get_width() // 2
+            surf.blit(big, (bx, 0))
+            lbl = self._font_tiny.render(label, True, DIM)
+            surf.blit(lbl, (bx + big.get_width() + 6,
+                            big.get_height() - lbl.get_height() - 4))
+            if sub:
+                sb = self._font_tiny.render(sub, True, DIM)
+                surf.blit(sb, (SURF_W // 2 - sb.get_width() // 2, 36))
         else:
             bpm = self._safe_bpm()
             bpm_text = f"{bpm:.1f}" if bpm is not None else "— —"
@@ -543,6 +557,32 @@ class Push2Renderer:
             letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
             pbsurf = self._font_tiny.render(f"BANK {letters}", True, dev_color)
             surf.blit(pbsurf, (14, y))
+
+    def _special_encoder_overlay(self) -> tuple | None:
+        """If the user turned a Tempo / Master / Swing encoder in the
+        last 1.5s, return (label, value, sub) for an overlay. Else None."""
+        import time as _time
+        last = getattr(self.app, "_push2_last_special_encoder", None)
+        if not last:
+            return None
+        name, ts = last
+        if _time.monotonic() - ts > 1.5:
+            return None
+        if name == "tempo":
+            try:
+                bpm = self.app.master_clock.get_bpm()
+            except Exception:
+                bpm = 120.0
+            return ("BPM", f"{bpm:.1f}", None)
+        if name == "master":
+            try:
+                vol = int(self.app.live_cc.get(0, {}).get(7, 100))
+            except Exception:
+                vol = 100
+            return ("VOL", f"{vol}", "Master  CC 7  Ch1")
+        if name == "swing":
+            return ("SWING", "—", "swing engine not implemented yet")
+        return None
 
     @staticmethod
     def _note_name(midi_note: int) -> str:
@@ -705,6 +745,16 @@ class Push2Renderer:
     # ── Data accessors (all fail-safe: render loop must never raise) ─
 
     def _safe_bpm(self):
+        # In pattern mode, the Compa master clock is authoritative
+        # for tempo. Outside pattern mode, fall back to the focused
+        # device's reported BPM.
+        try:
+            if getattr(self.app, "push2_mode", "") == "pattern":
+                mc = getattr(self.app, "master_clock", None)
+                if mc is not None:
+                    return mc.get_bpm()
+        except Exception:
+            pass
         try:
             return self.app.p6.state.bpm
         except Exception:

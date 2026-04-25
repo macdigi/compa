@@ -41,6 +41,7 @@ from engine.twister_genius import TwisterGenius
 from engine.spectra_mapper import SpectraMapper
 from engine.push2 import Push2, find_push2_ports
 from engine.controller_actions import dispatch as _dispatch_action
+from engine.master_clock import MasterClock
 try:
     from engine.push2_display import Push2Display
     from ui.push2_render import Push2Renderer
@@ -265,6 +266,14 @@ class P6App:
         # When the user switches device focus while in pattern mode we
         # reset the sequencer so per-device patterns don't bleed.
         self._push2_pattern_device: str = ""
+        # Compa master clock — drives the pattern-mode sequencer with
+        # a stable BPM regardless of device clock. Tempo encoder
+        # (Push 2 CC 14) nudges this directly.
+        self.master_clock = MasterClock(bpm=120.0)
+        # (name, monotonic_ts) for the most recent Tempo / Master /
+        # Swing encoder turn — the Push 2 renderer pops up the current
+        # value for ~1.5s after each event.
+        self._push2_last_special_encoder: tuple | None = None
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
@@ -1186,9 +1195,14 @@ class P6App:
 
     def _ensure_push2_pattern_setup(self):
         """Make sure the PiSequencer is wired to the currently-focused
-        device — sets MIDI output, hooks clock, configures pad layout,
-        and clears stale step data when the device changes so the P-6
-        and SP each have their own pattern.
+        device — sets MIDI output, configures pad layout, and clears
+        stale step data when the device changes so the P-6 and SP
+        each have their own pattern.
+
+        Tempo comes from the Compa MasterClock (set up once on app
+        init), NOT from the device's MIDI clock. That keeps step
+        timing stable independent of which sample is currently firing
+        on the device side.
 
         Idempotent: subsequent calls with the same focus are no-ops."""
         seq = self._push2_pattern_sequencer()
@@ -1214,8 +1228,10 @@ class P6App:
                 seq.set_midi_out(midi)
             except Exception:
                 pass
+            # Detach any prior device-clock hook so the device's BPM
+            # never racing the master clock.
             try:
-                midi.on_clock_tick = seq.on_tick
+                midi.on_clock_tick = None
             except Exception:
                 pass
         self._push2_pattern_device = cur_dev
@@ -1294,10 +1310,34 @@ class P6App:
                 return
 
     def _on_push2_special_encoder(self, name: str, delta: int):
-        """Tempo / Swing / Master encoders. Stub for now — registered
-        so they no longer show as unmapped CCs. Wire to BPM / master
-        volume in a follow-up once we settle on the per-device API."""
-        return
+        """Tempo / Master / Swing encoders. Records a transient event
+        so the Push 2 display can show a short popup with the current
+        value when the user turns one of these knobs."""
+        import time as _time
+        self._push2_last_special_encoder = (name, _time.monotonic())
+        if name == "tempo":
+            try:
+                self.master_clock.nudge_bpm(float(delta))
+            except Exception:
+                pass
+            return
+        if name == "master":
+            midi = self.p6
+            if midi is None:
+                return
+            ch = 0
+            current = self.live_cc.get(ch, {}).get(7, 100)
+            new_val = max(0, min(127, current + delta))
+            if new_val == current:
+                return
+            try:
+                midi.send_cc(7, new_val, channel=ch)
+                self.live_cc.setdefault(ch, {})[7] = new_val
+            except Exception:
+                pass
+            return
+        # name == "swing": stubbed (no audible effect — popup still fires
+        # so the user sees the encoder is recognized).
 
     def _on_push2_pitch_bend(self, value: int):
         """Push 2 touch strip routing.
@@ -1358,17 +1398,26 @@ class P6App:
         if value <= 0:
             return  # release — no-op for now
         if name == "play":
-            # In pattern mode, drive the PiSequencer directly so
-            # programmed steps fire. Sequencer is already wired to
-            # the focused device's MIDI + clock by the per-frame
-            # _ensure_push2_pattern_setup hook.
+            # In pattern mode, drive the PiSequencer from the Compa
+            # master clock so tempo is stable. Toggle play/stop on
+            # consecutive presses.
             if self.push2_mode == "pattern":
                 self._ensure_push2_pattern_setup()
                 seq = self._push2_pattern_sequencer()
                 if seq is not None:
                     if seq.playing:
                         seq.stop()
+                        try:
+                            self.master_clock.remove_listener(seq.on_tick)
+                            self.master_clock.stop()
+                        except Exception:
+                            pass
                     else:
+                        try:
+                            self.master_clock.add_listener(seq.on_tick)
+                            self.master_clock.start()
+                        except Exception:
+                            pass
                         seq.start()
             _dispatch_action("transport.play", value, self)
         elif name == "record":
@@ -2484,6 +2533,10 @@ class P6App:
                 self.push2_renderer.shutdown()
             except Exception:
                 pass
+        try:
+            self.master_clock.stop()
+        except Exception:
+            pass
         if self.push2_display:
             try:
                 self.push2_display.close()
