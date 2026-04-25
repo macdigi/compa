@@ -290,6 +290,10 @@ class P6App:
         # Most recent num_steps value before the last Double Loop
         # press, so Undo can revert it. None = nothing to undo.
         self._push2_last_num_steps: int | None = None
+        # Top-of-window pad offset for the step-sequencer area in
+        # pattern mode. Scrolls the 6 visible rows over the 8-pad
+        # SP-404 sequencer or a future larger-pad config.
+        self.push2_pattern_pad_offset: int = 0
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
@@ -1296,7 +1300,9 @@ class P6App:
             return
 
         # ── Step sequencer (bottom 6 rows) ────────────────────────
-        pad = 5 - row                               # row 5 → pad 0
+        # row 5 = top of seq area = first visible pad; offset shifts
+        # the window so pads beyond the first 6 are reachable.
+        pad = (5 - row) + self.push2_pattern_pad_offset
         step = self.push2_pattern_step_offset + col
         seq = self._push2_pattern_sequencer()
         if seq is None:
@@ -1533,27 +1539,37 @@ class P6App:
         if value <= 0:
             return  # release — no-op for now
         if name == "play":
-            # In pattern mode, drive the PiSequencer from the Compa
-            # master clock so tempo is stable. Toggle play/stop on
-            # consecutive presses.
+            # In pattern mode, Play toggles both the Compa sequencer
+            # AND the focused device's transport. Press 1 starts both;
+            # press 2 stops both. In other modes, just dispatch the
+            # standard transport.play action.
             if self.push2_mode == "pattern":
                 self._ensure_push2_pattern_setup()
                 seq = self._push2_pattern_sequencer()
-                if seq is not None:
-                    if seq.playing:
-                        seq.stop()
+                was_playing = bool(getattr(seq, "playing", False))
+                if was_playing:
+                    if seq is not None:
                         try:
-                            self.master_clock.remove_listener(seq.on_tick)
-                            self.master_clock.stop()
+                            seq.stop()
                         except Exception:
                             pass
-                    else:
+                    try:
+                        if seq is not None:
+                            self.master_clock.remove_listener(seq.on_tick)
+                        self.master_clock.stop()
+                    except Exception:
+                        pass
+                    _dispatch_action("transport.stop", value, self)
+                else:
+                    if seq is not None:
                         try:
                             self.master_clock.add_listener(seq.on_tick)
                             self.master_clock.start()
+                            seq.start()
                         except Exception:
                             pass
-                        seq.start()
+                    _dispatch_action("transport.play", value, self)
+                return
             _dispatch_action("transport.play", value, self)
         elif name == "record":
             _dispatch_action("transport.record", value, self)
@@ -1595,12 +1611,21 @@ class P6App:
             if self.push2_mode == "keys":
                 self.push2_keys_base_note = min(
                     115, self.push2_keys_base_note + 12)
+            elif self.push2_mode == "pattern":
+                seq = self._push2_pattern_sequencer()
+                num_pads = int(getattr(seq, "num_pads", 6)) if seq else 6
+                max_off = max(0, num_pads - 6)
+                self.push2_pattern_pad_offset = min(
+                    max_off, self.push2_pattern_pad_offset + 1)
             else:
                 self._push2_cycle_pad_page(+1)
         elif name == "octave_down":
             if self.push2_mode == "keys":
                 self.push2_keys_base_note = max(
                     0, self.push2_keys_base_note - 12)
+            elif self.push2_mode == "pattern":
+                self.push2_pattern_pad_offset = max(
+                    0, self.push2_pattern_pad_offset - 1)
             else:
                 self._push2_cycle_pad_page(-1)
         elif name == "note":

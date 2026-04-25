@@ -542,7 +542,8 @@ class Push2:
             self, current_pattern: int, total_patterns: int,
             pattern_launch_page: int,
             seq, step_offset: int,
-            launch_bright: int, launch_dim: int) -> None:
+            launch_bright: int, launch_dim: int,
+            pad_offset: int = 0) -> None:
         """Top 2 rows = pattern launch; bottom 6 rows = step sequencer.
 
         Top:
@@ -580,7 +581,7 @@ class Push2:
                 self.set_pad_color(idx, color)
                 continue
             # Step area
-            pad = 5 - row
+            pad = (5 - row) + pad_offset
             step = step_offset + col
             if seq is None or pad >= num_pads or step >= num_steps:
                 self.set_pad_color(idx, COLOR_OFF)

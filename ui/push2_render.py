@@ -366,6 +366,10 @@ class Push2Renderer:
                 offset = int(self.app.push2_pattern_step_offset)
             except Exception:
                 offset = 0
+            try:
+                pad_off = int(self.app.push2_pattern_pad_offset)
+            except Exception:
+                pad_off = 0
             seq = getattr(self.app, "_push2_pattern_sequencer",
                           lambda: None)()
             if seq is not None:
@@ -375,7 +379,7 @@ class Push2Renderer:
             else:
                 grid_hash, cstep, playing = 0, 0, False
             pattern_state = (cur_pat, total, dev_key, lp, offset,
-                             grid_hash, cstep, playing)
+                             grid_hash, cstep, playing, pad_off)
 
         frame_key = (mode, dev_key, pad_page, keys_state, pattern_state)
         if frame_key != self._last_pad_frame_key:
@@ -430,6 +434,7 @@ class Push2Renderer:
             ps_dev = pattern_state[2] if len(pattern_state) > 2 else dev_key
             lp = pattern_state[3] if len(pattern_state) > 3 else 0
             offset = pattern_state[4] if len(pattern_state) > 4 else 0
+            pad_off = pattern_state[8] if len(pattern_state) > 8 else 0
             seq = getattr(self.app, "_push2_pattern_sequencer",
                           lambda: None)()
             if ps_dev == "P-6":
@@ -446,6 +451,7 @@ class Push2Renderer:
                 step_offset=offset,
                 launch_bright=bright,
                 launch_dim=dim,
+                pad_offset=pad_off,
             )
             return
         if mode == "dj":
@@ -590,10 +596,18 @@ class Push2Renderer:
                           lambda: None)()
             num_steps = (int(getattr(seq, "num_steps", 16))
                          if seq is not None else 16)
+            num_pads = (int(getattr(seq, "num_pads", 6))
+                        if seq is not None else 6)
+            try:
+                pad_off = int(self.app.push2_pattern_pad_offset)
+            except Exception:
+                pad_off = 0
             playing = bool(getattr(seq, "playing", False)) if seq else False
             play_glyph = "▶" if playing else " "
+            pad_seg = (f"  pads {pad_off + 1}-{min(pad_off + 6, num_pads)}/{num_pads}"
+                       if num_pads > 6 else "")
             seq_text = (f"{play_glyph} steps {offset + 1}-"
-                        f"{min(offset + 8, num_steps)}/{num_steps}")
+                        f"{min(offset + 8, num_steps)}/{num_steps}{pad_seg}")
             txt = (f"PAT {cur_pat}/{total}  "
                    f"launch {launch_first}-{launch_last}{page_seg}  ·  "
                    f"{seq_text}")
