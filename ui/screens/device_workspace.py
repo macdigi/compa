@@ -1090,7 +1090,13 @@ class DeviceWorkspaceScreen:
             surf = f_small.render(pat_text, True, theme.TEXT)
             surface.blit(surf, (60, y + 4))
             surf = f_tiny.render(f"{bars} bars", True, theme.ACCENT)
-            surface.blit(surf, (row_rect.right - 60, y + 5))
+            surface.blit(surf, (row_rect.right - 92, y + 5))
+            # Per-row delete button.
+            del_rect = pygame.Rect(row_rect.right - 28, y + 3,
+                                   22, row_h - 8)
+            pygame.draw.rect(surface, theme.RED, del_rect, border_radius=3)
+            surf = f_tiny.render("X", True, theme.TEXT_BRIGHT)
+            surface.blit(surf, surf.get_rect(center=del_rect.center))
 
         if len(steps) > max_rows:
             more = f_tiny.render(
@@ -1159,6 +1165,25 @@ class DeviceWorkspaceScreen:
                 pass
             chain.steps.append(ChainStep(pattern=current_pat, bars=4))
             return
+
+        # Per-row delete buttons. Recompute the same rects the draw
+        # code used so a tap on an X removes that step.
+        list_y = top + 32
+        row_h = 22
+        steps = list(getattr(chain, "steps", []) or [])
+        max_rows = max(1, (self._controls_h - 40) // row_h)
+        for i in range(min(len(steps), max_rows)):
+            y = list_y + i * row_h
+            row_right = theme.SCREEN_WIDTH - 12
+            del_rect = pygame.Rect(row_right - 28, y + 3, 22, row_h - 8)
+            if del_rect.collidepoint(mx, my):
+                if cp.playing:
+                    cp.stop()
+                try:
+                    chain.steps.pop(i)
+                except Exception:
+                    pass
+                return
 
     def _handle_pattern_clicks(self, mx, my):
         midi = self.app._midi_connections.get(self._device_key)
