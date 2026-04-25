@@ -258,6 +258,13 @@ class P6App:
         # pad_idx → MIDI note for actively-held keys-mode notes, so
         # we can convert release events back to the right note number.
         self._push2_keys_active: dict[int, int] = {}
+        # First step displayed in pattern mode (0 = steps 1-8, 8 = 9-16
+        # for 16-step patterns). Page-left/right cycles this in mode.
+        self.push2_pattern_step_offset: int = 0
+        # Device the pattern sequencer is currently configured for.
+        # When the user switches device focus while in pattern mode we
+        # reset the sequencer so per-device patterns don't bleed.
+        self._push2_pattern_device: str = ""
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
@@ -1063,6 +1070,9 @@ class P6App:
         if self.push2_mode == "keys":
             self._on_push2_keys_pad(idx, velocity)
             return
+        if self.push2_mode == "pattern":
+            self._on_push2_pattern_pad(idx, velocity)
+            return
 
         if velocity == 0:
             return  # control mode acts only on press
@@ -1133,6 +1143,67 @@ class P6App:
             except Exception:
                 pass
 
+    def _push2_pattern_sequencer(self):
+        """Resolve the sequencer object pattern mode should drive."""
+        screen = self.screens.get("pattern")
+        return getattr(screen, "sequencer", None) if screen else None
+
+    def _ensure_push2_pattern_setup(self):
+        """Make sure the PiSequencer is wired to the currently-focused
+        device — sets MIDI output, hooks clock, configures pad layout,
+        and clears stale step data when the device changes so the P-6
+        and SP each have their own pattern.
+
+        Idempotent: subsequent calls with the same focus are no-ops."""
+        seq = self._push2_pattern_sequencer()
+        if seq is None:
+            return
+        cur_dev = getattr(self.device_manager, "focus_key", "") or ""
+        if self._push2_pattern_device == cur_dev:
+            return
+        # Device focus changed (or first time) — reset + rewire.
+        try:
+            if seq.playing:
+                seq.stop()
+            seq.clear_all()
+        except Exception:
+            pass
+        try:
+            seq.configure_for_device(cur_dev)
+        except Exception:
+            pass
+        midi = self._midi_connections.get(cur_dev)
+        if midi is not None:
+            try:
+                seq.set_midi_out(midi)
+            except Exception:
+                pass
+            try:
+                midi.on_clock_tick = seq.on_tick
+            except Exception:
+                pass
+        self._push2_pattern_device = cur_dev
+
+    def _on_push2_pattern_pad(self, idx: int, velocity: int):
+        """Pattern-mode pad — toggle a step in the active sequencer."""
+        if velocity == 0:
+            return
+        self._ensure_push2_pattern_setup()
+        seq = self._push2_pattern_sequencer()
+        if seq is None:
+            return
+        row = idx // 8
+        col = idx % 8
+        step = self.push2_pattern_step_offset + col
+        num_pads = getattr(seq, "num_pads", 0)
+        num_steps = getattr(seq, "num_steps", 0)
+        if row >= num_pads or step >= num_steps:
+            return
+        try:
+            seq.toggle_step(row, step)
+        except Exception:
+            pass
+
     def update_push2_mode(self) -> str:
         """Resolve the desired Push 2 mode from the current Compa
         screen + tab. Updates self.push2_mode and returns it. Called
@@ -1145,14 +1216,19 @@ class P6App:
                 idx = getattr(ws, "_current_tab", 0)
                 if 0 <= idx < len(tabs):
                     tab_key = tabs[idx][0]
-                    # Only "keys" has a Push 2 page implementation
-                    # right now; other tabs (sequence, looper, dj,
-                    # pattern, twister, transfer) fall through to
-                    # control until those modes are built.
-                    new_mode = "keys" if tab_key == "keys" else "control"
+                    if tab_key == "keys":
+                        new_mode = "keys"
+                    elif tab_key in ("pattern", "sequence"):
+                        new_mode = "pattern"
+                    else:
+                        new_mode = "control"
         if new_mode != self.push2_mode:
             self._on_push2_mode_change(self.push2_mode, new_mode)
             self.push2_mode = new_mode
+        # Pattern mode: keep the PiSequencer in sync with the focused
+        # device every frame (cheap when nothing changed).
+        if self.push2_mode == "pattern":
+            self._ensure_push2_pattern_setup()
         return self.push2_mode
 
     def _push2_jump_to_tab(self, tab_key: str):
@@ -1243,15 +1319,42 @@ class P6App:
         if value <= 0:
             return  # release — no-op for now
         if name == "play":
+            # In pattern mode, drive the PiSequencer directly so
+            # programmed steps fire. Sequencer is already wired to
+            # the focused device's MIDI + clock by the per-frame
+            # _ensure_push2_pattern_setup hook.
+            if self.push2_mode == "pattern":
+                self._ensure_push2_pattern_setup()
+                seq = self._push2_pattern_sequencer()
+                if seq is not None:
+                    if seq.playing:
+                        seq.stop()
+                    else:
+                        seq.start()
             _dispatch_action("transport.play", value, self)
         elif name == "record":
             _dispatch_action("transport.record", value, self)
         elif name == "stop_clip":
+            if self.push2_mode == "pattern":
+                seq = self._push2_pattern_sequencer()
+                if seq is not None and seq.playing:
+                    seq.stop()
             _dispatch_action("transport.stop", value, self)
         elif name == "page_left":
-            self._push2_cycle_page(-1)
+            if self.push2_mode == "pattern":
+                self.push2_pattern_step_offset = max(
+                    0, self.push2_pattern_step_offset - 8)
+            else:
+                self._push2_cycle_page(-1)
         elif name == "page_right":
-            self._push2_cycle_page(+1)
+            if self.push2_mode == "pattern":
+                seq = self._push2_pattern_sequencer()
+                if seq is not None:
+                    max_off = max(0, getattr(seq, "num_steps", 16) - 8)
+                    self.push2_pattern_step_offset = min(
+                        max_off, self.push2_pattern_step_offset + 8)
+            else:
+                self._push2_cycle_page(+1)
         elif name == "octave_up":
             if self.push2_mode == "keys":
                 self.push2_keys_base_note = min(

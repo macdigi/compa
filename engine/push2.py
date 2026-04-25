@@ -444,6 +444,54 @@ class Push2:
         base_oct_midi = (base_note // 12) * 12
         return base_oct_midi + root_pc + oct_shift * 12 + pc_in
 
+    # ── Pattern / Sequence mode layout ──────────────────────────────
+
+    # Color per row in the pattern grid so each pad is visually distinct.
+    PATTERN_ROW_COLORS = [127, 125, 126, 8, 9, 60, 73, 122]
+
+    def light_pattern_layout(self, seq, step_offset: int = 0) -> None:
+        """Paint Push 2 as a step-sequencer grid.
+
+        Layout:
+          row N  → pad N of the sequencer (rows 0-7 → pads 0-7)
+          col N  → step (step_offset + N), 8 visible at a time
+          page_left/right cycles step_offset for 16-step patterns
+
+        Lighting:
+          step on  + current playhead → bright white (playing now)
+          step on  + not current      → row's color (programmed)
+          step off + current playhead → dim white (playhead chase)
+          step off + not current      → off
+        Pads outside the sequencer's pad/step bounds stay off."""
+        if seq is None:
+            for i in range(64):
+                self.set_pad_color(i, COLOR_OFF)
+            return
+        current = seq.current_step if getattr(seq, "playing", False) else -1
+        num_pads = getattr(seq, "num_pads", 8)
+        num_steps = getattr(seq, "num_steps", 16)
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            step = step_offset + col
+            if row >= num_pads or step >= num_steps:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            try:
+                is_on = bool(seq.grid[row][step].active)
+            except Exception:
+                is_on = False
+            is_current = step == current
+            if is_on and is_current:
+                color = 122
+            elif is_on:
+                color = self.PATTERN_ROW_COLORS[row % len(self.PATTERN_ROW_COLORS)]
+            elif is_current:
+                color = 3
+            else:
+                color = COLOR_OFF
+            self.set_pad_color(idx, color)
+
     def light_in_key_layout(self, scale_offsets: tuple[int, ...],
                             root_pc: int = 0, base_note: int = 36,
                             row_offset_degrees: int = 3,

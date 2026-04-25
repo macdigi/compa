@@ -225,6 +225,19 @@ class Push2Renderer:
             push2.set_button("octave_up", octave_color)
             self._last_octave_leds = (octave_color, octave_color)
 
+        # Page-left / page-right LEDs in pattern mode reflect step pages.
+        if mode_for_oct == "pattern":
+            try:
+                seq = self.app._push2_pattern_sequencer()
+                offset = int(self.app.push2_pattern_step_offset)
+                num_steps = getattr(seq, "num_steps", 16) if seq else 16
+            except Exception:
+                offset = 0
+                num_steps = 16
+            push2.set_button("page_left", 22 if offset > 0 else 3)
+            push2.set_button("page_right",
+                             22 if offset + 8 < num_steps else 3)
+
         # D-pad: in keys mode, up/down cycle scales, left/right cycle
         # root. Light all four dim white so the user sees they're live.
         nav_color = 22 if mode_for_oct == "keys" else 0
@@ -291,13 +304,48 @@ class Push2Renderer:
                         hi = pn + br
             keys_state = (base_note, lo, hi, scale_idx, root_pc)
 
-        frame_key = (mode, dev_key, pad_page, keys_state)
+        # Pattern-mode state — playhead position + step offset force
+        # repaints as the sequencer plays.
+        pattern_state: tuple = ()
+        if mode == "pattern":
+            seq = getattr(self.app, "_push2_pattern_sequencer",
+                          lambda: None)()
+            if seq is not None:
+                pattern_state = (
+                    int(getattr(seq, "current_step", 0)),
+                    bool(getattr(seq, "playing", False)),
+                    int(getattr(self.app, "push2_pattern_step_offset", 0)),
+                    # Re-render whenever a step is toggled by hashing the
+                    # grid's "active" bits cheaply.
+                    self._sequencer_grid_hash(seq),
+                )
+
+        frame_key = (mode, dev_key, pad_page, keys_state, pattern_state)
         if frame_key != self._last_pad_frame_key:
-            self._repaint_pad_frame(push2, mode, dev_key, pad_page, keys_state)
+            self._repaint_pad_frame(push2, mode, dev_key, pad_page,
+                                    keys_state, pattern_state)
             self._last_pad_frame_key = frame_key
 
+    @staticmethod
+    def _sequencer_grid_hash(seq) -> int:
+        """Cheap hash of the sequencer grid's active flags — used to
+        detect step toggles so the Push 2 repaints immediately."""
+        try:
+            num_pads = getattr(seq, "num_pads", 0)
+            num_steps = getattr(seq, "num_steps", 0)
+            h = 0
+            for p in range(min(num_pads, 8)):
+                row = seq.grid[p]
+                for s in range(min(num_steps, 16)):
+                    if row[s].active:
+                        h ^= (1 << ((p * 16 + s) & 63))
+            return h
+        except Exception:
+            return 0
+
     def _repaint_pad_frame(self, push2, mode, dev_key, pad_page,
-                           keys_state: tuple = ()) -> None:
+                           keys_state: tuple = (),
+                           pattern_state: tuple = ()) -> None:
         if mode == "keys":
             from engine.push2 import SCALES
             base_note = keys_state[0] if len(keys_state) > 0 else 36
@@ -316,6 +364,12 @@ class Push2Renderer:
                     offsets, root_pc=root_pc,
                     base_note=base_note, min_note=lo, max_note=hi,
                 )
+            return
+        if mode == "pattern":
+            seq = getattr(self.app, "_push2_pattern_sequencer",
+                          lambda: None)()
+            offset = pattern_state[2] if len(pattern_state) > 2 else 0
+            push2.light_pattern_layout(seq, step_offset=offset)
             return
         if dev_key == "SP-404MKII":
             push2.light_bank_frame_for_page(pad_page, num_banks=10)
@@ -396,6 +450,28 @@ class Push2Renderer:
         # ── Mode-specific status line(s) under the device pill ────
         # `mode_now` already resolved above when picking the centerpiece.
         y = 32
+        if mode_now == "pattern":
+            # Pattern-mode status line: play state, page, step counter.
+            seq = getattr(self.app, "_push2_pattern_sequencer",
+                          lambda: None)()
+            offset = getattr(self.app, "push2_pattern_step_offset", 0)
+            page = offset // 8 + 1
+            if seq is not None:
+                total_pages = max(1, (getattr(seq, "num_steps", 16) + 7) // 8)
+                play_glyph = "▶" if getattr(seq, "playing", False) else "■"
+                cstep = (int(getattr(seq, "current_step", 0)) + 1
+                         if getattr(seq, "playing", False) else 0)
+                num_steps = getattr(seq, "num_steps", 16)
+                step_txt = (f"Step {cstep}/{num_steps}" if cstep
+                            else f"{num_steps} steps")
+                txt = (f"{play_glyph}  PATTERN  "
+                       f"Page {page}/{total_pages}  ·  {step_txt}")
+            else:
+                txt = "PATTERN  (no sequencer)"
+            psurf = self._font_tiny.render(txt, True, dev_color)
+            surf.blit(psurf, (14, y))
+            return
+
         if mode_now == "keys":
             # Range + scale + root on a single status line. Compute the
             # actual range from the layout in use so in-key mode reports
