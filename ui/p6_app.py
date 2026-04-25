@@ -487,6 +487,8 @@ class P6App:
                 self.push2.on_pad = self._on_push2_pad
                 self.push2.on_button = self._on_push2_button
                 self.push2.on_encoder = self._on_push2_encoder
+                self.push2.on_special_encoder = self._on_push2_special_encoder
+                self.push2.on_pitch_bend = self._on_push2_pitch_bend
                 got_user = p2_ports.get("user_in") is not None
                 got_live = p2_ports.get("live_in") is not None
                 print(f"Push 2 connected (User={got_user}, Live={got_live})")
@@ -1096,21 +1098,27 @@ class P6App:
 
     def _on_push2_keys_pad(self, idx: int, velocity: int):
         """Keys-mode pad — forward as a chromatic note to the focused
-        device. When a scale other than chromatic is selected,
-        off-scale pads silently no-op so the user can't hit wrong
-        notes."""
-        from engine.push2 import Push2, SCALES, in_scale
+        device. Pad-to-note mapping depends on the active scale:
+          - chromatic scale → chromatic layout (each pad = +1 semitone)
+          - any other scale → in-key layout (each pad = next scale
+            degree; every pad IS a scale note, no off-scale pads)."""
+        from engine.push2 import Push2, SCALES
         kb = getattr(self, "chromatic_kb", None)
         if kb is None:
             return
+        scale_name, scale_offsets = SCALES[
+            self.push2_keys_scale % len(SCALES)]
+
         if velocity > 0:
-            note = Push2.keys_pad_to_note(
-                idx, base_note=self.push2_keys_base_note)
-            # Scale lock: silently swallow off-scale pads when not chromatic.
-            scale_name, scale_offsets = SCALES[self.push2_keys_scale % len(SCALES)]
-            if scale_name != "chromatic" and not in_scale(
-                    note, self.push2_keys_root, scale_offsets):
-                return
+            if scale_name == "chromatic":
+                note = Push2.keys_pad_to_note(
+                    idx, base_note=self.push2_keys_base_note)
+            else:
+                note = Push2.in_key_pad_to_note(
+                    idx, scale_offsets,
+                    root_pc=self.push2_keys_root,
+                    base_note=self.push2_keys_base_note,
+                )
             self._push2_keys_active[idx] = note
             try:
                 kb._forward_note_on(note, velocity)
@@ -1146,6 +1154,60 @@ class P6App:
             self._on_push2_mode_change(self.push2_mode, new_mode)
             self.push2_mode = new_mode
         return self.push2_mode
+
+    def _push2_jump_to_tab(self, tab_key: str):
+        """Switch the device-workspace screen and select a specific
+        tab. Used by the Push 2 mode buttons (Note → keys tab, etc.)."""
+        if self.current_screen_name != "device_workspace":
+            try:
+                self.switch_screen("device_workspace")
+            except Exception:
+                return
+        ws = self.screens.get("device_workspace")
+        if ws is None:
+            return
+        tabs = getattr(ws, "_tabs", [])
+        for i, entry in enumerate(tabs):
+            if entry and entry[0] == tab_key:
+                ws._current_tab = i
+                if hasattr(ws, "_build_knobs"):
+                    try:
+                        ws._build_knobs()
+                    except Exception:
+                        pass
+                return
+
+    def _on_push2_special_encoder(self, name: str, delta: int):
+        """Tempo / Swing / Master encoders. Stub for now — registered
+        so they no longer show as unmapped CCs. Wire to BPM / master
+        volume in a follow-up once we settle on the per-device API."""
+        return
+
+    def _on_push2_pitch_bend(self, value: int):
+        """Push 2 touch strip → pitch bend forwarding. Diagnostic
+        logging on each call so we can see why the SP isn't bending."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        midi = self._midi_connections.get(dev_key) if dev_key else None
+        out_ok = midi is not None and getattr(midi, "_out", None) is not None
+        # SP-404 plays chromatic notes on ch16 (0-indexed = 15); P-6 on
+        # its sampler channel (typically ch10 / 9). Send pitch bend on
+        # the same channel the chromatic note is sounding on.
+        if dev_key == "SP-404MKII":
+            ch = 15
+        elif dev_key == "P-6":
+            ch = 9
+        else:
+            ch = 0
+        print(f"[push2-pb] mode={self.push2_mode} dev={dev_key} "
+              f"val={value} out_ok={out_ok} ch={ch}", flush=True)
+        if not out_ok:
+            return
+        lsb = value & 0x7F
+        msb = (value >> 7) & 0x7F
+        try:
+            midi._out.send_message([0xE0 | ch, lsb, msb])
+        except Exception as e:
+            print(f"[push2-pb] send failed: {e}", flush=True)
 
     def _on_push2_mode_change(self, prev: str, new: str):
         """Handle a Push 2 mode transition. Releases held notes from
@@ -1202,6 +1264,33 @@ class P6App:
                     0, self.push2_keys_base_note - 12)
             else:
                 self._push2_cycle_pad_page(-1)
+        elif name == "note":
+            # Hardware shortcut to the KEYS tab of the focused device.
+            self._push2_jump_to_tab("keys")
+        elif name == "session":
+            try:
+                self.switch_screen("session")
+            except Exception:
+                pass
+        elif name == "browse":
+            try:
+                self.switch_screen("files")
+            except Exception:
+                pass
+        elif name == "device":
+            self._push2_jump_to_tab("control")
+        elif name.startswith("bot_select_") and self.push2_mode == "control":
+            # Bottom-row select buttons map to the SP-404 bus selector
+            # (B1, B2, B3, B4, IN) in SP control mode. Buttons 6-8 are
+            # reserved for future per-device features (kit, scene, etc.).
+            dev_key = getattr(self.device_manager, "focus_key", None)
+            if dev_key == "SP-404MKII":
+                try:
+                    idx = int(name.rsplit("_", 1)[1]) - 1
+                except Exception:
+                    return
+                if 0 <= idx <= 4 and getattr(self, "twister", None) is not None:
+                    self.twister.active_bus = idx
         elif name == "nav_up" and self.push2_mode == "keys":
             from engine.push2 import SCALES
             self.push2_keys_scale = (self.push2_keys_scale + 1) % len(SCALES)

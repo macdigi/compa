@@ -94,7 +94,10 @@ class Push2Renderer:
         self._last_play_led = -1
         self._last_record_led = -1
         self._last_topselect_leds = [-1] * 8
+        self._last_botselect_leds = [-1] * 8
         self._last_octave_leds = (-1, -1)   # (down, up)
+        # Whether we've painted the "always-dim" named-button set yet.
+        self._lit_static_buttons = False
 
         # Track pad-frame state so we repaint pads only when device or
         # pad_page changes (not every frame).
@@ -133,12 +136,39 @@ class Push2Renderer:
             if sleep_for > 0:
                 time.sleep(sleep_for)
 
+    # Set of mapped buttons we light dim once at startup so they're
+    # visible in a dark studio. Anything that gets a context-specific
+    # color from the dynamic block below overrides this.
+    _STATIC_DIM_BUTTONS = (
+        "note", "session", "scale", "layout",
+        "browse", "device", "mix", "clip",
+        "add_device", "add_track", "master",
+        "tap_tempo", "metronome", "delete", "undo",
+        "convert", "double_loop", "quantize", "new", "fixed_length",
+        "duplicate", "automate",
+        "shift", "select", "setup", "user",
+        "stop_clip", "mute", "solo",
+        "launch_1", "launch_2", "launch_3", "launch_4",
+        "launch_5", "launch_6", "launch_7", "launch_8",
+    )
+
     def _update_button_leds(self) -> None:
         """Push state-driven LED updates to the Push 2. Only sends MIDI
         when a value actually changed so we don't flood the bus."""
         push2 = getattr(self.app, "push2", None)
         if push2 is None:
             return
+
+        # One-shot: paint every mapped non-pad button at a dim level so
+        # the user can see them in a dark room. Dynamic blocks below
+        # override per-button as needed.
+        if not self._lit_static_buttons:
+            for btn in self._STATIC_DIM_BUTTONS:
+                try:
+                    push2.set_button(btn, 3)
+                except Exception:
+                    pass
+            self._lit_static_buttons = True
 
         # Transport: green Play when playing, dim white when idle;
         # red Record when recording, dim white when idle.
@@ -203,6 +233,30 @@ class Push2Renderer:
             # because we update only on mode changes effectively.
             push2.set_button(btn, nav_color)
 
+        # Bottom-row select buttons: SP-404 bus selector in control mode.
+        # Active bus lit bright in its bus color; available buses dim;
+        # unmapped slots off.
+        try:
+            dev_key_for_bot = self.app.device_manager.focus_key
+        except Exception:
+            dev_key_for_bot = None
+        bot_colors = [-1] * 8
+        if mode_for_oct == "control" and dev_key_for_bot == "SP-404MKII":
+            try:
+                active_bus = int(self.app.twister.active_bus)
+            except Exception:
+                active_bus = 0
+            # B1=red, B2=blue, B3=green, B4=yellow, IN=orange
+            bus_palette = [127, 125, 126, 8, 9]
+            for i in range(5):
+                bot_colors[i] = bus_palette[i] if i == active_bus else 1
+            # 6-8 stay -1 → mapped to 0 below
+        for i in range(8):
+            color = bot_colors[i] if bot_colors[i] >= 0 else 0
+            if self._last_botselect_leds[i] != color:
+                push2.set_button(f"bot_select_{i + 1}", color)
+                self._last_botselect_leds[i] = color
+
         # Resolve Push 2 mode from the active Compa tab.
         try:
             mode = self.app.update_push2_mode()
@@ -251,11 +305,17 @@ class Push2Renderer:
             hi = keys_state[2] if len(keys_state) > 2 else None
             scale_idx = keys_state[3] if len(keys_state) > 3 else 0
             root_pc = keys_state[4] if len(keys_state) > 4 else 0
-            _name, offsets = SCALES[scale_idx % len(SCALES)]
-            push2.light_keys_layout(
-                base_note=base_note, min_note=lo, max_note=hi,
-                scale=offsets, root_pc=root_pc,
-            )
+            name, offsets = SCALES[scale_idx % len(SCALES)]
+            if name == "chromatic":
+                push2.light_keys_layout(
+                    base_note=base_note, min_note=lo, max_note=hi,
+                    scale=offsets, root_pc=root_pc,
+                )
+            else:
+                push2.light_in_key_layout(
+                    offsets, root_pc=root_pc,
+                    base_note=base_note, min_note=lo, max_note=hi,
+                )
             return
         if dev_key == "SP-404MKII":
             push2.light_bank_frame_for_page(pad_page, num_banks=10)
@@ -337,15 +397,24 @@ class Push2Renderer:
         # `mode_now` already resolved above when picking the centerpiece.
         y = 32
         if mode_now == "keys":
-            # Range + scale + root on a single status line.
-            from engine.push2 import SCALES, ROOT_NAMES
+            # Range + scale + root on a single status line. Compute the
+            # actual range from the layout in use so in-key mode reports
+            # the correct top note (it spans more octaves than chromatic).
+            from engine.push2 import SCALES, ROOT_NAMES, Push2
             base = getattr(self.app, "push2_keys_base_note", 36)
-            top = base + 7 * 5 + 7
             scale_idx = getattr(self.app, "push2_keys_scale", 0)
             root_pc = getattr(self.app, "push2_keys_root", 0)
-            scale_name, _ = SCALES[scale_idx % len(SCALES)]
+            scale_name, offsets = SCALES[scale_idx % len(SCALES)]
+            if scale_name == "chromatic":
+                bottom_note = base
+                top_note = base + 7 * 5 + 7
+            else:
+                bottom_note = Push2.in_key_pad_to_note(
+                    0, offsets, root_pc=root_pc, base_note=base)
+                top_note = Push2.in_key_pad_to_note(
+                    63, offsets, root_pc=root_pc, base_note=base)
             root = ROOT_NAMES[root_pc % 12]
-            range_txt = f"{self._note_name(base)}—{self._note_name(top)}"
+            range_txt = f"{self._note_name(bottom_note)}—{self._note_name(top_note)}"
             txt = f"KEYS  {root} {scale_name}  ·  {range_txt}"
             ksurf = self._font_tiny.render(txt, True, dev_color)
             surf.blit(ksurf, (14, y))

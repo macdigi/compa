@@ -90,6 +90,42 @@ _BUTTON_CC = {
     25: "bot_select_6",
     26: "bot_select_7",
     27: "bot_select_8",
+    # Mode buttons (bottom row)
+    50: "note",
+    51: "session",
+    58: "scale",
+    # Right column above D-pad
+    110: "device",
+    111: "browse",
+    112: "mix",
+    113: "clip",
+    # Left side, above the launch column
+    52: "add_device",
+    53: "add_track",
+    28: "master",
+    # Edit / pattern column (left side)
+    35: "convert",
+    87: "new",
+    90: "fixed_length",
+    116: "quantize",
+    117: "double_loop",
+    # 8 launch buttons with time divisions (top→bottom: 1/4 → 1/32t)
+    43: "launch_1",
+    42: "launch_2",
+    41: "launch_3",
+    40: "launch_4",
+    39: "launch_5",
+    38: "launch_6",
+    37: "launch_7",
+    36: "launch_8",
+}
+
+# Special-purpose encoders (separate from the 8 main perf encoders).
+# Same relative-encoding scheme: CW = 1..63, CCW = 127..65 as 2's-complement.
+SPECIAL_ENCODER_CCS: dict[int, str] = {
+    14: "tempo",     # left-side notched
+    15: "swing",     # left-side smooth
+    79: "master",    # top-right smooth
 }
 
 # Reverse map — name → CC number, for sending LED color commands to
@@ -220,6 +256,10 @@ class Push2:
         self.on_pad: Optional[Callable[[int, int], None]] = None
         self.on_button: Optional[Callable[[str, int], None]] = None
         self.on_encoder: Optional[Callable[[int, int], None]] = None
+        # Special encoders: callback(name, delta_int).
+        self.on_special_encoder: Optional[Callable[[str, int], None]] = None
+        # Touch strip: callback(value_14bit) where 8192 = center.
+        self.on_pitch_bend: Optional[Callable[[int], None]] = None
 
         # Per-pad base color. Press-flash sends a transient color without
         # touching this; note-off restores the base so kit colors persist.
@@ -383,6 +423,48 @@ class Push2:
         col = pad_idx % 8
         return base_note + row * row_offset + col
 
+    # ── In-key layout (every pad is a scale note) ────────────────────
+
+    @staticmethod
+    def in_key_pad_to_note(pad_idx: int,
+                           scale_offsets: tuple[int, ...],
+                           root_pc: int = 0,
+                           base_note: int = 36,
+                           row_offset_degrees: int = 3) -> int:
+        """Map pad to MIDI note in in-key layout. Bottom-left pad
+        plays the root in the octave containing `base_note`. Row
+        offset of 3 scale degrees gives Ableton-Push-style chord
+        shapes (root + 3rd + 5th vertically aligned)."""
+        row = pad_idx // 8
+        col = pad_idx % 8
+        n = max(1, len(scale_offsets))
+        degree = row * row_offset_degrees + col
+        oct_shift = degree // n
+        pc_in = scale_offsets[degree % n]
+        base_oct_midi = (base_note // 12) * 12
+        return base_oct_midi + root_pc + oct_shift * 12 + pc_in
+
+    def light_in_key_layout(self, scale_offsets: tuple[int, ...],
+                            root_pc: int = 0, base_note: int = 36,
+                            row_offset_degrees: int = 3,
+                            min_note: int | None = None,
+                            max_note: int | None = None) -> None:
+        """Paint pads as in-key layout: every pad lights either blue
+        (root, every octave) or white (in-scale). No off-scale pads
+        because every pad IS a scale note."""
+        lo = 0 if min_note is None else min_note
+        hi = 127 if max_note is None else max_note
+        for idx in range(64):
+            note = Push2.in_key_pad_to_note(
+                idx, scale_offsets, root_pc, base_note, row_offset_degrees)
+            if note > 127 or note < lo or note > hi:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            if (note - root_pc) % 12 == 0:
+                self.set_pad_color(idx, 125)  # blue root
+            else:
+                self.set_pad_color(idx, 122)  # white in-scale
+
     # ── Button LED control ───────────────────────────────────────────
 
     def set_button(self, name: str, color: int) -> None:
@@ -450,12 +532,42 @@ class Push2:
                         except Exception as e:
                             log.warning("Push 2 encoder callback failed: %s", e)
                 return
+            # Special encoders (Tempo / Swing / Master).
+            if channel == PAD_CHANNEL and cc in SPECIAL_ENCODER_CCS:
+                if self.on_special_encoder is not None:
+                    delta = value - 128 if value >= 64 else value
+                    if delta != 0:
+                        name = SPECIAL_ENCODER_CCS[cc]
+                        try:
+                            self.on_special_encoder(name, delta)
+                        except Exception as e:
+                            log.warning("Push 2 special encoder failed: %s", e)
+                return
             name = _BUTTON_CC.get(cc) if channel == PAD_CHANNEL else None
             if name and self.on_button is not None:
                 try:
                     self.on_button(name, value)
                 except Exception as e:
                     log.warning("Push 2 button callback failed: %s", e)
+            elif name is None and value > 0:
+                print(f"[push2] unmapped CC ch{channel} cc={cc} "
+                      f"val={value}", flush=True)
+            return
+
+        # Channel pressure (touchstrip) and other types — log when they
+        # carry a meaningful value so we can map them.
+        if status == 0xD0 and len(data) >= 2 and data[1] > 0:
+            print(f"[push2] channel pressure ch{channel} val={data[1]}",
+                  flush=True)
+            return
+        if status == 0xE0 and len(data) >= 3:
+            # Pitch bend — Push 2's touch strip in default firmware mode.
+            val = (data[2] << 7) | data[1]
+            if self.on_pitch_bend is not None:
+                try:
+                    self.on_pitch_bend(val)
+                except Exception as e:
+                    log.warning("Push 2 pitch bend callback failed: %s", e)
             return
 
     # ── Lifecycle ───────────────────────────────────────────────────
