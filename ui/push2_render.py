@@ -187,7 +187,12 @@ class Push2Renderer:
             push2.set_button("octave_up", octave_color)
             self._last_octave_leds = (octave_color, octave_color)
 
-        # Repaint pad frame when the bank window changes.
+        # Resolve Push 2 mode from the active Compa tab.
+        try:
+            mode = self.app.update_push2_mode()
+        except Exception:
+            mode = "control"
+
         try:
             dev_key = self.app.device_manager.focus_key
         except Exception:
@@ -196,17 +201,18 @@ class Push2Renderer:
             pad_page = self.app.push2_pad_page
         except Exception:
             pad_page = 0
-        frame_key = (dev_key, pad_page)
+        frame_key = (mode, dev_key, pad_page)
         if frame_key != self._last_pad_frame_key:
-            self._repaint_pad_frame(push2, dev_key, pad_page)
+            self._repaint_pad_frame(push2, mode, dev_key, pad_page)
             self._last_pad_frame_key = frame_key
 
-    def _repaint_pad_frame(self, push2, dev_key, pad_page) -> None:
+    def _repaint_pad_frame(self, push2, mode, dev_key, pad_page) -> None:
+        if mode == "keys":
+            push2.light_keys_layout()
+            return
         if dev_key == "SP-404MKII":
             push2.light_bank_frame_for_page(pad_page, num_banks=10)
         else:
-            # P-6 and others: show all 4 stripe colors but only the
-            # bottom row-pair is actually wired to trigger.
             push2.light_bank_frame()
 
     # ── Scene composition ─────────────────────────────────────────

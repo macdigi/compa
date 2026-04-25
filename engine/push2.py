@@ -310,6 +310,42 @@ class Push2:
         """Transient flash that does not update the base color."""
         self._send_pad_raw(pad_idx, color)
 
+    # ── Keys mode pad layout ───────────────────────────────────────
+
+    def light_keys_layout(self, base_note: int = 36,
+                          row_offset: int = 5,
+                          min_note: int | None = None,
+                          max_note: int | None = None) -> None:
+        """Light pads as a chromatic keyboard with rows offset by
+        `row_offset` semitones (5 = perfect-fourth, the Ableton Push
+        default that allows guitar-style chord shapes).
+
+        C notes light blue, all other notes light white. Notes outside
+        [min_note, max_note] (when provided) or above MIDI 127 stay
+        off — useful for showing the playable range on devices like
+        the SP-404 MK2 that only support a 2-octave chromatic span."""
+        lo = 0 if min_note is None else min_note
+        hi = 127 if max_note is None else max_note
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            note = base_note + row * row_offset + col
+            if note > 127 or note < lo or note > hi:
+                color = COLOR_OFF
+            elif note % 12 == 0:
+                color = 125  # blue — every C
+            else:
+                color = 122  # white — everything else
+            self.set_pad_color(idx, color)
+
+    @staticmethod
+    def keys_pad_to_note(pad_idx: int, base_note: int = 36,
+                         row_offset: int = 5) -> int:
+        """Inverse of light_keys_layout — returns MIDI note for pad."""
+        row = pad_idx // 8
+        col = pad_idx % 8
+        return base_note + row * row_offset + col
+
     # ── Button LED control ───────────────────────────────────────────
 
     def set_button(self, name: str, color: int) -> None:
@@ -353,8 +389,15 @@ class Push2:
                         except Exception as e:
                             log.warning("Push 2 pad callback failed: %s", e)
                 else:
-                    # Note-off OR note-on velocity 0 — restore base.
+                    # Note-off OR note-on velocity 0 — restore base AND
+                    # notify the app handler so modes that need release
+                    # events (Keys, Sequence) can act on it.
                     self.restore_pad(idx)
+                    if self.on_pad is not None:
+                        try:
+                            self.on_pad(idx, 0)
+                        except Exception as e:
+                            log.warning("Push 2 pad release callback failed: %s", e)
                 return
             return
 

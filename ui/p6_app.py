@@ -251,6 +251,13 @@ class P6App:
         self.push2_page: int = 0
         # Pad-bank page. 0 = A-D, 1 = E-H, 2 = I-J (SP-404 MK2 has 10 banks).
         self.push2_pad_page: int = 0
+        # Push 2 surface mode — tracks the focused device-workspace tab
+        # so the Push 2 surface re-roles (control / keys / sequence /
+        # pattern / etc.) in lockstep with the Compa touchscreen.
+        self.push2_mode: str = "control"
+        # pad_idx → MIDI note for actively-held keys-mode notes, so
+        # we can convert release events back to the right note number.
+        self._push2_keys_active: dict[int, int] = {}
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -1039,15 +1046,16 @@ class P6App:
     # ── Push 2 callbacks ─────────────────────────────────────────────
 
     def _on_push2_pad(self, idx: int, velocity: int):
-        """Push 2 pad hit.
+        """Push 2 pad hit. Dispatch depends on the current push2_mode,
+        which mirrors the focused device-workspace tab on Compa
+        (control / keys / sequence / pattern / ...)."""
+        if self.push2_mode == "keys":
+            self._on_push2_keys_pad(idx, velocity)
+            return
 
-        For SP-404 MK2: pad_page selects a window of 4 banks (A-D /
-        E-H / I-J). Row-pairs 0-3 of the Push 2 grid map to banks at
-        offset (pad_page*4 + 0..3). Unused row-pairs on the last page
-        no-op.
+        if velocity == 0:
+            return  # control mode acts only on press
 
-        For P-6: only the bottom two rows fire, using pad.trigger.N
-        (respects P-6's own current_bank)."""
         bank_offset = idx // 16
         pad_in_bank = idx % 16
         dev_key = getattr(self.device_manager, "focus_key", None)
@@ -1076,6 +1084,66 @@ class P6App:
 
         if bank_offset == 0:
             _dispatch_action(f"pad.trigger.{pad_in_bank + 1}", velocity, self)
+
+    def _on_push2_keys_pad(self, idx: int, velocity: int):
+        """Keys-mode pad — forward as a chromatic note to the focused
+        device via Compa's chromatic keyboard engine (which already
+        knows how to route SP-404 pitch-bend chromatic mode vs P-6's
+        sampler-channel scheme)."""
+        from engine.push2 import Push2
+        kb = getattr(self, "chromatic_kb", None)
+        if kb is None:
+            return
+        if velocity > 0:
+            note = Push2.keys_pad_to_note(idx)
+            self._push2_keys_active[idx] = note
+            try:
+                kb._forward_note_on(note, velocity)
+            except Exception:
+                pass
+        else:
+            note = self._push2_keys_active.pop(idx, None)
+            if note is None:
+                return
+            try:
+                kb._forward_note_off(note)
+            except Exception:
+                pass
+
+    def update_push2_mode(self) -> str:
+        """Resolve the desired Push 2 mode from the current Compa
+        screen + tab. Updates self.push2_mode and returns it. Called
+        each frame by the Push 2 renderer."""
+        new_mode = "control"
+        if self.current_screen_name == "device_workspace":
+            ws = self.screens.get("device_workspace")
+            if ws is not None:
+                tabs = getattr(ws, "_tabs", [])
+                idx = getattr(ws, "_current_tab", 0)
+                if 0 <= idx < len(tabs):
+                    tab_key = tabs[idx][0]
+                    # Only "keys" has a Push 2 page implementation
+                    # right now; other tabs (sequence, looper, dj,
+                    # pattern, twister, transfer) fall through to
+                    # control until those modes are built.
+                    new_mode = "keys" if tab_key == "keys" else "control"
+        if new_mode != self.push2_mode:
+            self._on_push2_mode_change(self.push2_mode, new_mode)
+            self.push2_mode = new_mode
+        return self.push2_mode
+
+    def _on_push2_mode_change(self, prev: str, new: str):
+        """Handle a Push 2 mode transition. Releases held notes from
+        the previous mode so they don't sustain across the switch."""
+        if prev == "keys":
+            kb = getattr(self, "chromatic_kb", None)
+            for _idx, note in list(self._push2_keys_active.items()):
+                try:
+                    if kb:
+                        kb._forward_note_off(note)
+                except Exception:
+                    pass
+            self._push2_keys_active.clear()
 
     def _push2_sp_bank_count(self) -> int:
         """SP-404 MK2 supports 10 banks (A-J). Constant for now; could
