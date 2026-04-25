@@ -482,7 +482,61 @@ class Push2:
                 color = COLOR_OFF
             self.set_pad_color(idx, color)
 
-    # ── Pattern / Sequence mode layout ──────────────────────────────
+    # ── Pattern launch layout ───────────────────────────────────────
+
+    def light_pattern_launch_layout(self, current_pattern: int,
+                                     total_patterns: int,
+                                     bright_color: int,
+                                     dim_color: int) -> None:
+        """Paint a pattern-launch grid that mirrors Compa's PATTERN tab.
+
+        Pattern 1 = top-left. P-6 (64 patterns) fills the whole 8x8;
+        SP-404 (16 patterns) fills the bottom-left 4x4 quadrant.
+        Current pattern lights bright; others dim. Outside the active
+        region stays off."""
+        if total_patterns >= 64:
+            n_cols, n_rows = 8, 8
+        elif total_patterns >= 16:
+            n_cols, n_rows = 4, 4
+        else:
+            n_cols, n_rows = 8, 1
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            if col >= n_cols or row >= n_rows:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            inv_row = (n_rows - 1) - row
+            pattern = inv_row * n_cols + col + 1
+            if pattern > total_patterns:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            self.set_pad_color(idx,
+                               bright_color if pattern == current_pattern
+                               else dim_color)
+
+    @staticmethod
+    def pattern_launch_pad_to_pattern(pad_idx: int,
+                                      total_patterns: int) -> int | None:
+        """Inverse of light_pattern_launch_layout — pad idx → pattern N
+        (1-indexed). Returns None if the pad is outside the active grid."""
+        if total_patterns >= 64:
+            n_cols, n_rows = 8, 8
+        elif total_patterns >= 16:
+            n_cols, n_rows = 4, 4
+        else:
+            return None
+        row = pad_idx // 8
+        col = pad_idx % 8
+        if col >= n_cols or row >= n_rows:
+            return None
+        inv_row = (n_rows - 1) - row
+        pattern = inv_row * n_cols + col + 1
+        if pattern > total_patterns:
+            return None
+        return pattern
+
+    # ── Step-sequencer mode layout (kept for future re-expose) ──────
 
     # Color per row in the pattern grid so each pad is visually distinct.
     PATTERN_ROW_COLORS = [127, 125, 126, 8, 9, 60, 73, 122]

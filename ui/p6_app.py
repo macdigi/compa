@@ -274,6 +274,12 @@ class P6App:
         # Swing encoder turn — the Push 2 renderer pops up the current
         # value for ~1.5s after each event.
         self._push2_last_special_encoder: tuple | None = None
+        # Per-bus pre-mute volumes so Mute toggles restore the prior
+        # level instead of jumping back to a fixed 100.
+        self._sp_pre_mute_vol: dict[int, int] = {}
+        # Pattern-launch page (Push 2's 8 launch buttons → patterns
+        # page*8..page*8+7). D-pad left/right cycles in non-keys modes.
+        self.push2_launch_page: int = 0
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
@@ -1237,22 +1243,27 @@ class P6App:
         self._push2_pattern_device = cur_dev
 
     def _on_push2_pattern_pad(self, idx: int, velocity: int):
-        """Pattern-mode pad — toggle a step in the active sequencer."""
+        """Pattern-mode pad — launch the corresponding pattern on the
+        focused device. Layout matches the Compa PATTERN tab grid:
+        pattern 1 at top-left. P-6 fills 8x8 (64 patterns); SP-404
+        fills bottom-left 4x4 (16 patterns)."""
         if velocity == 0:
             return
-        self._ensure_push2_pattern_setup()
-        seq = self._push2_pattern_sequencer()
-        if seq is None:
+        from engine.push2 import Push2
+        total = self.push2_max_patterns()
+        pattern = Push2.pattern_launch_pad_to_pattern(idx, total)
+        if pattern is None:
             return
-        row = idx // 8
-        col = idx % 8
-        step = self.push2_pattern_step_offset + col
-        num_pads = getattr(seq, "num_pads", 0)
-        num_steps = getattr(seq, "num_steps", 0)
-        if row >= num_pads or step >= num_steps:
+        midi = self.p6
+        if midi is None:
             return
         try:
-            seq.toggle_step(row, step)
+            midi.send_program_change(pattern - 1)
+            # Keep local state in sync so the Push 2 display + Compa UI
+            # both reflect the new active pattern even when the device
+            # doesn't echo the PC back.
+            if hasattr(midi, "state"):
+                midi.state.active_pattern = pattern - 1
         except Exception:
             pass
 
@@ -1377,6 +1388,19 @@ class P6App:
                     pass
             self._push2_keys_active.clear()
 
+    def push2_max_patterns(self) -> int:
+        """Pattern count for the focused device — used by Launch 1-8
+        + page paging."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        if dev_key == "P-6":
+            return 64
+        if dev_key == "SP-404MKII":
+            return 16
+        return 8
+
+    def push2_launch_page_count(self) -> int:
+        return max(1, (self.push2_max_patterns() + 7) // 8)
+
     def _push2_sp_bank_count(self) -> int:
         """SP-404 MK2 supports 10 banks (A-J). Constant for now; could
         read dynamically in the future."""
@@ -1429,20 +1453,9 @@ class P6App:
                     seq.stop()
             _dispatch_action("transport.stop", value, self)
         elif name == "page_left":
-            if self.push2_mode == "pattern":
-                self.push2_pattern_step_offset = max(
-                    0, self.push2_pattern_step_offset - 8)
-            else:
-                self._push2_cycle_page(-1)
+            self._push2_cycle_page(-1)
         elif name == "page_right":
-            if self.push2_mode == "pattern":
-                seq = self._push2_pattern_sequencer()
-                if seq is not None:
-                    max_off = max(0, getattr(seq, "num_steps", 16) - 8)
-                    self.push2_pattern_step_offset = min(
-                        max_off, self.push2_pattern_step_offset + 8)
-            else:
-                self._push2_cycle_page(+1)
+            self._push2_cycle_page(+1)
         elif name == "octave_up":
             if self.push2_mode == "keys":
                 self.push2_keys_base_note = min(
@@ -1468,6 +1481,76 @@ class P6App:
                 self.switch_screen("files")
             except Exception:
                 pass
+        elif name in ("add_device", "add_track"):
+            # Cycle through connected devices.
+            devices = list(self.device_manager.connected.keys())
+            if not devices:
+                return
+            cur = self.device_manager.focus_key
+            try:
+                i = devices.index(cur) if cur in devices else -1
+                self.switch_focus(devices[(i + 1) % len(devices)])
+            except Exception:
+                pass
+        elif name.startswith("launch_"):
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1   # 0..7
+            except Exception:
+                return
+            pat_idx = self.push2_launch_page * 8 + idx
+            if pat_idx >= self.push2_max_patterns():
+                return
+            midi = self.p6
+            if midi is None:
+                return
+            try:
+                midi.send_program_change(pat_idx)
+                if hasattr(midi, "state"):
+                    midi.state.active_pattern = pat_idx
+            except Exception:
+                pass
+        elif name == "new":
+            # On the P-6 CHAIN tab, append a chain step using the
+            # current pattern. Otherwise no-op.
+            if self.current_screen_name == "device_workspace":
+                ws = self.screens.get("device_workspace")
+                tabs = getattr(ws, "_tabs", [])
+                idx = getattr(ws, "_current_tab", 0)
+                if 0 <= idx < len(tabs) and tabs[idx][0] == "chain":
+                    ps = self.screens.get("pattern")
+                    chain = getattr(ps, "_chain", None)
+                    if chain is not None:
+                        from engine.p6_chain import ChainStep
+                        pat = 0
+                        try:
+                            pat = self.p6.state.active_pattern if self.p6 else 0
+                        except Exception:
+                            pass
+                        chain.steps.append(ChainStep(pattern=pat, bars=4))
+        elif name == "mute":
+            # SP-404: toggle mute on the currently active bus by
+            # flipping CC 7 (volume) between 0 and 100. Stores the
+            # last non-zero value so re-mute restores the prior level.
+            dev_key = getattr(self.device_manager, "focus_key", None)
+            if dev_key != "SP-404MKII":
+                return
+            midi = self._midi_connections.get("SP-404MKII")
+            if midi is None:
+                return
+            bus = (int(self.twister.active_bus)
+                   if getattr(self, "twister", None) else 0)
+            current = self.live_cc.get(bus, {}).get(7, 100)
+            if current > 0:
+                self._sp_pre_mute_vol = self._sp_pre_mute_vol or {}
+                self._sp_pre_mute_vol[bus] = current
+                new_val = 0
+            else:
+                new_val = (self._sp_pre_mute_vol or {}).get(bus, 100)
+            try:
+                midi.send_cc(7, new_val, channel=bus)
+                self.live_cc.setdefault(bus, {})[7] = new_val
+            except Exception:
+                pass
         elif name == "device":
             self._push2_jump_to_tab("control")
         elif name.startswith("bot_select_") and self.push2_mode == "control":
@@ -1482,16 +1565,26 @@ class P6App:
                     return
                 if 0 <= idx <= 4 and getattr(self, "twister", None) is not None:
                     self.twister.active_bus = idx
-        elif name == "nav_up" and self.push2_mode == "keys":
-            from engine.push2 import SCALES
-            self.push2_keys_scale = (self.push2_keys_scale + 1) % len(SCALES)
-        elif name == "nav_down" and self.push2_mode == "keys":
-            from engine.push2 import SCALES
-            self.push2_keys_scale = (self.push2_keys_scale - 1) % len(SCALES)
-        elif name == "nav_right" and self.push2_mode == "keys":
-            self.push2_keys_root = (self.push2_keys_root + 1) % 12
-        elif name == "nav_left" and self.push2_mode == "keys":
-            self.push2_keys_root = (self.push2_keys_root - 1) % 12
+        elif name == "nav_up":
+            if self.push2_mode == "keys":
+                from engine.push2 import SCALES
+                self.push2_keys_scale = (self.push2_keys_scale + 1) % len(SCALES)
+        elif name == "nav_down":
+            if self.push2_mode == "keys":
+                from engine.push2 import SCALES
+                self.push2_keys_scale = (self.push2_keys_scale - 1) % len(SCALES)
+        elif name == "nav_right":
+            if self.push2_mode == "keys":
+                self.push2_keys_root = (self.push2_keys_root + 1) % 12
+            else:
+                pages = self.push2_launch_page_count()
+                self.push2_launch_page = (self.push2_launch_page + 1) % pages
+        elif name == "nav_left":
+            if self.push2_mode == "keys":
+                self.push2_keys_root = (self.push2_keys_root - 1) % 12
+            else:
+                pages = self.push2_launch_page_count()
+                self.push2_launch_page = (self.push2_launch_page - 1) % pages
         elif name.startswith("top_select_"):
             # Top-row select buttons 1-N jump directly to page N-1.
             try:

@@ -96,6 +96,8 @@ class Push2Renderer:
         self._last_topselect_leds = [-1] * 8
         self._last_botselect_leds = [-1] * 8
         self._last_octave_leds = (-1, -1)   # (down, up)
+        # (up, down, left, right) — last D-pad LED colors sent.
+        self._last_nav_leds = (-1, -1, -1, -1)
         # Whether we've painted the "always-dim" named-button set yet.
         self._lit_static_buttons = False
 
@@ -238,13 +240,23 @@ class Push2Renderer:
             push2.set_button("page_right",
                              22 if offset + 8 < num_steps else 3)
 
-        # D-pad: in keys mode, up/down cycle scales, left/right cycle
-        # root. Light all four dim white so the user sees they're live.
-        nav_color = 22 if mode_for_oct == "keys" else 0
-        for btn in ("nav_up", "nav_down", "nav_left", "nav_right"):
-            # Cheap to send every frame change; no last-state tracking
-            # because we update only on mode changes effectively.
-            push2.set_button(btn, nav_color)
+        # D-pad LEDs (only sent when the desired color tuple changes,
+        # to avoid spamming the bus with 80+ MIDI messages/sec).
+        if mode_for_oct == "keys":
+            nav_target = (22, 22, 22, 22)
+        else:
+            try:
+                lpc = int(self.app.push2_launch_page_count())
+            except Exception:
+                lpc = 1
+            lr = 22 if lpc > 1 else 0
+            nav_target = (0, 0, lr, lr)   # up, down, left, right
+        if nav_target != self._last_nav_leds:
+            push2.set_button("nav_up",    nav_target[0])
+            push2.set_button("nav_down",  nav_target[1])
+            push2.set_button("nav_left",  nav_target[2])
+            push2.set_button("nav_right", nav_target[3])
+            self._last_nav_leds = nav_target
 
         # Bottom-row select buttons: SP-404 bus selector in control mode.
         # Active bus lit bright in its bus color; available buses dim;
@@ -304,21 +316,22 @@ class Push2Renderer:
                         hi = pn + br
             keys_state = (base_note, lo, hi, scale_idx, root_pc)
 
-        # Pattern-mode state — playhead position + step offset force
-        # repaints as the sequencer plays.
+        # Pattern-mode state — current active pattern + total so the
+        # grid repaints whenever the device switches pattern.
         pattern_state: tuple = ()
         if mode == "pattern":
-            seq = getattr(self.app, "_push2_pattern_sequencer",
-                          lambda: None)()
-            if seq is not None:
-                pattern_state = (
-                    int(getattr(seq, "current_step", 0)),
-                    bool(getattr(seq, "playing", False)),
-                    int(getattr(self.app, "push2_pattern_step_offset", 0)),
-                    # Re-render whenever a step is toggled by hashing the
-                    # grid's "active" bits cheaply.
-                    self._sequencer_grid_hash(seq),
-                )
+            cur_pat = 0
+            try:
+                p6 = self.app.p6
+                if p6 is not None:
+                    cur_pat = int(p6.state.active_pattern) + 1
+            except Exception:
+                cur_pat = 0
+            try:
+                total = int(self.app.push2_max_patterns())
+            except Exception:
+                total = 64
+            pattern_state = (cur_pat, total, dev_key)
 
         frame_key = (mode, dev_key, pad_page, keys_state, pattern_state)
         if frame_key != self._last_pad_frame_key:
@@ -366,10 +379,16 @@ class Push2Renderer:
                 )
             return
         if mode == "pattern":
-            seq = getattr(self.app, "_push2_pattern_sequencer",
-                          lambda: None)()
-            offset = pattern_state[2] if len(pattern_state) > 2 else 0
-            push2.light_pattern_layout(seq, step_offset=offset)
+            cur_pat = pattern_state[0] if len(pattern_state) > 0 else 0
+            total = pattern_state[1] if len(pattern_state) > 1 else 64
+            ps_dev = pattern_state[2] if len(pattern_state) > 2 else dev_key
+            if ps_dev == "P-6":
+                bright, dim = 8, 15      # yellow / dim yellow
+            elif ps_dev == "SP-404MKII":
+                bright, dim = 9, 11      # orange / dim orange
+            else:
+                bright, dim = 122, 3
+            push2.light_pattern_launch_layout(cur_pat, total, bright, dim)
             return
         if mode == "dj":
             push2.light_dj_layout()
@@ -486,23 +505,18 @@ class Push2Renderer:
             surf.blit(psurf, (14, y))
             return
         if mode_now == "pattern":
-            # Pattern-mode status line: play state, page, step counter.
-            seq = getattr(self.app, "_push2_pattern_sequencer",
-                          lambda: None)()
-            offset = getattr(self.app, "push2_pattern_step_offset", 0)
-            page = offset // 8 + 1
-            if seq is not None:
-                total_pages = max(1, (getattr(seq, "num_steps", 16) + 7) // 8)
-                play_glyph = "▶" if getattr(seq, "playing", False) else "■"
-                cstep = (int(getattr(seq, "current_step", 0)) + 1
-                         if getattr(seq, "playing", False) else 0)
-                num_steps = getattr(seq, "num_steps", 16)
-                step_txt = (f"Step {cstep}/{num_steps}" if cstep
-                            else f"{num_steps} steps")
-                txt = (f"{play_glyph}  PATTERN  "
-                       f"Page {page}/{total_pages}  ·  {step_txt}")
-            else:
-                txt = "PATTERN  (no sequencer)"
+            cur_pat = 0
+            try:
+                p6 = self.app.p6
+                if p6 is not None:
+                    cur_pat = int(p6.state.active_pattern) + 1
+            except Exception:
+                cur_pat = 0
+            try:
+                total = int(self.app.push2_max_patterns())
+            except Exception:
+                total = 64
+            txt = f"PAT  {cur_pat}/{total}  ·  tap a pad to launch"
             psurf = self._font_tiny.render(txt, True, dev_color)
             surf.blit(psurf, (14, y))
             return
@@ -557,6 +571,30 @@ class Push2Renderer:
             letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
             pbsurf = self._font_tiny.render(f"BANK {letters}", True, dev_color)
             surf.blit(pbsurf, (14, y))
+            y += pbsurf.get_height() + 1
+
+        # Current pattern + launch page (Launch 1-8 + D-pad ←/→).
+        try:
+            lp = int(self.app.push2_launch_page)
+            lpc = int(self.app.push2_launch_page_count())
+            total_pats = int(self.app.push2_max_patterns())
+        except Exception:
+            lp, lpc, total_pats = 0, 1, 0
+        cur_pat = 0
+        try:
+            p6 = self.app.p6
+            if p6 is not None:
+                cur_pat = int(p6.state.active_pattern) + 1
+        except Exception:
+            cur_pat = 0
+        if total_pats > 0:
+            first_pat = lp * 8 + 1
+            last_pat = min(first_pat + 7, lp * 8 + 8, total_pats)
+            page_segment = (f"  ·  1-8 ({lp + 1}/{lpc})"
+                            if lpc > 1 else "")
+            txt = f"PAT {cur_pat}/{total_pats}{page_segment}"
+            psurf = self._font_tiny.render(txt, True, dev_color)
+            surf.blit(psurf, (14, y))
 
     def _special_encoder_overlay(self) -> tuple | None:
         """If the user turned a Tempo / Master / Swing encoder in the
