@@ -195,6 +195,14 @@ class Push2Renderer:
             push2.set_button("octave_up", octave_color)
             self._last_octave_leds = (octave_color, octave_color)
 
+        # D-pad: in keys mode, up/down cycle scales, left/right cycle
+        # root. Light all four dim white so the user sees they're live.
+        nav_color = 22 if mode_for_oct == "keys" else 0
+        for btn in ("nav_up", "nav_down", "nav_left", "nav_right"):
+            # Cheap to send every frame change; no last-state tracking
+            # because we update only on mode changes effectively.
+            push2.set_button(btn, nav_color)
+
         # Resolve Push 2 mode from the active Compa tab.
         try:
             mode = self.app.update_push2_mode()
@@ -211,11 +219,13 @@ class Push2Renderer:
             pad_page = 0
 
         # Keys-mode state contributes to the frame key so the grid
-        # repaints when the user transposes via Octave Up/Down or when
-        # the SP-404 pad-note (and therefore playable range) shifts.
+        # repaints when the user transposes, the SP-404 pad-note
+        # (and therefore playable range) shifts, or scale/root changes.
         keys_state: tuple = ()
         if mode == "keys":
             base_note = getattr(self.app, "push2_keys_base_note", 36)
+            scale_idx = getattr(self.app, "push2_keys_scale", 0)
+            root_pc = getattr(self.app, "push2_keys_root", 0)
             lo = hi = None
             if dev_key == "SP-404MKII":
                 kb = getattr(self.app, "chromatic_kb", None)
@@ -225,7 +235,7 @@ class Push2Renderer:
                     if pn > 0:
                         lo = pn - br
                         hi = pn + br
-            keys_state = (base_note, lo, hi)
+            keys_state = (base_note, lo, hi, scale_idx, root_pc)
 
         frame_key = (mode, dev_key, pad_page, keys_state)
         if frame_key != self._last_pad_frame_key:
@@ -235,11 +245,17 @@ class Push2Renderer:
     def _repaint_pad_frame(self, push2, mode, dev_key, pad_page,
                            keys_state: tuple = ()) -> None:
         if mode == "keys":
-            base_note = keys_state[0] if keys_state else 36
+            from engine.push2 import SCALES
+            base_note = keys_state[0] if len(keys_state) > 0 else 36
             lo = keys_state[1] if len(keys_state) > 1 else None
             hi = keys_state[2] if len(keys_state) > 2 else None
-            push2.light_keys_layout(base_note=base_note,
-                                    min_note=lo, max_note=hi)
+            scale_idx = keys_state[3] if len(keys_state) > 3 else 0
+            root_pc = keys_state[4] if len(keys_state) > 4 else 0
+            _name, offsets = SCALES[scale_idx % len(SCALES)]
+            push2.light_keys_layout(
+                base_note=base_note, min_note=lo, max_note=hi,
+                scale=offsets, root_pc=root_pc,
+            )
             return
         if dev_key == "SP-404MKII":
             push2.light_bank_frame_for_page(pad_page, num_banks=10)
@@ -321,12 +337,16 @@ class Push2Renderer:
         # `mode_now` already resolved above when picking the centerpiece.
         y = 32
         if mode_now == "keys":
-            # Show the current octave / note range on screen so the
-            # user can see which octave the grid is in without
-            # triggering a pad to find out.
+            # Range + scale + root on a single status line.
+            from engine.push2 import SCALES, ROOT_NAMES
             base = getattr(self.app, "push2_keys_base_note", 36)
             top = base + 7 * 5 + 7
-            txt = f"KEYS  {self._note_name(base)} — {self._note_name(top)}"
+            scale_idx = getattr(self.app, "push2_keys_scale", 0)
+            root_pc = getattr(self.app, "push2_keys_root", 0)
+            scale_name, _ = SCALES[scale_idx % len(SCALES)]
+            root = ROOT_NAMES[root_pc % 12]
+            range_txt = f"{self._note_name(base)}—{self._note_name(top)}"
+            txt = f"KEYS  {root} {scale_name}  ·  {range_txt}"
             ksurf = self._font_tiny.render(txt, True, dev_color)
             surf.blit(ksurf, (14, y))
             return

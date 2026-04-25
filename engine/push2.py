@@ -134,6 +134,29 @@ SP_BANK_COLORS = [
 ]
 
 
+# ── Scale definitions ──────────────────────────────────────────────
+# Each entry: list of pitch-class offsets from the root (0..11). The
+# scale lookup is `(note - root_pc) % 12 in offsets`.
+SCALES: list[tuple[str, tuple[int, ...]]] = [
+    ("chromatic",  (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)),
+    ("major",      (0, 2, 4, 5, 7, 9, 11)),
+    ("minor",      (0, 2, 3, 5, 7, 8, 10)),
+    ("min pent",   (0, 3, 5, 7, 10)),
+    ("maj pent",   (0, 2, 4, 7, 9)),
+    ("blues",      (0, 3, 5, 6, 7, 10)),
+    ("dorian",     (0, 2, 3, 5, 7, 9, 10)),
+    ("mixolydian", (0, 2, 4, 5, 7, 9, 10)),
+    ("harm minor", (0, 2, 3, 5, 7, 8, 11)),
+]
+ROOT_NAMES = ["C", "C#", "D", "D#", "E", "F",
+              "F#", "G", "G#", "A", "A#", "B"]
+
+
+def in_scale(note: int, root_pc: int, offsets: tuple[int, ...]) -> bool:
+    """True if `note` is a member of the scale rooted at `root_pc`."""
+    return ((note - root_pc) % 12) in offsets
+
+
 # ── Port discovery ───────────────────────────────────────────────────
 
 def find_push2_ports() -> dict:
@@ -315,27 +338,41 @@ class Push2:
     def light_keys_layout(self, base_note: int = 36,
                           row_offset: int = 5,
                           min_note: int | None = None,
-                          max_note: int | None = None) -> None:
+                          max_note: int | None = None,
+                          scale: tuple[int, ...] | None = None,
+                          root_pc: int = 0) -> None:
         """Light pads as a chromatic keyboard with rows offset by
-        `row_offset` semitones (5 = perfect-fourth, the Ableton Push
-        default that allows guitar-style chord shapes).
+        `row_offset` semitones.
 
-        C notes light blue, all other notes light white. Notes outside
-        [min_note, max_note] (when provided) or above MIDI 127 stay
-        off — useful for showing the playable range on devices like
-        the SP-404 MK2 that only support a 2-octave chromatic span."""
+        Color rules:
+          - root note (every octave of root_pc): blue
+          - in-scale notes:                       white
+          - off-scale notes (scale != chromatic): very dim
+          - out of [min_note, max_note] range:    off
+
+        When `scale` is None, treat all 12 pitch classes as in-scale
+        (chromatic). Scale-locked dispatch is handled in the app
+        layer; the layout itself only colors."""
         lo = 0 if min_note is None else min_note
         hi = 127 if max_note is None else max_note
+        all_pcs = scale is None or scale == SCALES[0][1]
+        scale_set = set(scale) if scale else None
         for idx in range(64):
             row = idx // 8
             col = idx % 8
             note = base_note + row * row_offset + col
             if note > 127 or note < lo or note > hi:
-                color = COLOR_OFF
-            elif note % 12 == 0:
-                color = 125  # blue — every C
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            pc_off = (note - root_pc) % 12
+            is_root = pc_off == 0
+            in_sc = all_pcs or (scale_set is not None and pc_off in scale_set)
+            if is_root:
+                color = 125          # blue root
+            elif in_sc:
+                color = 122          # white in-scale
             else:
-                color = 122  # white — everything else
+                color = 1            # very dim off-scale
             self.set_pad_color(idx, color)
 
     @staticmethod

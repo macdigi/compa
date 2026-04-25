@@ -261,6 +261,12 @@ class P6App:
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
+        # Keys-mode scale (index into engine.push2.SCALES) and root
+        # pitch class (0=C..11=B). D-pad up/down cycles scale,
+        # left/right cycles root. Scale-locked: off-scale pads silent
+        # when scale != chromatic.
+        self.push2_keys_scale: int = 0   # 0 = chromatic
+        self.push2_keys_root: int = 0    # 0 = C
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -1090,16 +1096,21 @@ class P6App:
 
     def _on_push2_keys_pad(self, idx: int, velocity: int):
         """Keys-mode pad — forward as a chromatic note to the focused
-        device via Compa's chromatic keyboard engine (which already
-        knows how to route SP-404 pitch-bend chromatic mode vs P-6's
-        sampler-channel scheme)."""
-        from engine.push2 import Push2
+        device. When a scale other than chromatic is selected,
+        off-scale pads silently no-op so the user can't hit wrong
+        notes."""
+        from engine.push2 import Push2, SCALES, in_scale
         kb = getattr(self, "chromatic_kb", None)
         if kb is None:
             return
         if velocity > 0:
             note = Push2.keys_pad_to_note(
                 idx, base_note=self.push2_keys_base_note)
+            # Scale lock: silently swallow off-scale pads when not chromatic.
+            scale_name, scale_offsets = SCALES[self.push2_keys_scale % len(SCALES)]
+            if scale_name != "chromatic" and not in_scale(
+                    note, self.push2_keys_root, scale_offsets):
+                return
             self._push2_keys_active[idx] = note
             try:
                 kb._forward_note_on(note, velocity)
@@ -1191,6 +1202,16 @@ class P6App:
                     0, self.push2_keys_base_note - 12)
             else:
                 self._push2_cycle_pad_page(-1)
+        elif name == "nav_up" and self.push2_mode == "keys":
+            from engine.push2 import SCALES
+            self.push2_keys_scale = (self.push2_keys_scale + 1) % len(SCALES)
+        elif name == "nav_down" and self.push2_mode == "keys":
+            from engine.push2 import SCALES
+            self.push2_keys_scale = (self.push2_keys_scale - 1) % len(SCALES)
+        elif name == "nav_right" and self.push2_mode == "keys":
+            self.push2_keys_root = (self.push2_keys_root + 1) % 12
+        elif name == "nav_left" and self.push2_mode == "keys":
+            self.push2_keys_root = (self.push2_keys_root - 1) % 12
         elif name.startswith("top_select_"):
             # Top-row select buttons 1-N jump directly to page N-1.
             try:
