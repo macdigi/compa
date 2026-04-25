@@ -169,6 +169,22 @@ SP_BANK_COLORS = [
     122,  # J: white
 ]
 
+# Dim variants of each bank color, used for the inactive-bank slots
+# in the bank-selector row and for "available pattern" cells in the
+# bank-tinted pattern row. Indices match SP_BANK_COLORS.
+SP_BANK_COLORS_DIM = [
+    1,    # A: dim red
+    45,   # B: dim blue
+    19,   # C: dim green
+    15,   # D: dim yellow
+    11,   # E: dim orange
+    55,   # F: dim magenta
+    38,   # G: dim teal
+    7,    # H: dim lime
+    80,   # I: dim purple
+    3,    # J: dim white
+]
+
 
 # ── Scale definitions ──────────────────────────────────────────────
 # Each entry: list of pitch-class offsets from the root (0..11). The
@@ -543,20 +559,29 @@ class Push2:
             pattern_launch_page: int,
             seq, step_offset: int,
             launch_bright: int, launch_dim: int,
-            pad_offset: int = 0) -> None:
-        """Top 2 rows = pattern launch; bottom 6 rows = step sequencer.
+            pad_offset: int = 0,
+            active_bank: int = 0,
+            bank_offset: int = 0,
+            bank_total: int = 8) -> None:
+        """Row 7 = bank selector, row 6 = pattern launch (active-bank
+        tinted), rows 0-5 = step seq.
 
-        Top:
-          row 7 (idx 56-63, very top) = patterns page*16+0..7
-          row 6 (idx 48-55, just below) = patterns page*16+8..15
-          - launch_bright on the active pattern, launch_dim on
-            available patterns, off when beyond total_patterns
+        Row 7 (banks):
+          col 0..7 = bank (offset + col), unique color per bank
+          - active bank lit at full brightness
+          - other available banks lit dim (per SP_BANK_COLORS_DIM)
+          - off when beyond bank_total
 
-        Bottom (step seq for currently active pattern):
-          row 5 = pad 1, row 4 = pad 2, ... row 0 = pad 6
-          col N = step (step_offset + N)
+        Row 6 (patterns, 8 per page):
+          col N = pattern (page*8 + N)
+          - active pattern lit at full bank-color brightness
+          - other available patterns dim in the active bank's color
+          - off when beyond total_patterns
+
+        Bottom 6 rows (step seq):
+          row 5 = pad (pad_offset + 0), row 0 = pad (pad_offset + 5)
           - programmed step → row's color
-          - playhead column → bright white if on, dim white if off
+          - playhead column → bright white if on / dim white if off
           - off step + not playhead → off
         """
         current = (seq.current_step
@@ -564,14 +589,43 @@ class Push2:
                    else -1)
         num_pads = getattr(seq, "num_pads", 0) if seq is not None else 0
         num_steps = getattr(seq, "num_steps", 0) if seq is not None else 0
-        base_pat = pattern_launch_page * 16
+        base_pat = pattern_launch_page * 8
 
+        # Bank colors (full-brightness) and dim variants — reuse the
+        # SP-bank palette so SP and P-6 share the same color identity
+        # for banks A..H, with I/J extending for SP.
+        bank_palette = SP_BANK_COLORS
+        bank_dim_palette = SP_BANK_COLORS_DIM
+        active_color = (bank_palette[active_bank]
+                        if 0 <= active_bank < len(bank_palette) else 122)
+        active_dim = (bank_dim_palette[active_bank]
+                      if 0 <= active_bank < len(bank_dim_palette) else 3)
+
+        # Device-themed pair: launch_bright is the device color
+        # (yellow for P-6, orange for SP); launch_dim is its dim
+        # variant. Used to color-tint the bank/pattern rows so the
+        # whole pattern surface reads as that device.
         for idx in range(64):
             row = idx // 8
             col = idx % 8
-            if row >= 6:
-                top_down = 1 - (row - 6)              # row 7 → 0, row 6 → 1
-                pat = base_pat + top_down * 8 + col + 1
+            if row == 7:
+                # Bank selector — dim white for inactive available
+                # banks; active bank lights in the device theme color
+                # so the row reads like a "selected tab".
+                slot = bank_offset + col
+                if slot >= bank_total:
+                    self.set_pad_color(idx, COLOR_OFF)
+                elif slot == active_bank:
+                    self.set_pad_color(idx, launch_bright)
+                else:
+                    self.set_pad_color(idx, 3)   # dim white
+                continue
+            if row == 6:
+                # Pattern launchers — dim device-tinted for inactive
+                # available patterns; active pattern in full device
+                # color. The dim tint differentiates this row from the
+                # white-toned bank row above.
+                pat = base_pat + col + 1
                 if pat > total_patterns:
                     color = COLOR_OFF
                 elif pat == current_pattern:
@@ -580,7 +634,6 @@ class Push2:
                     color = launch_dim
                 self.set_pad_color(idx, color)
                 continue
-            # Step area
             pad = (5 - row) + pad_offset
             step = step_offset + col
             if seq is None or pad >= num_pads or step >= num_steps:

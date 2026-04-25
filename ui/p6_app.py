@@ -294,6 +294,12 @@ class P6App:
         # pattern mode. Scrolls the 6 visible rows over the 8-pad
         # SP-404 sequencer or a future larger-pad config.
         self.push2_pattern_pad_offset: int = 0
+        # First bank visible in the top row of pattern-mode (used for
+        # SP-404'"'"'s 10 banks — 8 visible at a time, Shift+D-pad pages).
+        self.push2_pattern_bank_offset: int = 0
+        # Tracks Push 2 Shift-button held state so other buttons can
+        # check for "Shift+X" combos (e.g. Shift+D-pad → bank page).
+        self._push2_shift_held: bool = False
         # Base MIDI note for the bottom-left pad in Keys mode. Octave
         # Up / Octave Down shift this by 12 in keys mode.
         self.push2_keys_base_note: int = 36
@@ -1271,29 +1277,34 @@ class P6App:
 
     def _on_push2_pattern_pad(self, idx: int, velocity: int):
         """Combined Pattern-mode layout:
-          rows 6-7 (top 16 pads): pattern launch — page-aware via
-            push2_pattern_launch_page (16 patterns per page).
-            Row 6 (lower of the two) = patterns offset+0..7,
-            Row 7 (top) = patterns offset+8..15.
+          row 7 (very top, idx 56-63): bank selector (8 banks visible,
+            Shift+D-pad pages the window for SP'"'"'s I/J).
+          row 6 (idx 48-55): 8 pattern launchers; D-pad ←/→ pages
+            (8-pattern stride; P-6: 8 pages; SP: 2 pages).
           rows 0-5 (bottom 48 pads): step sequencer for the currently
-            active pattern. Row 5 = pad 1 (top), row 0 = pad 6 (bottom).
-            Cols = 8 visible steps; page-left/right pages 1-8 ↔ 9-16.
+            active pattern. Row 5 = top pad (offset+0), row 0 = bottom
+            pad (offset+5). Cols = 8 visible steps; Page-Left/Right
+            pages step columns and wraps at the ends. Octave Up/Down
+            scrolls the pad window.
 
-        Pattern launch saves the current pattern's PiSequencer grid
-        and loads the target pattern's stored grid (or clears if none
-        saved yet), so each pattern keeps its own step data."""
+        Per-pattern step grids are snapshotted on launch so each
+        pattern keeps its own step data."""
         if velocity == 0:
             return
         row = idx // 8
         col = idx % 8
 
-        if row >= 6:
-            # ── Pattern launch (top 2 rows) ───────────────────────
-            # Top row (idx 56-63 = row 7) = patterns 1-8 of the page,
-            # row below (row 6) = patterns 9-16. Reading top-down.
-            top_down = 1 - (row - 6)                 # row 7 → 0, row 6 → 1
-            base = self.push2_pattern_launch_page * 16
-            pat_idx = base + top_down * 8 + col      # 0-indexed
+        if row == 7:
+            # ── Bank selector (top row) ──────────────────────────
+            bank_idx = self.push2_pattern_bank_offset + col
+            if bank_idx >= self.push2_bank_count():
+                return
+            self._push2_set_bank(bank_idx)
+            return
+        if row == 6:
+            # ── Pattern launch (single row, 8 per page) ──────────
+            base = self.push2_pattern_launch_page * 8
+            pat_idx = base + col
             if pat_idx >= self.push2_max_patterns():
                 return
             self._push2_pattern_launch(pat_idx)
@@ -1515,8 +1526,66 @@ class P6App:
         return max(1, (self.push2_max_patterns() + 7) // 8)
 
     def push2_pattern_launch_page_count(self) -> int:
-        """Pages of 16 patterns each — used by combined-pattern mode."""
-        return max(1, (self.push2_max_patterns() + 15) // 16)
+        """Pages of 8 patterns each — used by combined-pattern mode's
+        single pattern row."""
+        return max(1, (self.push2_max_patterns() + 7) // 8)
+
+    def _push2_cycle_pattern_launch_page(self, delta: int):
+        pages = self.push2_pattern_launch_page_count()
+        self.push2_pattern_launch_page = (
+            self.push2_pattern_launch_page + delta) % pages
+
+    def push2_bank_count(self) -> int:
+        """Bank count for the focused device (P-6: 8 / SP-404: 10)."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        if dev_key == "P-6":
+            return 8
+        if dev_key == "SP-404MKII":
+            return 10
+        return 1
+
+    def _push2_cycle_bank_window(self, delta: int):
+        """Page the 8-bank top-row window in full 8-slot strides
+        (so SP'"'"'s last page shows banks I/J cleanly with the other 6
+        slots dark). Wraps at the ends."""
+        total = self.push2_bank_count()
+        pages = max(1, (total + 7) // 8)
+        cur_page = self.push2_pattern_bank_offset // 8
+        new_page = (cur_page + delta) % pages
+        self.push2_pattern_bank_offset = new_page * 8
+
+    def push2_active_bank(self) -> int:
+        """Currently-active bank for the focused device (0-indexed)."""
+        dev_key = getattr(self.device_manager, "focus_key", "") or ""
+        return int(self.current_bank.get(dev_key, 0))
+
+    def _push2_set_bank(self, bank_idx: int):
+        """Switch the focused device's active bank and update the
+        PiSequencer'"'"'s row-config routing so step triggers fire on the
+        new bank (channel for SP, note offset for P-6)."""
+        dev_key = getattr(self.device_manager, "focus_key", "") or ""
+        if dev_key not in ("P-6", "SP-404MKII"):
+            return
+        bank_idx = max(0, min(self.push2_bank_count() - 1, int(bank_idx)))
+        self.current_bank[dev_key] = bank_idx
+        seq = self._push2_pattern_sequencer()
+        if seq is None:
+            return
+        try:
+            from engine.p6_sequencer import ROW_PAD
+        except Exception:
+            ROW_PAD = "pad"
+        if dev_key == "SP-404MKII":
+            # SP: bank index = MIDI channel for pad row triggers.
+            for cfg in seq.row_configs:
+                if cfg.row_type == ROW_PAD:
+                    cfg.channel = bank_idx
+        elif dev_key == "P-6":
+            # P-6: 6 pads per bank, base_note + bank_idx * 6 + i.
+            base = int(getattr(seq, "base_note", 48))
+            for i, cfg in enumerate(seq.row_configs):
+                if cfg.row_type == ROW_PAD:
+                    cfg.note = base + bank_idx * 6 + i
 
     def _push2_sp_bank_count(self) -> int:
         """SP-404 MK2 supports 10 banks (A-J). Constant for now; could
@@ -1536,8 +1605,13 @@ class P6App:
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
+        # Shift is a modifier — track press/release so other handlers
+        # can combine it with other buttons (e.g. Shift+D-pad).
+        if name == "shift":
+            self._push2_shift_held = (value > 0)
+            return
         if value <= 0:
-            return  # release — no-op for now
+            return  # release — no-op for the rest
         if name == "play":
             # In pattern mode, Play toggles both the Compa sequencer
             # AND the focused device's transport. Press 1 starts both;
@@ -1737,9 +1811,10 @@ class P6App:
             if self.push2_mode == "keys":
                 self.push2_keys_root = (self.push2_keys_root + 1) % 12
             elif self.push2_mode == "pattern":
-                pages = self.push2_pattern_launch_page_count()
-                self.push2_pattern_launch_page = (
-                    self.push2_pattern_launch_page + 1) % pages
+                if self._push2_shift_held:
+                    self._push2_cycle_bank_window(+1)
+                else:
+                    self._push2_cycle_pattern_launch_page(+1)
             else:
                 pages = self.push2_launch_page_count()
                 self.push2_launch_page = (self.push2_launch_page + 1) % pages
@@ -1747,9 +1822,10 @@ class P6App:
             if self.push2_mode == "keys":
                 self.push2_keys_root = (self.push2_keys_root - 1) % 12
             elif self.push2_mode == "pattern":
-                pages = self.push2_pattern_launch_page_count()
-                self.push2_pattern_launch_page = (
-                    self.push2_pattern_launch_page - 1) % pages
+                if self._push2_shift_held:
+                    self._push2_cycle_bank_window(-1)
+                else:
+                    self._push2_cycle_pattern_launch_page(-1)
             else:
                 pages = self.push2_launch_page_count()
                 self.push2_launch_page = (self.push2_launch_page - 1) % pages

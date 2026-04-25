@@ -370,6 +370,12 @@ class Push2Renderer:
                 pad_off = int(self.app.push2_pattern_pad_offset)
             except Exception:
                 pad_off = 0
+            try:
+                act_bank = int(self.app.push2_active_bank())
+                bank_off = int(self.app.push2_pattern_bank_offset)
+                bank_total = int(self.app.push2_bank_count())
+            except Exception:
+                act_bank, bank_off, bank_total = 0, 0, 8
             seq = getattr(self.app, "_push2_pattern_sequencer",
                           lambda: None)()
             if seq is not None:
@@ -379,7 +385,8 @@ class Push2Renderer:
             else:
                 grid_hash, cstep, playing = 0, 0, False
             pattern_state = (cur_pat, total, dev_key, lp, offset,
-                             grid_hash, cstep, playing, pad_off)
+                             grid_hash, cstep, playing, pad_off,
+                             act_bank, bank_off, bank_total)
 
         frame_key = (mode, dev_key, pad_page, keys_state, pattern_state)
         if frame_key != self._last_pad_frame_key:
@@ -435,6 +442,9 @@ class Push2Renderer:
             lp = pattern_state[3] if len(pattern_state) > 3 else 0
             offset = pattern_state[4] if len(pattern_state) > 4 else 0
             pad_off = pattern_state[8] if len(pattern_state) > 8 else 0
+            act_bank = pattern_state[9] if len(pattern_state) > 9 else 0
+            bank_off = pattern_state[10] if len(pattern_state) > 10 else 0
+            bank_tot = pattern_state[11] if len(pattern_state) > 11 else 8
             seq = getattr(self.app, "_push2_pattern_sequencer",
                           lambda: None)()
             if ps_dev == "P-6":
@@ -452,6 +462,9 @@ class Push2Renderer:
                 launch_bright=bright,
                 launch_dim=dim,
                 pad_offset=pad_off,
+                active_bank=act_bank,
+                bank_offset=bank_off,
+                bank_total=bank_tot,
             )
             return
         if mode == "dj":
@@ -589,8 +602,8 @@ class Push2Renderer:
                 offset = int(self.app.push2_pattern_step_offset)
             except Exception:
                 offset = 0
-            launch_first = lp * 16 + 1
-            launch_last = min(launch_first + 15, total)
+            launch_first = lp * 8 + 1
+            launch_last = min(launch_first + 7, total)
             page_seg = f"  ·  {lp + 1}/{lpc}" if lpc > 1 else ""
             seq = getattr(self.app, "_push2_pattern_sequencer",
                           lambda: None)()
@@ -602,13 +615,20 @@ class Push2Renderer:
                 pad_off = int(self.app.push2_pattern_pad_offset)
             except Exception:
                 pad_off = 0
+            try:
+                act_bank = int(self.app.push2_active_bank())
+            except Exception:
+                act_bank = 0
             playing = bool(getattr(seq, "playing", False)) if seq else False
             play_glyph = "▶" if playing else " "
             pad_seg = (f"  pads {pad_off + 1}-{min(pad_off + 6, num_pads)}/{num_pads}"
                        if num_pads > 6 else "")
             seq_text = (f"{play_glyph} steps {offset + 1}-"
                         f"{min(offset + 8, num_steps)}/{num_steps}{pad_seg}")
-            txt = (f"PAT {cur_pat}/{total}  "
+            # Bank letter in the device color so it reads as part of
+            # the same theme as the active bank/pattern pads.
+            bank_letter = chr(ord("A") + act_bank)
+            txt = (f"BANK {bank_letter}  ·  PAT {cur_pat}/{total}  "
                    f"launch {launch_first}-{launch_last}{page_seg}  ·  "
                    f"{seq_text}")
             psurf = self._font_tiny.render(txt, True, dev_color)
