@@ -258,6 +258,9 @@ class P6App:
         # pad_idx → MIDI note for actively-held keys-mode notes, so
         # we can convert release events back to the right note number.
         self._push2_keys_active: dict[int, int] = {}
+        # Base MIDI note for the bottom-left pad in Keys mode. Octave
+        # Up / Octave Down shift this by 12 in keys mode.
+        self.push2_keys_base_note: int = 36
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -1095,7 +1098,8 @@ class P6App:
         if kb is None:
             return
         if velocity > 0:
-            note = Push2.keys_pad_to_note(idx)
+            note = Push2.keys_pad_to_note(
+                idx, base_note=self.push2_keys_base_note)
             self._push2_keys_active[idx] = note
             try:
                 kb._forward_note_on(note, velocity)
@@ -1176,9 +1180,17 @@ class P6App:
         elif name == "page_right":
             self._push2_cycle_page(+1)
         elif name == "octave_up":
-            self._push2_cycle_pad_page(+1)
+            if self.push2_mode == "keys":
+                self.push2_keys_base_note = min(
+                    115, self.push2_keys_base_note + 12)
+            else:
+                self._push2_cycle_pad_page(+1)
         elif name == "octave_down":
-            self._push2_cycle_pad_page(-1)
+            if self.push2_mode == "keys":
+                self.push2_keys_base_note = max(
+                    0, self.push2_keys_base_note - 12)
+            else:
+                self._push2_cycle_pad_page(-1)
         elif name.startswith("top_select_"):
             # Top-row select buttons 1-N jump directly to page N-1.
             try:

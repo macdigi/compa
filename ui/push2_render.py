@@ -175,13 +175,21 @@ class Push2Renderer:
                 push2.set_button(f"top_select_{i + 1}", color)
                 self._last_topselect_leds[i] = color
 
-        # Octave up/down drive pad-page paging for SP-404. Light dim
-        # when there's more than one pad page to move between.
+        # Octave up/down: drive pad-page paging in control mode and
+        # octave transposition in keys mode. Lit dim whenever they're
+        # actionable.
         try:
-            pad_pages = self.app.push2_pad_page_count()
+            mode_for_oct = self.app.push2_mode
         except Exception:
-            pad_pages = 1
-        octave_color = 22 if pad_pages > 1 else 0
+            mode_for_oct = "control"
+        if mode_for_oct == "keys":
+            octave_color = 22  # always usable in keys mode
+        else:
+            try:
+                pad_pages = self.app.push2_pad_page_count()
+            except Exception:
+                pad_pages = 1
+            octave_color = 22 if pad_pages > 1 else 0
         if self._last_octave_leds != (octave_color, octave_color):
             push2.set_button("octave_down", octave_color)
             push2.set_button("octave_up", octave_color)
@@ -201,14 +209,37 @@ class Push2Renderer:
             pad_page = self.app.push2_pad_page
         except Exception:
             pad_page = 0
-        frame_key = (mode, dev_key, pad_page)
+
+        # Keys-mode state contributes to the frame key so the grid
+        # repaints when the user transposes via Octave Up/Down or when
+        # the SP-404 pad-note (and therefore playable range) shifts.
+        keys_state: tuple = ()
+        if mode == "keys":
+            base_note = getattr(self.app, "push2_keys_base_note", 36)
+            lo = hi = None
+            if dev_key == "SP-404MKII":
+                kb = getattr(self.app, "chromatic_kb", None)
+                if kb is not None:
+                    pn = getattr(kb, "_pad_note", 0) or 0
+                    br = getattr(kb, "_bend_range", 12) or 12
+                    if pn > 0:
+                        lo = pn - br
+                        hi = pn + br
+            keys_state = (base_note, lo, hi)
+
+        frame_key = (mode, dev_key, pad_page, keys_state)
         if frame_key != self._last_pad_frame_key:
-            self._repaint_pad_frame(push2, mode, dev_key, pad_page)
+            self._repaint_pad_frame(push2, mode, dev_key, pad_page, keys_state)
             self._last_pad_frame_key = frame_key
 
-    def _repaint_pad_frame(self, push2, mode, dev_key, pad_page) -> None:
+    def _repaint_pad_frame(self, push2, mode, dev_key, pad_page,
+                           keys_state: tuple = ()) -> None:
         if mode == "keys":
-            push2.light_keys_layout()
+            base_note = keys_state[0] if keys_state else 36
+            lo = keys_state[1] if len(keys_state) > 1 else None
+            hi = keys_state[2] if len(keys_state) > 2 else None
+            push2.light_keys_layout(base_note=base_note,
+                                    min_note=lo, max_note=hi)
             return
         if dev_key == "SP-404MKII":
             push2.light_bank_frame_for_page(pad_page, num_banks=10)
@@ -240,40 +271,71 @@ class Push2Renderer:
         pygame.draw.rect(surf, dev_color, pill_rect, 1, border_radius=6)
         surf.blit(dev_surf, (pill_rect.x + 9, pill_rect.y + 2))
 
-        # ── BPM, big, centered, and NOT cropped at the top ────────
-        bpm = self._safe_bpm()
-        bpm_text = f"{bpm:.1f}" if bpm is not None else "— —"
-        bpm_surf = self._font_hero.render(bpm_text, True, TEXT)
-        bpm_x = SURF_W // 2 - bpm_surf.get_width() // 2
-        surf.blit(bpm_surf, (bpm_x, 2))
-        bpm_label = self._font_tiny.render("BPM", True, DIM)
-        surf.blit(bpm_label, (bpm_x + bpm_surf.get_width() + 6,
-                              2 + bpm_surf.get_height() - bpm_label.get_height() - 4))
+        # ── Centerpiece: BPM in most modes, held-note(s) in keys ────
+        try:
+            mode_now = self.app.push2_mode
+        except Exception:
+            mode_now = "control"
+        held = (getattr(self.app, "_push2_keys_active", None) or {}) \
+                if mode_now == "keys" else {}
 
-        # Transport indicator to the left of BPM.
-        playing = self._safe_playing()
-        ty = 18
-        if playing:
-            tri_x = bpm_x - 22
-            pygame.draw.polygon(surf, dev_color,
-                                [(tri_x, ty), (tri_x, ty + 12),
-                                 (tri_x + 10, ty + 6)])
+        if held:
+            # Replace BPM with the currently-held note(s) so the user
+            # can see exactly which key is sounding without guessing.
+            notes_sorted = sorted(set(held.values()))
+            names = "  ".join(self._note_name(n) for n in notes_sorted)
+            font = self._font_hero if len(notes_sorted) == 1 else self._font_big
+            ns = font.render(names, True, dev_color)
+            # Cap width so a wide chord doesn't crash into the COMPA logo.
+            max_w = SURF_W - 280
+            if ns.get_width() > max_w:
+                ns = self._font_big.render(names, True, dev_color)
+            cx = SURF_W // 2 - ns.get_width() // 2
+            surf.blit(ns, (cx, 4))
         else:
-            stop_surf = self._font_small.render("STOP", True, DIM)
-            surf.blit(stop_surf, (bpm_x - stop_surf.get_width() - 10, ty + 1))
+            bpm = self._safe_bpm()
+            bpm_text = f"{bpm:.1f}" if bpm is not None else "— —"
+            bpm_surf = self._font_hero.render(bpm_text, True, TEXT)
+            bpm_x = SURF_W // 2 - bpm_surf.get_width() // 2
+            surf.blit(bpm_surf, (bpm_x, 2))
+            bpm_label = self._font_tiny.render("BPM", True, DIM)
+            surf.blit(bpm_label, (bpm_x + bpm_surf.get_width() + 6,
+                                  2 + bpm_surf.get_height() - bpm_label.get_height() - 4))
+
+            playing = self._safe_playing()
+            ty = 18
+            if playing:
+                tri_x = bpm_x - 22
+                pygame.draw.polygon(surf, dev_color,
+                                    [(tri_x, ty), (tri_x, ty + 12),
+                                     (tri_x + 10, ty + 6)])
+            else:
+                stop_surf = self._font_small.render("STOP", True, DIM)
+                surf.blit(stop_surf, (bpm_x - stop_surf.get_width() - 10, ty + 1))
 
         # ── Compa ASCII logo, top-right ───────────────────────────
         lw = self._logo_surface.get_width()
         surf.blit(self._logo_surface, (SURF_W - lw - 10, 4))
 
-        # ── Page indicator (tiny, under the device pill) ──────────
-        # Row 1: encoder page, row 2: pad-bank page (SP-404 only).
+        # ── Mode-specific status line(s) under the device pill ────
+        # `mode_now` already resolved above when picking the centerpiece.
+        y = 32
+        if mode_now == "keys":
+            # Show the current octave / note range on screen so the
+            # user can see which octave the grid is in without
+            # triggering a pad to find out.
+            base = getattr(self.app, "push2_keys_base_note", 36)
+            top = base + 7 * 5 + 7
+            txt = f"KEYS  {self._note_name(base)} — {self._note_name(top)}"
+            ksurf = self._font_tiny.render(txt, True, dev_color)
+            surf.blit(ksurf, (14, y))
+            return
+
         try:
             page = self.app.push2_page
             page_count = self.app.push2_page_count()
         except Exception:
             page, page_count = 0, 1
-        y = 32
         if page_count > 1:
             txt = f"CTRL {page + 1}/{page_count}"
             psurf = self._font_tiny.render(txt, True, DIM)
@@ -286,10 +348,7 @@ class Push2Renderer:
         except Exception:
             pad_page, pad_pages = 0, 1
         if pad_pages > 1:
-            # Label the current bank letter range: A-D / E-H / I-J
             first = pad_page * 4
-            last = min(first + 3, first + 1)  # 4 banks per page except last
-            # Derive real end from device bank count when we know it.
             try:
                 total = 10 if self.app.device_manager.focus_key == "SP-404MKII" else 4
             except Exception:
@@ -298,6 +357,17 @@ class Push2Renderer:
             letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
             pbsurf = self._font_tiny.render(f"BANK {letters}", True, dev_color)
             surf.blit(pbsurf, (14, y))
+
+    @staticmethod
+    def _note_name(midi_note: int) -> str:
+        """MIDI note number → "C2" / "F#3" style label.
+        MIDI 60 = C4 (standard scientific pitch)."""
+        names = ["C", "C#", "D", "D#", "E", "F",
+                 "F#", "G", "G#", "A", "A#", "B"]
+        if midi_note < 0 or midi_note > 127:
+            return "?"
+        octave = (midi_note // 12) - 1
+        return f"{names[midi_note % 12]}{octave}"
 
     def _load_logo_png(self, target_h: int) -> pygame.Surface:
         """Load docs/logo/compa_logo_ascii_only.png and scale it to
