@@ -948,7 +948,10 @@ class DeviceWorkspaceScreen:
             cols, rows = 8, 8
 
         top = self._controls_top + 36  # space for header
-        avail_h = self._content_h - 36 - self._bus_bar_h - 4
+        # avail_h must stay inside the controls area — _content_h
+        # includes the scope on top, which would push the grid past
+        # the bottom of the screen (was clipping rows 41-64 on P-6).
+        avail_h = self._controls_h - 36
         avail_w = theme.SCREEN_WIDTH - 20
 
         cell_w = (avail_w - (cols - 1) * 4) // cols
