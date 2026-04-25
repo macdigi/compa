@@ -181,6 +181,7 @@ class DeviceWorkspaceScreen:
                 ("control", "CONTROL"),
                 ("keys", "KEYS"),
                 ("pattern", "PATTERN"),
+                ("chain", "CHAIN"),
             ]
         elif key == "Force":
             self._tabs = [("transfer", "TRANSFER")]
@@ -359,6 +360,8 @@ class DeviceWorkspaceScreen:
                 self._handle_twister_grid_clicks(mx, my)
             elif tab_key in ("pattern", "sequence"):
                 self._handle_pattern_clicks(mx, my)
+            elif tab_key == "chain":
+                self._handle_chain_tab_clicks(mx, my)
             elif tab_key == "dj":
                 self._handle_dj_clicks(mx, my)
             elif tab_key == "keys":
@@ -525,6 +528,8 @@ class DeviceWorkspaceScreen:
             self._draw_twister_grid(surface, f_med, f_small, f_tiny)
         elif tab_key in ("pattern", "sequence"):
             self._draw_pattern_grid(surface, f_med, f_small, f_tiny)
+        elif tab_key == "chain":
+            self._draw_chain_tab(surface, f_med, f_small, f_tiny)
         elif tab_key == "looper":
             self._draw_looper(surface, f_large, f_med, f_small)
         elif tab_key == "dj":
@@ -1002,6 +1007,158 @@ class DeviceWorkspaceScreen:
             f = f_med if cell_h >= 50 else f_small
             surf = f.render(label, True, tc)
             surface.blit(surf, surf.get_rect(center=rect.center))
+
+    # ── Chain tab (P-6) ──────────────────────────────────────────────
+
+    def _chain_state(self):
+        """Return (chain_player, chain) from the standalone Pattern
+        screen so the workspace tab and the full editor share state."""
+        ps = self.app.screens.get("pattern")
+        if ps is None:
+            return None, None
+        return getattr(ps, "chain_player", None), getattr(ps, "_chain", None)
+
+    def _draw_chain_tab(self, surface, f_med, f_small, f_tiny):
+        """P-6 chain tab — compact step list + transport. Steps and
+        playback state are shared with the full Pattern screen, so
+        edits made here show up there and vice versa."""
+        cp, chain = self._chain_state()
+        top = self._controls_top + 4
+
+        # Header: chain name + step count + play/stop transport
+        name = getattr(chain, "name", "—") if chain else "—"
+        steps = list(getattr(chain, "steps", []) or [])
+        playing = bool(getattr(cp, "playing", False)) if cp else False
+
+        title = f"CHAIN  ·  {name}  ({len(steps)} steps)"
+        surf = f_med.render(title, True, self._device_color)
+        surface.blit(surf, (12, top))
+
+        # Transport buttons (right side of header)
+        play_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, top, 60, 26)
+        stop_rect = pygame.Rect(theme.SCREEN_WIDTH - 155, top, 60, 26)
+        add_rect  = pygame.Rect(theme.SCREEN_WIDTH - 90,  top, 78, 26)
+        pygame.draw.rect(surface,
+                         theme.GREEN if playing else theme.BUTTON_BG,
+                         play_rect, border_radius=5)
+        surf = f_tiny.render("PLAY", True,
+                             theme.BG if playing else theme.TEXT)
+        surface.blit(surf, surf.get_rect(center=play_rect.center))
+        pygame.draw.rect(surface, theme.BUTTON_BG, stop_rect, border_radius=5)
+        surface.blit(f_tiny.render("STOP", True, theme.TEXT),
+                     f_tiny.render("STOP", True, theme.TEXT).get_rect(
+                         center=stop_rect.center))
+        pygame.draw.rect(surface, theme.ACCENT_DIM, add_rect, border_radius=5)
+        surface.blit(f_tiny.render("+ STEP", True, theme.BG),
+                     f_tiny.render("+ STEP", True, theme.BG).get_rect(
+                         center=add_rect.center))
+
+        # Step list — compact rows
+        list_y = top + 32
+        row_h = 22
+        max_rows = max(1, (self._controls_h - 40) // row_h)
+        if not steps:
+            msg = f_small.render(
+                "No steps — tap + STEP to start a chain  ·  "
+                "open the Pattern screen for the full editor",
+                True, theme.TEXT_DIM)
+            surface.blit(msg, (16, list_y + 8))
+            return
+
+        cur_idx = int(getattr(cp, "step_index", 0)) if cp else -1
+        for i, step in enumerate(steps[:max_rows]):
+            y = list_y + i * row_h
+            row_rect = pygame.Rect(12, y, theme.SCREEN_WIDTH - 24, row_h - 2)
+            is_current = playing and i == cur_idx
+            if is_current:
+                pygame.draw.rect(surface, theme.ACCENT_DIM,
+                                 row_rect, border_radius=3)
+            pygame.draw.rect(surface, theme.BORDER,
+                             row_rect, 1, border_radius=3)
+            marker = ">" if is_current else " "
+            color = theme.GREEN if is_current else theme.TEXT_DIM
+            surf = f_small.render(f"{marker}{i + 1:2d}", True, color)
+            surface.blit(surf, (18, y + 4))
+            pat = getattr(step, "pattern", 0) + 1
+            bars = getattr(step, "bars", 4)
+            multi = getattr(step, "device_patterns", None)
+            if multi:
+                pat_text = "  ·  ".join(
+                    f"{k}:{v + 1}" for k, v in sorted(multi.items()))
+            else:
+                pat_text = f"P{pat:02d}"
+            surf = f_small.render(pat_text, True, theme.TEXT)
+            surface.blit(surf, (60, y + 4))
+            surf = f_tiny.render(f"{bars} bars", True, theme.ACCENT)
+            surface.blit(surf, (row_rect.right - 60, y + 5))
+
+        if len(steps) > max_rows:
+            more = f_tiny.render(
+                f"... +{len(steps) - max_rows} more  ·  Pattern screen "
+                "for full editor",
+                True, theme.TEXT_DIM)
+            surface.blit(more, (16, list_y + max_rows * row_h + 4))
+
+    def _handle_chain_tab_clicks(self, mx, my):
+        cp, chain = self._chain_state()
+        if cp is None or chain is None:
+            return
+        top = self._controls_top + 4
+        play_rect = pygame.Rect(theme.SCREEN_WIDTH - 220, top, 60, 26)
+        stop_rect = pygame.Rect(theme.SCREEN_WIDTH - 155, top, 60, 26)
+        add_rect  = pygame.Rect(theme.SCREEN_WIDTH - 90,  top, 78, 26)
+
+        if play_rect.collidepoint(mx, my):
+            if cp.playing:
+                cp.stop()
+                return
+            # Re-wire chain player to the focused device every time we
+            # press play — the P-6 might have been disconnected at
+            # screen-init time, so the standalone Pattern screen'"'"'s
+            # original wiring may be stale.
+            p6 = self.app.p6
+            if p6 is not None:
+                try:
+                    cp.on_pattern_change = p6.send_program_change
+                    cp._midi_out = p6
+                except Exception:
+                    pass
+                try:
+                    cp._device_midi = dict(self.app._midi_connections)
+                except Exception:
+                    pass
+                # Tick advancement: chain ticks need MIDI clock from
+                # the focused device. Hook it now.
+                try:
+                    p6.on_clock_tick = cp.on_tick
+                except Exception:
+                    pass
+                # Get the device actually playing so it sends clock and
+                # the patterns themselves are audible.
+                try:
+                    if hasattr(p6, "send_start"):
+                        p6.send_start()
+                except Exception:
+                    pass
+            cp.start()
+            return
+        if stop_rect.collidepoint(mx, my):
+            if cp.playing:
+                cp.stop()
+            # Don'"'"'t auto-stop the device — user may want the current
+            # pattern to keep looping. They can stop the device on its
+            # own transport.
+            return
+        if add_rect.collidepoint(mx, my):
+            from engine.p6_chain import ChainStep
+            current_pat = 0
+            try:
+                midi = self.app._midi_connections.get(self._device_key)
+                current_pat = midi.state.active_pattern if midi else 0
+            except Exception:
+                pass
+            chain.steps.append(ChainStep(pattern=current_pat, bars=4))
+            return
 
     def _handle_pattern_clicks(self, mx, my):
         midi = self.app._midi_connections.get(self._device_key)
