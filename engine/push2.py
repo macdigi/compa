@@ -444,6 +444,44 @@ class Push2:
         base_oct_midi = (base_note // 12) * 12
         return base_oct_midi + root_pc + oct_shift * 12 + pc_in
 
+    # ── DJ mode layout ──────────────────────────────────────────────
+
+    # Order matches the columns of light_dj_layout:
+    # col 0..4 = PLAY, CUE, SYNC, BEND+, BEND-.
+    DJ_BUTTON_CCS = (20, 23, 22, 24, 25)
+    DJ_BUTTON_COLORS = (126, 8, 50, 9, 9)  # green, yellow, blue, orange x2
+
+    def light_dj_layout(self) -> None:
+        """Bottom 2 rows are deck buttons (row 0 = Deck A, row 1 = Deck B);
+        cols 0-4 = PLAY / CUE / SYNC / BEND+ / BEND-. Other pads off."""
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            if row in (0, 1) and col < 5:
+                color = self.DJ_BUTTON_COLORS[col]
+            else:
+                color = COLOR_OFF
+            self.set_pad_color(idx, color)
+
+    # ── Looper mode layout (visual only — Compa doesn't have CCs wired) ─
+
+    LOOPER_BUTTON_COLORS = (127, 8, 122, 1, 3, 3)  # REC, OVERDUB, STOP, DELETE, UNDO, REDO
+
+    def light_looper_layout(self) -> None:
+        """3-cols x 2-rows looper button grid centered on the bottom
+        of the pad surface. Mirrors Compa's on-screen looper layout."""
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            # Place buttons in cols 1-3, rows 0-1: [REC OVERDUB STOP] /
+            # [DELETE UNDO REDO]. cols 0 and 4-7 stay dark.
+            if row in (0, 1) and 1 <= col <= 3:
+                btn_idx = (1 - row) * 3 + (col - 1)  # 0..5: REC,OD,STOP,DEL,UNDO,REDO
+                color = self.LOOPER_BUTTON_COLORS[btn_idx]
+            else:
+                color = COLOR_OFF
+            self.set_pad_color(idx, color)
+
     # ── Pattern / Sequence mode layout ──────────────────────────────
 
     # Color per row in the pattern grid so each pad is visually distinct.

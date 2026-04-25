@@ -371,6 +371,12 @@ class Push2Renderer:
             offset = pattern_state[2] if len(pattern_state) > 2 else 0
             push2.light_pattern_layout(seq, step_offset=offset)
             return
+        if mode == "dj":
+            push2.light_dj_layout()
+            return
+        if mode == "looper":
+            push2.light_looper_layout()
+            return
         if dev_key == "SP-404MKII":
             push2.light_bank_frame_for_page(pad_page, num_banks=10)
         else:
@@ -450,6 +456,21 @@ class Push2Renderer:
         # ── Mode-specific status line(s) under the device pill ────
         # `mode_now` already resolved above when picking the centerpiece.
         y = 32
+        if mode_now == "dj":
+            xf = 64
+            try:
+                xf = int(self.app.live_cc.get(0, {}).get(8, 64))
+            except Exception:
+                pass
+            txt = f"DJ  Decks A · B  ·  Crossfade {xf}/127"
+            psurf = self._font_tiny.render(txt, True, dev_color)
+            surf.blit(psurf, (14, y))
+            return
+        if mode_now == "looper":
+            txt = "LOOPER  REC · OVERDUB · STOP · DELETE · UNDO · REDO"
+            psurf = self._font_tiny.render(txt, True, dev_color)
+            surf.blit(psurf, (14, y))
+            return
         if mode_now == "pattern":
             # Pattern-mode status line: play state, page, step counter.
             seq = getattr(self.app, "_push2_pattern_sequencer",

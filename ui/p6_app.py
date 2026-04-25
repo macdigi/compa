@@ -1073,6 +1073,12 @@ class P6App:
         if self.push2_mode == "pattern":
             self._on_push2_pattern_pad(idx, velocity)
             return
+        if self.push2_mode == "dj":
+            self._on_push2_dj_pad(idx, velocity)
+            return
+        if self.push2_mode == "looper":
+            self._on_push2_looper_pad(idx, velocity)
+            return
 
         if velocity == 0:
             return  # control mode acts only on press
@@ -1142,6 +1148,36 @@ class P6App:
                 kb._forward_note_off(note)
             except Exception:
                 pass
+
+    def _on_push2_dj_pad(self, idx: int, velocity: int):
+        """DJ mode pad — send the matching SP-404 DJ-mode CC.
+
+        Matches Compa's touchscreen DJ button mapping 1:1 (CCs 20/23/
+        22/24/25 on Ch1/Ch2). If a future Roland-confirmed DJ MIDI map
+        differs, only DJ_BUTTON_CCS in engine.push2 needs updating."""
+        if velocity == 0:
+            return
+        row = idx // 8
+        col = idx % 8
+        if row > 1 or col >= 5:
+            return
+        from engine.push2 import Push2
+        cc = Push2.DJ_BUTTON_CCS[col]
+        deck_ch = row  # 0 = Deck A (ch1), 1 = Deck B (ch2)
+        midi = self._midi_connections.get("SP-404MKII")
+        if midi is None:
+            return
+        try:
+            midi.send_cc(cc, 127, channel=deck_ch)
+        except Exception:
+            pass
+
+    def _on_push2_looper_pad(self, idx: int, velocity: int):
+        """Looper mode pad — visual-only for now. Compa's looper UI
+        doesn't have a verified CC map for SP-404 yet, so taps echo
+        as a press-flash but don't fire MIDI. Ready for a CC table
+        when one's confirmed."""
+        return
 
     def _push2_pattern_sequencer(self):
         """Resolve the sequencer object pattern mode should drive."""
@@ -1220,6 +1256,10 @@ class P6App:
                         new_mode = "keys"
                     elif tab_key in ("pattern", "sequence"):
                         new_mode = "pattern"
+                    elif tab_key == "dj":
+                        new_mode = "dj"
+                    elif tab_key == "looper":
+                        new_mode = "looper"
                     else:
                         new_mode = "control"
         if new_mode != self.push2_mode:
@@ -1260,30 +1300,29 @@ class P6App:
         return
 
     def _on_push2_pitch_bend(self, value: int):
-        """Push 2 touch strip → pitch bend forwarding. Diagnostic
-        logging on each call so we can see why the SP isn't bending."""
+        """Push 2 touch strip routing.
+
+        - DJ mode on SP-404 → crossfader (CC 8 on Ch1).
+        - Other modes → pitch bend on the focused device's primary
+          channel (no-op on SP since the firmware doesn't honor PB,
+          but harmless on P-6 if it ever does)."""
         dev_key = getattr(self.device_manager, "focus_key", None)
         midi = self._midi_connections.get(dev_key) if dev_key else None
-        out_ok = midi is not None and getattr(midi, "_out", None) is not None
-        # SP-404 plays chromatic notes on ch16 (0-indexed = 15); P-6 on
-        # its sampler channel (typically ch10 / 9). Send pitch bend on
-        # the same channel the chromatic note is sounding on.
-        if dev_key == "SP-404MKII":
-            ch = 15
-        elif dev_key == "P-6":
-            ch = 9
-        else:
-            ch = 0
-        print(f"[push2-pb] mode={self.push2_mode} dev={dev_key} "
-              f"val={value} out_ok={out_ok} ch={ch}", flush=True)
-        if not out_ok:
+        if midi is None or getattr(midi, "_out", None) is None:
             return
+        if self.push2_mode == "dj" and dev_key == "SP-404MKII":
+            try:
+                midi.send_cc(8, value >> 7, channel=0)
+            except Exception:
+                pass
+            return
+        ch = 15 if dev_key == "SP-404MKII" else 9
         lsb = value & 0x7F
         msb = (value >> 7) & 0x7F
         try:
             midi._out.send_message([0xE0 | ch, lsb, msb])
-        except Exception as e:
-            print(f"[push2-pb] send failed: {e}", flush=True)
+        except Exception:
+            pass
 
     def _on_push2_mode_change(self, prev: str, new: str):
         """Handle a Push 2 mode transition. Releases held notes from
