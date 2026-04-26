@@ -318,6 +318,236 @@ into the search bar to find relevant sections. The help content mirrors
 this document and is generated from the same source.
 
 
+== PUSH 2 INTEGRATION ==
+
+Compa drives an Ableton Push 2 over USB as a dedicated controller surface
+for whichever device is focused. Plug the Push 2 in via USB; Compa picks
+it up automatically (no Live, no host required) and starts driving its
+display, pads, encoders, and buttons from the Pi directly.
+
+  Connection
+    USB-A to USB-B cable from any Pi port to the Push 2's "Computer"
+    USB port. The Push 2's main power connector also needs to be in.
+    On boot Compa logs "Push 2 connected" and "Push 2 display active"
+    when the surface is ready.
+
+  Mode auto-tracking
+    The Push 2 surface re-roles to match whichever device-workspace tab
+    is focused on the Compa touchscreen:
+      Compa tab            Push 2 mode
+      ----------------     ----------------
+      Control              control
+      Keys                 keys
+      Pattern / Sequence   pattern
+      DJ (SP only)         dj
+      Looper (SP only)     looper
+    When you switch tabs on Compa or change the focused device, the
+    Push 2 lighting and dispatch shift in lockstep.
+
+
+-- Push 2: control mode --
+
+Lights the 8x8 pad grid with the focused device's banks of pads. Pressing
+a Push 2 pad triggers the mapped sample on the device. The Layout button
+cycles between two arrangements per device.
+
+  P-6 control mode (8 banks of 6 pads = 48 pads):
+    Layout 0 — row-per-bank (default)
+      All 8 banks visible at once. Each row holds one bank: cols 0-5 =
+      pads 1-6, cols 6-7 are blank. Bank 1 is the top row, Bank 8 the
+      bottom. No pad-page paging needed.
+
+    Layout 1 — quadrants
+      Four 4x4 quadrants, two banks per Push 2 page. Each bank's six
+      pads occupy the top 2 rows and leftmost 3 cols of its quadrant
+      (mirrors the P-6 hardware's 2x3 pad arrangement). Octave Up/Down
+      pages between banks 1-4 and banks 5-8.
+
+  SP-404 MK2 control mode (10 banks of 16 pads = 160 pads):
+    Layout 0 — 2-row strips (default)
+      Four banks per page, two rows per bank. Bank A is at the TOP of
+      each page, Bank D at the BOTTOM. Within each strip, the upper
+      Push 2 row is SP rows 1-2 (pads 1-8), the lower row is SP rows
+      3-4 (pads 9-16). Octave Up/Down pages A-D / E-H / I-J.
+
+    Layout 1 — quadrants
+      Four banks per page, each bank in a full 4x4 quadrant matching
+      the SP's own pad face. TL=A, TR=B, BL=C, BR=D, with pad 1 at the
+      top-left of each quadrant. Octave Up/Down pages A-D / E-H / I-J.
+
+  Layout button
+    Cycles available layouts for the focused device. The Layout LED
+    lights bright in control mode when more than one layout is on
+    offer. Other modes leave it dim.
+
+  Octave Up / Octave Down
+    In control mode, these page through the device's bank windows
+    (paging applies whenever the current layout shows fewer banks
+    than the device has). LEDs dim when only one page exists.
+
+  Pad flash on incoming notes
+    When the focused device plays one of its pads — from the device's
+    own hardware press, its sequencer, or any other source — Compa
+    receives the MIDI echo and flashes the matching Push 2 pad bright
+    white for as long as the device holds the note. Empty pads (no
+    sample loaded) don't echo MIDI from the device, so they don't
+    flash.
+
+  Bottom select buttons (SP-404 only)
+    In control mode, the bottom-row select buttons 1-5 act as the
+    SP-404 bus selector: B1, B2, B3, B4, IN. The active bus lights in
+    its bus color (red, blue, green, yellow, orange); the others stay
+    dim. Slots 6-8 are unmapped.
+
+
+-- Push 2: keys mode --
+
+Plays the focused device chromatically through the Push 2 pad grid.
+
+  Pad layout
+    In chromatic scale, each row offsets +5 semitones from the row
+    below (Ableton-Live note layout). In any other scale, every pad
+    plays an in-scale note (no off-scale gaps); rows offset +3 scale
+    degrees.
+
+  Header status
+    Shows the active KEYS root + scale name + the actual playable
+    range (e.g. "C2-F#5") computed from the layout in use.
+
+  Held-note overlay
+    When you hold a Push 2 pad (or chord), the held note name(s)
+    replace the BPM in the display centerpiece so you can see exactly
+    what's sounding without checking the device.
+
+  Octave Up / Octave Down
+    Transpose the layout by 12 semitones at a time.
+
+  Nav-Up / Nav-Down
+    Cycle scale (chromatic, major, minor, min/maj pentatonic, blues,
+    dorian, mixolydian, harmonic minor).
+
+  Nav-Left / Nav-Right
+    Step root pitch class -1 / +1.
+
+
+-- Push 2: pattern mode --
+
+Combined pattern launcher + step sequencer driven by Compa's master
+clock (independent of the device's clock). The pad grid splits into
+three regions:
+
+  Row 7 (top)         Bank selector — tap to change the focused
+                      device's active pattern bank. The active bank
+                      lights bright in its theme color (yellow for
+                      P-6, orange for SP); inactive banks dim white.
+                      For devices with more banks than the 8-cell
+                      window can show, Shift+Nav-Left/Right pages
+                      the bank window.
+
+  Row 6 (launchers)   Pattern launchers 1-8 within the active bank.
+                      Tap to select that pattern. The current pattern
+                      lights bright; others dim. Nav-Left/Right pages
+                      through pattern octaves (1-8 / 9-16 / etc).
+
+  Rows 0-5 (steps)    Step sequencer for the currently selected
+                      pattern (up to 6 pad rows visible). Tap a step
+                      to toggle it on/off; tap an active step again
+                      to clear. Bright = step on, dim = available.
+
+  Page Left / Page Right
+    Page through the 8-step window when the pattern is longer than 8
+    steps (LEDs dim cyan when paging is available).
+
+  Octave Up / Octave Down
+    Page through the visible pad rows when the device has more pads
+    than the 6 visible rows (e.g. SP's 16 pads need 3 pad pages).
+
+  Double Loop
+    Cycles pattern length: 16 -> 32 -> 64 -> 16 steps. The button
+    LED is bright pink in pattern mode.
+
+  Undo
+    Reverts the last Double-Loop length change. The LED lights bright
+    blue when an undo is available, dim otherwise.
+
+  Quantize
+    Normalizes every active step's velocity to 100. Useful when you
+    want a consistent feel across an entire pattern.
+
+  New
+    Clears every step in the current pattern's grid. The pattern
+    launchers stay where they are; only the step grid is wiped.
+
+  Play
+    In pattern mode, Play toggles BOTH the Compa step sequencer AND
+    the focused device's transport. First press starts both; second
+    press stops both.
+
+  Stop Clip
+    Stops the Compa step sequencer immediately.
+
+  Step grids persist
+    Each (device, pattern) step grid is saved to
+    sessions/compa_step_grids.json on shutdown and reloaded on the
+    next launch, so step data survives a service restart.
+
+
+-- Push 2: DJ mode (SP-404 only) --
+
+The pad grid maps to the SP's DJ-mode action set (5 columns x 2 rows
+= Decks A and B). Header status shows the current crossfader position
+"Crossfade N/127" for live reference.
+
+  Touch strip in DJ mode
+    Acts as the SP-404 crossfader (CC8 on Ch1).
+
+
+-- Push 2: looper mode (SP-404 only) --
+
+Visual layout for the SP-404 looper actions. The header shows the
+labeled slots: REC, OVERDUB, STOP, DELETE, UNDO, REDO. Pad triggers
+are wired up when Roland publishes a confirmed CC map for the looper.
+
+
+-- Push 2: encoders + buttons --
+
+  Tempo encoder (leftmost)
+    Nudges Compa's master clock BPM by 0.1 BPM per detent (or 1.0
+    with Shift held).
+
+  Master encoder
+    Master volume placeholder. A real implementation lands when
+    Compa's master mixer ships.
+
+  Swing encoder
+    Pattern-mode swing amount placeholder.
+
+  8 main encoders (top row)
+    Drive the focused device's encoder page on the touchscreen. Top
+    select buttons 1-N jump directly to encoder page N. The current
+    page lights bright white in the top row; available pages dim
+    amber.
+
+  Touch strip (outside DJ mode)
+    Sends CC 1 (mod wheel) on the focused device's main channel. Use
+    it for filter sweeps, expression, or any synth parameter that
+    accepts mod wheel.
+
+  Transport buttons
+    Play / Stop Clip / Record drive Compa's transport for the focused
+    device. Play in pattern mode also gates the Compa step sequencer.
+
+  Tab-jump buttons
+    Note    -> Keys tab
+    Session -> Session screen
+    Browse  -> Files browser
+    Device  -> Control tab
+    New     -> Add chain step (chain tab) or clear pattern grid
+                (pattern tab)
+    Mute    -> Toggle mute on the active SP bus (CC 7 0/100 with last
+                non-zero stored for restore)
+
+
 == KEYBOARD SHORTCUTS ==
 
 Compa supports keyboard shortcuts for quick navigation and control.
@@ -336,6 +566,8 @@ A USB or Bluetooth keyboard can be connected to the Pi.
   A           Toggle auto-record mode
   M           Toggle mouse mode
   F12         Take a screenshot (saved to ~/compa/screenshots/)
+  SIGUSR1     Save the current Push 2 display frame to
+                ~/compa/recordings/ (kill -USR1 <compa-pid>)
 
 
 == AUDIO ROUTING IN DETAIL ==

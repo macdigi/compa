@@ -1328,6 +1328,36 @@ class P6App:
         except Exception:
             pass
 
+    def save_push2_screenshot(self, label: str = "") -> str | None:
+        """Save the current Push 2 display frame to recordings/ as a
+        timestamped PNG. Filename encodes focused device + push2_mode
+        + control layout so a sequence of captures auto-distinguishes
+        each Push 2 screen.
+
+        Returns the saved path or None on failure."""
+        renderer = getattr(self, "push2_renderer", None)
+        if renderer is None:
+            print("Push 2 screenshot: renderer not running", flush=True)
+            return None
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        dev = (getattr(self.device_manager, "focus_key", None)
+               or "none")
+        mode = self.push2_mode or "control"
+        parts = [f"push2_{dev}_{mode}"]
+        if mode == "control":
+            parts.append(f"L{self.push2_control_layout}")
+            parts.append(f"P{self.push2_pad_page}")
+        if label:
+            parts.append(label.replace(" ", "-"))
+        parts.append(ts)
+        name = "_".join(parts) + ".png"
+        path = os.path.join("/home/pi/compa/recordings", name)
+        ok = renderer.save_screenshot(path)
+        if ok:
+            print(f"Push 2 screenshot: {path}", flush=True)
+            return path
+        return None
+
     def _on_push2_keys_pad(self, idx: int, velocity: int):
         """Keys-mode pad — forward as a chromatic note to the focused
         device. Pad-to-note mapping depends on the active scale:
@@ -3172,6 +3202,16 @@ def main():
     def _sigterm(signum, frame):
         app.running = False
     signal.signal(signal.SIGTERM, _sigterm)
+
+    # SIGUSR1 = save current Push 2 display frame as a PNG. Used by the
+    # docs-capture workflow: navigate Compa to each tab, send SIGUSR1
+    # from another shell, repeat.
+    def _sigusr1(signum, frame):
+        try:
+            app.save_push2_screenshot()
+        except Exception as e:
+            print(f"SIGUSR1 handler error: {e}", flush=True)
+    signal.signal(signal.SIGUSR1, _sigusr1)
 
     # First-time setup wizard (only if setup hasn't been completed)
     if not os.path.exists(SETUP_FLAG):

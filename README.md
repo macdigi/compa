@@ -225,6 +225,37 @@ The PreSonus ATOM SQ is a dedicated performance controller with its own routing 
 - Touch-strip routes to CC for expressive control
 - Layer system switches between PAD / PATTERN / CONTROL modes
 
+### Ableton Push 2 (deep integration)
+
+The Push 2 is the recommended performance surface for Compa. Plug it in via USB — no Live, no host required. Compa drives the 960×160 RGB display, the 8×8 RGB pad grid, the 11 encoders, and the full button layout directly from the Pi.
+
+**Mode auto-tracking** — the Push 2 surface re-roles to match whichever device-workspace tab is focused on the Compa touchscreen:
+
+| Compa tab | Push 2 mode |
+|---|---|
+| Control | Bank-aware pad grid for the focused device |
+| Keys | Chromatic / in-scale keyboard layout |
+| Pattern / Sequence | Combined pattern launcher + step sequencer |
+| DJ (SP only) | DJ-mode action grid + crossfader on the touch strip |
+| Looper (SP only) | SP-404 looper action layout |
+
+**Control mode — per-device pad layouts (Layout button cycles):**
+
+- **P-6**: row-per-bank (default, all 8 banks visible — one bank per Push 2 row, 6 pads + 2 blank cells) or 4×4 quadrants (2 banks per page, each bank's 6 pads laid out 2×3 inside its quadrant).
+- **SP-404 MK2**: 2-row strips (default, 4 banks per page with Bank A on top, D on bottom) or 4×4 quadrants (TL=A, TR=B, BL=C, BR=D, SP-style top-left=pad-1 numbering).
+- **Octave Up/Down** pages between bank windows (E-H, I-J for SP).
+- **Pad flash on incoming notes** — when the focused device plays a pad (its own hardware press, sequencer, or any other source), Compa receives the MIDI echo and lights the matching Push 2 pad bright white for the duration the device holds it. Empty pads don't echo MIDI from the device, so they don't flash.
+
+**Keys mode** — chromatic and in-scale layouts (chromatic, major, minor, min/maj pent, blues, dorian, mixolydian, harmonic minor). Held notes replace BPM in the display centerpiece. Octave shift, root step, and scale cycle live on the D-pad and Octave buttons.
+
+**Pattern mode** — combined launch grid + step sequencer driven by Compa's master clock (independent of the device's clock so tempo stays rock-solid). Top row = bank selector, second row = pattern launchers 1-8, bottom 6 rows = step grid. **Quantize** normalizes velocities to 100, **New** clears the current pattern, **Double Loop** cycles step length 16→32→64, **Undo** reverts the last length change. Per-(device, pattern) step grids persist to disk and survive a service restart.
+
+**Touch strip** — sends CC 1 (mod wheel) on the focused device's main channel in control / keys / pattern modes; in DJ mode it's the SP-404 crossfader.
+
+**Encoders** — 8 main encoders drive the focused device's encoder page (top-row select buttons jump between pages). Tempo/Master/Swing encoders nudge Compa's master clock and pattern parameters.
+
+For the full per-button reference, see [docs/compa_reference.txt](docs/compa_reference.txt) under **PUSH 2 INTEGRATION**.
+
 ---
 
 ## Multi-Device Hub
@@ -320,6 +351,39 @@ Tap a device card and Compa opens a full-screen workspace with a live oscillosco
 <p align="center">
   <img src="docs/screenshots/compa_workspace_P-6_control.png" alt="P-6 Control" width="49%">
   <img src="docs/screenshots/compa_workspace_P-6_keys.png" alt="P-6 Chromatic Keyboard" width="49%">
+</p>
+
+### Ableton Push 2 Display
+
+The Push 2's 960×160 RGB display, driven directly from the Pi. Header shows the focused device pill, BPM (or held-note overlay in keys mode), the COMPA logo, and a mode-specific status line. The middle band is a live oscilloscope tinted with the device color, flanked by L/R level meters. The bottom row labels the eight active encoders.
+
+**Control mode** — per-device pad layouts cycled by the Layout button:
+
+<p align="center">
+  <img src="docs/screenshots/push2_P-6_control_strips.png" alt="Push 2 — P-6 Control (row-per-bank)" width="49%">
+  <img src="docs/screenshots/push2_P-6_control_quad.png" alt="Push 2 — P-6 Control (quadrants)" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/push2_SP-404_control_strips.png" alt="Push 2 — SP-404 Control (2-row strips)" width="49%">
+  <img src="docs/screenshots/push2_SP-404_control_quad.png" alt="Push 2 — SP-404 Control (quadrants)" width="49%">
+</p>
+
+**Keys / Pattern modes** — chromatic keyboard with held-note overlay, combined pattern launcher + step sequencer:
+
+<p align="center">
+  <img src="docs/screenshots/push2_P-6_keys.png" alt="Push 2 — P-6 Keys" width="49%">
+  <img src="docs/screenshots/push2_P-6_pattern.png" alt="Push 2 — P-6 Pattern" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/push2_SP-404_keys.png" alt="Push 2 — SP-404 Keys" width="49%">
+  <img src="docs/screenshots/push2_SP-404_pattern.png" alt="Push 2 — SP-404 Pattern" width="49%">
+</p>
+
+**SP-404 DJ + Looper modes** — DJ action grid with live crossfade readout, looper action layout:
+
+<p align="center">
+  <img src="docs/screenshots/push2_SP-404_dj.png" alt="Push 2 — SP-404 DJ" width="49%">
+  <img src="docs/screenshots/push2_SP-404_looper.png" alt="Push 2 — SP-404 Looper" width="49%">
 </p>
 
 ### Chromatic Keyboard (KEYS tab)

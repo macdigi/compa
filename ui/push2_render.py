@@ -113,6 +113,10 @@ class Push2Renderer:
         # pad_page changes (not every frame).
         self._last_pad_frame_key: tuple | None = None
 
+        # Path the next render loop pass should save the surface to,
+        # cleared after the save. None when no screenshot is pending.
+        self._screenshot_pending: str | None = None
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -129,6 +133,26 @@ class Push2Renderer:
             pass
         log.info("Push 2 renderer stopped")
 
+    def save_screenshot(self, path: str) -> bool:
+        """Request a Push 2 screenshot. The actual save runs from the
+        render loop after the next frame, so the captured PNG always
+        contains the fully-drawn surface (avoids racing fill() / draw
+        passes). Returns True if the request was accepted."""
+        self._screenshot_pending = path
+        return True
+
+    def _do_save_screenshot(self, path: str) -> None:
+        """Perform the PNG save — called only from the render loop."""
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            pass
+        try:
+            pygame.image.save(self.surface, path)
+            log.info("Push 2 screenshot saved: %s", path)
+        except Exception as e:
+            log.warning("Push 2 screenshot failed: %s", e)
+
     # ── Render loop ────────────────────────────────────────────────
 
     def _loop(self) -> None:
@@ -138,6 +162,15 @@ class Push2Renderer:
                 self._render_frame(self.surface)
                 self.display.send_surface(self.surface)
                 self._update_button_leds()
+                # Capture screenshot if requested — done inline so the
+                # surface still holds the frame we just sent. Racing
+                # from the SIGUSR1 thread caused all-black PNGs because
+                # save_screenshot could land between fill() and the
+                # draw passes.
+                pending = self._screenshot_pending
+                if pending:
+                    self._screenshot_pending = None
+                    self._do_save_screenshot(pending)
             except Exception as e:
                 log.warning("Push 2 frame failed: %s", e)
                 time.sleep(0.3)
