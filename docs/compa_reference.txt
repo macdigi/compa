@@ -327,20 +327,21 @@ Screenshots
       Push 2's display is independent of the touchscreen so no
       timer is needed.
 
-    Compa screen (3s timer) — schedules a Compa touchscreen
-      capture in 3 seconds. A countdown overlay appears so you can
-      navigate to whichever screen you want captured before the
-      timer fires. Saves to ~/compa/screenshots/ as
+    Compa screen (5s timer) — schedules a Compa touchscreen
+      capture in 5 seconds. A small countdown badge appears in the
+      top-right of the display while the timer runs so you can
+      still see and tap any button to navigate to whichever screen
+      you want captured. Saves to ~/compa/screenshots/ as
       compa_<screen>_<timestamp>.png (the device-workspace shot
       includes the focused device in the name).
 
-    Both (3s timer) — schedules Compa + Push 2 captures to fire on
+    Both (5s timer) — schedules Compa + Push 2 captures to fire on
       the same tick. Useful for documenting matching states across
       both surfaces.
 
-  The countdown overlay is drawn AFTER the screenshot save, so the
+  The countdown badge is drawn AFTER the screenshot save, so the
   saved Compa PNG is the clean fully-composed UI without the
-  countdown visible. The overlay does appear in any in-progress
+  countdown visible. The badge does appear in any in-progress
   video recording (so playback shows when the timer fired).
 
 

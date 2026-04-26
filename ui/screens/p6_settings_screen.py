@@ -172,17 +172,18 @@ class P6SettingsScreen:
             self.app.push_hud("Push 2 capture failed (no Push 2?)", None)
 
     def _capture_compa_timed(self):
-        """Schedule a Compa screenshot in 3 seconds — a countdown
-        overlay appears so the user can navigate to whichever screen
-        they want captured before the timer fires."""
-        self.app.schedule_screenshot(delay_s=3.0, compa=True, push2=False)
-        self.app.push_hud("Compa screenshot in 3s — navigate now", None)
+        """Schedule a Compa screenshot in 5 seconds — a countdown
+        overlay appears in the top-right so the user can navigate
+        to whichever screen they want captured before the timer
+        fires."""
+        self.app.schedule_screenshot(delay_s=5.0, compa=True, push2=False)
+        self.app.push_hud("Compa screenshot in 5s — navigate now", None)
 
     def _capture_both_timed(self):
-        """Schedule a Compa + Push 2 capture in 3 seconds. Both fire
+        """Schedule a Compa + Push 2 capture in 5 seconds. Both fire
         on the same tick so they reflect the same instant."""
-        self.app.schedule_screenshot(delay_s=3.0, compa=True, push2=True)
-        self.app.push_hud("Compa + Push 2 in 3s — navigate now", None)
+        self.app.schedule_screenshot(delay_s=5.0, compa=True, push2=True)
+        self.app.push_hud("Compa + Push 2 in 5s — navigate now", None)
 
     def _check_updates(self):
         """Check for Compa updates in the background."""
@@ -558,13 +559,13 @@ class P6SettingsScreen:
             "value": push2_status,
         })
         self._rows.append({
-            "label": "  Compa screen (3s timer)", "type": "button",
+            "label": "  Compa screen (5s timer)", "type": "button",
             "btn_label": "CAPTURE",
             "action": self._capture_compa_timed,
             "value": "Navigate after pressing — saves on countdown end",
         })
         self._rows.append({
-            "label": "  Both (3s timer)", "type": "button",
+            "label": "  Both (5s timer)", "type": "button",
             "btn_label": "CAPTURE",
             "action": self._capture_both_timed,
             "value": "Compa + Push 2 fire on the same tick",

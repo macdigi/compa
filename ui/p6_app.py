@@ -1379,64 +1379,83 @@ class P6App:
 
     def _maybe_fire_screenshot(self) -> None:
         """Fire any pending screenshot whose scheduled time has passed.
-        Called once per main-loop frame from `_update`. Compa is
-        captured first so its filename reflects whichever screen the
-        user navigated to during the countdown."""
+        Called once per main-loop frame from `_draw` (after the UI is
+        composed but before the overlay is painted, so the saved frame
+        is the clean composed screen)."""
         sched = getattr(self, "_scheduled_screenshot", None)
         if sched is None:
             return
-        if time.monotonic() < sched["fire_at"]:
+        try:
+            if time.monotonic() < sched["fire_at"]:
+                return
+        except Exception:
+            self._scheduled_screenshot = None
             return
         self._scheduled_screenshot = None
         if sched.get("compa"):
-            self.save_compa_screen()
+            try:
+                self.save_compa_screen()
+            except Exception as e:
+                print(f"save_compa_screen error: {e}", flush=True)
         if sched.get("push2"):
-            self.save_push2_screenshot()
+            try:
+                self.save_push2_screenshot()
+            except Exception as e:
+                print(f"save_push2_screenshot error: {e}", flush=True)
 
     def _draw_screenshot_overlay(self, surface) -> None:
-        """Paint a centered countdown badge while a screenshot is
-        scheduled. Hides itself the moment the schedule fires (the
-        next frame after capture)."""
+        """Paint a small countdown badge in the top-right while a
+        screenshot is scheduled. Positioned so it doesn't block the
+        buttons the user needs to navigate with."""
         sched = getattr(self, "_scheduled_screenshot", None)
         if sched is None:
             return
-        remaining = sched["fire_at"] - time.monotonic()
-        if remaining <= 0:
-            return
-        secs = int(remaining) + 1
-        # Build label
-        targets = []
-        if sched.get("compa"):
-            targets.append("COMPA")
-        if sched.get("push2"):
-            targets.append("PUSH 2")
-        target_txt = " + ".join(targets) if targets else "SCREEN"
-        big_font = pygame.font.SysFont("dejavusans-bold", 96)
-        sub_font = pygame.font.SysFont("dejavusans-bold", 22)
-        big_surf = big_font.render(str(secs), True, theme.NEON_RED
-                                   if hasattr(theme, "NEON_RED")
-                                   else (255, 0, 62))
-        sub_surf = sub_font.render(f"CAPTURING {target_txt}", True,
-                                    (240, 240, 240))
-        sw, sh = surface.get_size()
-        pad = 20
-        box_w = max(big_surf.get_width(), sub_surf.get_width()) + pad * 2
-        box_h = big_surf.get_height() + sub_surf.get_height() + pad * 2 + 6
-        box_x = sw // 2 - box_w // 2
-        box_y = sh // 2 - box_h // 2
-        # Semi-transparent backdrop
-        backdrop = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-        backdrop.fill((0, 0, 0, 200))
-        surface.blit(backdrop, (box_x, box_y))
-        pygame.draw.rect(surface, (255, 0, 62),
-                         (box_x, box_y, box_w, box_h), 2,
-                         border_radius=8)
-        bx = sw // 2 - big_surf.get_width() // 2
-        by = box_y + pad
-        surface.blit(big_surf, (bx, by))
-        sx = sw // 2 - sub_surf.get_width() // 2
-        sy = by + big_surf.get_height() + 6
-        surface.blit(sub_surf, (sx, sy))
+        try:
+            remaining = sched["fire_at"] - time.monotonic()
+            if remaining <= 0:
+                return
+            secs = int(remaining) + 1
+            targets = []
+            if sched.get("compa"):
+                targets.append("COMPA")
+            if sched.get("push2"):
+                targets.append("PUSH 2")
+            target_txt = " + ".join(targets) if targets else "SCREEN"
+            # Cache the fonts on the app — SysFont every frame churns
+            # GC + heap and was almost certainly contributing to the
+            # earlier UI hangs the user saw.
+            if not hasattr(self, "_ss_overlay_fonts"):
+                self._ss_overlay_fonts = (
+                    pygame.font.SysFont("dejavusans-bold", 40),
+                    pygame.font.SysFont("dejavusans-bold", 14),
+                )
+            big_font, sub_font = self._ss_overlay_fonts
+            num_color = (255, 0, 62)
+            big_surf = big_font.render(str(secs), True, num_color)
+            sub_surf = sub_font.render(target_txt, True, (240, 240, 240))
+            sw, _sh = surface.get_size()
+            pad = 8
+            box_w = max(big_surf.get_width(), sub_surf.get_width()) + pad * 2
+            box_h = big_surf.get_height() + sub_surf.get_height() + pad * 2 + 2
+            # Top-right, nudged inward so the device pill / nav bar
+            # remain readable.
+            box_x = sw - box_w - 12
+            box_y = 80
+            backdrop = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+            backdrop.fill((0, 0, 0, 180))
+            surface.blit(backdrop, (box_x, box_y))
+            pygame.draw.rect(surface, num_color,
+                             (box_x, box_y, box_w, box_h), 1,
+                             border_radius=6)
+            bx = box_x + (box_w - big_surf.get_width()) // 2
+            by = box_y + pad
+            surface.blit(big_surf, (bx, by))
+            sx = box_x + (box_w - sub_surf.get_width()) // 2
+            sy = by + big_surf.get_height() + 2
+            surface.blit(sub_surf, (sx, sy))
+        except Exception as e:
+            # Never let an overlay paint failure break the render loop.
+            print(f"Screenshot overlay draw error: {e}", flush=True)
 
     def save_push2_screenshot(self, label: str = "") -> str | None:
         """Save the current Push 2 display frame to recordings/ as a
