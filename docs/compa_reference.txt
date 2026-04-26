@@ -310,6 +310,39 @@ Touch Calibration
   registering taps accurately. Follow the on-screen prompts to tap
   the four corners and center of the display.
 
+Video Recording
+  Tap RECORD to start a screen recording of the Compa touchscreen
+  (saved to ~/compa/videos/). Tap again to STOP. The Auto-demo
+  walkthrough button cycles through every screen automatically with
+  a recording running so you get a ~43 second tour video without
+  any manual navigation.
+
+Screenshots
+  Three capture buttons in the SCREENSHOTS section, grouped with
+  Video Recording:
+
+    Push 2 screen — instant capture of the current Push 2 display
+      frame. Saves to ~/compa/screenshots/ as
+      push2_<device>_<mode>_<layout>_<page>_<timestamp>.png. The
+      Push 2's display is independent of the touchscreen so no
+      timer is needed.
+
+    Compa screen (3s timer) — schedules a Compa touchscreen
+      capture in 3 seconds. A countdown overlay appears so you can
+      navigate to whichever screen you want captured before the
+      timer fires. Saves to ~/compa/screenshots/ as
+      compa_<screen>_<timestamp>.png (the device-workspace shot
+      includes the focused device in the name).
+
+    Both (3s timer) — schedules Compa + Push 2 captures to fire on
+      the same tick. Useful for documenting matching states across
+      both surfaces.
+
+  The countdown overlay is drawn AFTER the screenshot save, so the
+  saved Compa PNG is the clean fully-composed UI without the
+  countdown visible. The overlay does appear in any in-progress
+  video recording (so playback shows when the timer fired).
+
 
 == SCREEN 9: HELP ==
 
@@ -567,7 +600,9 @@ A USB or Bluetooth keyboard can be connected to the Pi.
   M           Toggle mouse mode
   F12         Take a screenshot (saved to ~/compa/screenshots/)
   SIGUSR1     Save the current Push 2 display frame to
-                ~/compa/recordings/ (kill -USR1 <compa-pid>)
+                ~/compa/screenshots/ (kill -USR1 <compa-pid>)
+                Equivalent to the Push 2 capture button in
+                Settings > SCREENSHOTS.
 
 
 == AUDIO ROUTING IN DETAIL ==

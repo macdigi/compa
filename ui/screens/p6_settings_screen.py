@@ -157,6 +157,33 @@ class P6SettingsScreen:
         except Exception as e:
             print(f"Demo trigger failed: {e}", flush=True)
 
+    # ── Screenshot helpers ───────────────────────────────────────────
+
+    def _capture_push2(self):
+        """Save a Push 2 screenshot immediately. The Push 2's surface
+        is independent of the touchscreen so no timer is needed —
+        whatever the focused device-workspace tab shows is what gets
+        captured."""
+        path = self.app.save_push2_screenshot()
+        if path:
+            self.app.push_hud(
+                f"Push 2 saved: {os.path.basename(path)}", None)
+        else:
+            self.app.push_hud("Push 2 capture failed (no Push 2?)", None)
+
+    def _capture_compa_timed(self):
+        """Schedule a Compa screenshot in 3 seconds — a countdown
+        overlay appears so the user can navigate to whichever screen
+        they want captured before the timer fires."""
+        self.app.schedule_screenshot(delay_s=3.0, compa=True, push2=False)
+        self.app.push_hud("Compa screenshot in 3s — navigate now", None)
+
+    def _capture_both_timed(self):
+        """Schedule a Compa + Push 2 capture in 3 seconds. Both fire
+        on the same tick so they reflect the same instant."""
+        self.app.schedule_screenshot(delay_s=3.0, compa=True, push2=True)
+        self.app.push_hud("Compa + Push 2 in 3s — navigate now", None)
+
     def _check_updates(self):
         """Check for Compa updates in the background."""
         if not hasattr(self.app, 'updater'):
@@ -513,6 +540,35 @@ class P6SettingsScreen:
                     "action": self._start_demo,
                     "value": "~43s cycle through all screens",
                 })
+
+        # Screenshots — grouped with video so all capture controls
+        # live in one place. Push 2 is instant (the device's surface
+        # is whatever its current focused tab shows). Compa captures
+        # use a 3-second countdown so the user can navigate to the
+        # screen they want to capture.
+        self._rows.append({"label": "", "type": "section",
+                           "value": "SCREENSHOTS"})
+        push2_present = getattr(self.app, "push2", None) is not None
+        push2_status = ("Saves to ~/compa/screenshots/"
+                        if push2_present else "Push 2 not connected")
+        self._rows.append({
+            "label": "  Push 2 screen", "type": "button",
+            "btn_label": "CAPTURE",
+            "action": self._capture_push2,
+            "value": push2_status,
+        })
+        self._rows.append({
+            "label": "  Compa screen (3s timer)", "type": "button",
+            "btn_label": "CAPTURE",
+            "action": self._capture_compa_timed,
+            "value": "Navigate after pressing — saves on countdown end",
+        })
+        self._rows.append({
+            "label": "  Both (3s timer)", "type": "button",
+            "btn_label": "CAPTURE",
+            "action": self._capture_both_timed,
+            "value": "Compa + Push 2 fire on the same tick",
+        })
 
         # Audio and display info
         self._rows.extend([

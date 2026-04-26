@@ -268,6 +268,10 @@ class P6App:
         # arrived from the focused device. Cleared on the matching
         # note-off (mirrors the device's own pad-held lighting).
         self._push2_active_device_pads: set[int] = set()
+        # Pending screenshot schedule — None when nothing pending.
+        # Fires from `_maybe_fire_screenshot` during _update once the
+        # countdown elapses. See `schedule_screenshot`.
+        self._scheduled_screenshot: dict | None = None
         # First step displayed in pattern mode (0 = steps 1-8, 8 = 9-16
         # for 16-step patterns). Page-left/right cycles this in mode.
         self.push2_pattern_step_offset: int = 0
@@ -1328,6 +1332,112 @@ class P6App:
         except Exception:
             pass
 
+    # ── Screenshot scheduling (Compa touchscreen + Push 2) ────────────
+
+    def save_compa_screen(self, label: str = "") -> str | None:
+        """Save the current Compa touchscreen frame to ~/compa/screenshots/
+        as a timestamped PNG. Filename encodes the current screen name
+        (and focused device for the device-workspace) so successive
+        captures auto-distinguish."""
+        try:
+            ss_dir = "/home/pi/compa/screenshots"
+            os.makedirs(ss_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            screen = self.current_screen_name or "screen"
+            tag = screen
+            if screen == "device_workspace":
+                dev = (getattr(self.device_manager, "focus_key", None)
+                       or "none")
+                tag = f"{screen}_{dev}"
+            parts = [f"compa_{tag}"]
+            if label:
+                parts.append(label.replace(" ", "-"))
+            parts.append(ts)
+            name = "_".join(parts) + ".png"
+            path = os.path.join(ss_dir, name)
+            pygame.image.save(self.screen, path)
+            print(f"Compa screenshot saved: {path}", flush=True)
+            return path
+        except Exception as e:
+            print(f"Compa screenshot failed: {e}", flush=True)
+            return None
+
+    def schedule_screenshot(self, delay_s: float = 0.0,
+                            compa: bool = True,
+                            push2: bool = False) -> None:
+        """Schedule Compa / Push 2 captures to fire in `delay_s` seconds.
+        A countdown overlay appears on the touchscreen during the wait
+        so the user can navigate to the screen they want to capture
+        before the timer expires. Replaces any pending schedule."""
+        now = time.monotonic()
+        self._scheduled_screenshot = {
+            "fire_at": now + max(0.0, float(delay_s)),
+            "started_at": now,
+            "compa": bool(compa),
+            "push2": bool(push2),
+        }
+
+    def _maybe_fire_screenshot(self) -> None:
+        """Fire any pending screenshot whose scheduled time has passed.
+        Called once per main-loop frame from `_update`. Compa is
+        captured first so its filename reflects whichever screen the
+        user navigated to during the countdown."""
+        sched = getattr(self, "_scheduled_screenshot", None)
+        if sched is None:
+            return
+        if time.monotonic() < sched["fire_at"]:
+            return
+        self._scheduled_screenshot = None
+        if sched.get("compa"):
+            self.save_compa_screen()
+        if sched.get("push2"):
+            self.save_push2_screenshot()
+
+    def _draw_screenshot_overlay(self, surface) -> None:
+        """Paint a centered countdown badge while a screenshot is
+        scheduled. Hides itself the moment the schedule fires (the
+        next frame after capture)."""
+        sched = getattr(self, "_scheduled_screenshot", None)
+        if sched is None:
+            return
+        remaining = sched["fire_at"] - time.monotonic()
+        if remaining <= 0:
+            return
+        secs = int(remaining) + 1
+        # Build label
+        targets = []
+        if sched.get("compa"):
+            targets.append("COMPA")
+        if sched.get("push2"):
+            targets.append("PUSH 2")
+        target_txt = " + ".join(targets) if targets else "SCREEN"
+        big_font = pygame.font.SysFont("dejavusans-bold", 96)
+        sub_font = pygame.font.SysFont("dejavusans-bold", 22)
+        big_surf = big_font.render(str(secs), True, theme.NEON_RED
+                                   if hasattr(theme, "NEON_RED")
+                                   else (255, 0, 62))
+        sub_surf = sub_font.render(f"CAPTURING {target_txt}", True,
+                                    (240, 240, 240))
+        sw, sh = surface.get_size()
+        pad = 20
+        box_w = max(big_surf.get_width(), sub_surf.get_width()) + pad * 2
+        box_h = big_surf.get_height() + sub_surf.get_height() + pad * 2 + 6
+        box_x = sw // 2 - box_w // 2
+        box_y = sh // 2 - box_h // 2
+        # Semi-transparent backdrop
+        backdrop = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        backdrop.fill((0, 0, 0, 200))
+        surface.blit(backdrop, (box_x, box_y))
+        pygame.draw.rect(surface, (255, 0, 62),
+                         (box_x, box_y, box_w, box_h), 2,
+                         border_radius=8)
+        bx = sw // 2 - big_surf.get_width() // 2
+        by = box_y + pad
+        surface.blit(big_surf, (bx, by))
+        sx = sw // 2 - sub_surf.get_width() // 2
+        sy = by + big_surf.get_height() + 6
+        surface.blit(sub_surf, (sx, sy))
+
     def save_push2_screenshot(self, label: str = "") -> str | None:
         """Save the current Push 2 display frame to recordings/ as a
         timestamped PNG. Filename encodes focused device + push2_mode
@@ -1351,7 +1461,7 @@ class P6App:
             parts.append(label.replace(" ", "-"))
         parts.append(ts)
         name = "_".join(parts) + ".png"
-        path = os.path.join("/home/pi/compa/recordings", name)
+        path = os.path.join("/home/pi/compa/screenshots", name)
         ok = renderer.save_screenshot(path)
         if ok:
             print(f"Push 2 screenshot: {path}", flush=True)
@@ -2963,6 +3073,17 @@ class P6App:
         # Keyboard overlays absolutely everything (including the audio player)
         if getattr(self, 'keyboard', None) and self.keyboard.visible:
             self.keyboard.draw(self.screen)
+
+        # Fire any pending screenshot here so the saved Compa frame is
+        # the fully composed UI WITHOUT the countdown overlay drawn on
+        # top. The user navigated to whatever screen they wanted; save
+        # it clean.
+        self._maybe_fire_screenshot()
+
+        # Countdown overlay — drawn after the screenshot save so it
+        # appears on the live display + in any video recording but
+        # does NOT end up baked into the saved PNG.
+        self._draw_screenshot_overlay(self.screen)
 
         # Capture this frame into the video pipe BEFORE flipping display.
         # We copy the fully composed surface (nav + HUD + modals all included).
