@@ -362,8 +362,8 @@ class Push2:
 
     def light_bank_frame_for_page(self, pad_page: int, num_banks: int,
                                   colors: list[int] | None = None) -> None:
-        """Paint the pad grid for the given pad page, respecting how
-        many banks the focused device actually has.
+        """SP-style 2-row-per-bank layout (top-down: Bank A at the top,
+        D at the bottom of each page). 4 banks per page.
 
         pad_page 0 = banks 0-3 (A-D), pad_page 1 = banks 4-7 (E-H),
         pad_page 2 = banks 8-9 (I-J). Each bank occupies 2 rows × 8
@@ -371,13 +371,184 @@ class Push2:
         are blanked."""
         palette = colors or SP_BANK_COLORS
         for pad in range(64):
-            row_pair = pad // 16        # 0..3
-            effective_bank = pad_page * 4 + row_pair
+            # Push 2 pad 0 is bottom-left; row 0 = bottom row. We want
+            # Bank A on top, so the topmost row pair (rows 6-7) maps to
+            # bank-on-page 0.
+            row_pair_from_bottom = pad // 16   # 0 (bot pair) .. 3 (top pair)
+            bank_in_page = 3 - row_pair_from_bottom
+            effective_bank = pad_page * 4 + bank_in_page
             if effective_bank < 0 or effective_bank >= num_banks:
                 self.set_pad_color(pad, COLOR_OFF)
             else:
                 idx = effective_bank if effective_bank < len(palette) else 0
                 self.set_pad_color(pad, palette[idx])
+
+    def light_quad_bank_layout(self, pad_page: int, num_banks: int,
+                               colors: list[int] | None = None) -> None:
+        """4×4-quadrant layout. Each page shows up to 4 banks laid out
+        like the SP itself: TL = first bank on page, TR = second,
+        BL = third, BR = fourth. Within each quadrant, pad 1 is at the
+        top-left and numbers fill row-by-row (matches SP pad numbering
+        and `_compute_pad_note`'s pad_idx 0..15).
+
+        Empty quadrants (no bank assigned at this page) are blanked."""
+        palette = colors or SP_BANK_COLORS
+        for idx in range(64):
+            push2_row = idx // 8        # 0 = bottom row, 7 = top row
+            push2_col = idx % 8
+            top_half = push2_row >= 4
+            right_half = push2_col >= 4
+            # Quadrant index on this page: TL=0, TR=1, BL=2, BR=3.
+            if top_half:
+                bank_in_page = 0 if not right_half else 1
+            else:
+                bank_in_page = 2 if not right_half else 3
+            effective_bank = pad_page * 4 + bank_in_page
+            if effective_bank < 0 or effective_bank >= num_banks:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            cidx = effective_bank if effective_bank < len(palette) else 0
+            self.set_pad_color(idx, palette[cidx])
+
+    @staticmethod
+    def quad_pad_to_bank_pad(idx: int) -> tuple[int, int]:
+        """Inverse of light_quad_bank_layout — returns
+        (bank_in_page, pad_in_bank_idx) for the given Push 2 pad idx.
+        pad_in_bank_idx is 0..15 in SP top-left-first numbering, ready
+        for `_compute_pad_note`."""
+        push2_row = idx // 8        # 0 = bottom row
+        push2_col = idx % 8
+        top_half = push2_row >= 4
+        right_half = push2_col >= 4
+        if top_half:
+            bank_in_page = 0 if not right_half else 1
+        else:
+            bank_in_page = 2 if not right_half else 3
+        # Within a 4-row tall quadrant, top of quadrant is the row with
+        # row_in_quad = 3 (push2_row 7 for top half, 3 for bottom half).
+        row_in_quad = push2_row % 4
+        col_in_quad = push2_col % 4
+        # Pad 1 is top-left of quadrant; pad_in_bank goes left-to-right,
+        # top-to-bottom (matches SP `_compute_pad_note` indexing).
+        pad_in_bank = (3 - row_in_quad) * 4 + col_in_quad
+        return (bank_in_page, pad_in_bank)
+
+    @staticmethod
+    def two_row_pad_to_bank_pad(idx: int) -> tuple[int, int]:
+        """Inverse of light_bank_frame_for_page — returns
+        (bank_in_page, pad_in_bank_idx) where pad_in_bank_idx is 0..15
+        in SP top-left-first numbering.
+
+        2x8 strip per bank: top row of the pair = SP rows 0-1 (pads
+        1-8), bottom row of the pair = SP rows 2-3 (pads 9-16)."""
+        push2_row = idx // 8        # 0 = bottom row
+        push2_col = idx % 8
+        row_pair_from_bottom = push2_row // 2     # 0..3
+        bank_in_page = 3 - row_pair_from_bottom   # top pair = bank 0
+        # Within a 2-row strip, the upper Push 2 row is the SP top half
+        # (pads 1-8) and the lower Push 2 row is the SP bottom half
+        # (pads 9-16). Push 2 col directly maps to "pad column" 0..7,
+        # which we split into SP cols 0..3 for the left half + 0..3
+        # for the right half.
+        upper_of_pair = (push2_row % 2 == 1)
+        sp_row_start = 0 if upper_of_pair else 2
+        # Map 8 push2 cols → 2 SP rows × 4 cols. Cols 0-3 = SP row N,
+        # cols 4-7 = SP row N+1.
+        if push2_col < 4:
+            sp_row = sp_row_start
+            sp_col = push2_col
+        else:
+            sp_row = sp_row_start + 1
+            sp_col = push2_col - 4
+        pad_in_bank = sp_row * 4 + sp_col
+        return (bank_in_page, pad_in_bank)
+
+    # ── P-6 control layouts ────────────────────────────────────────
+
+    def light_p6_row_layout(self, num_banks: int = 8,
+                            colors: list[int] | None = None) -> None:
+        """P-6 row-per-bank layout — all banks visible at once.
+
+        P-6 has 6 pads × up to 8 banks. Each Push 2 row holds one bank:
+        cols 0-5 = pads 1-6, cols 6-7 = blank. Bank 1 = top row, Bank
+        N = bottom. Banks beyond num_banks are blanked."""
+        palette = colors or SP_BANK_COLORS
+        for idx in range(64):
+            push2_row = idx // 8        # 0 = bottom row
+            push2_col = idx % 8
+            bank = 7 - push2_row        # row 7 = bank 0, row 0 = bank 7
+            if bank >= num_banks or push2_col >= 6:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            cidx = bank if bank < len(palette) else 0
+            self.set_pad_color(idx, palette[cidx])
+
+    @staticmethod
+    def p6_row_pad_to_bank_pad(idx: int) -> tuple[int, int]:
+        """Inverse of light_p6_row_layout. Returns (bank, pad_in_bank)
+        where pad_in_bank is 0..5 (P-6 pad 1..6 left to right). Returns
+        (-1, -1) for blank cells (cols 6-7)."""
+        push2_row = idx // 8
+        push2_col = idx % 8
+        if push2_col >= 6:
+            return (-1, -1)
+        bank = 7 - push2_row
+        return (bank, push2_col)
+
+    def light_p6_quad_layout(self, pad_page: int, num_banks: int = 8,
+                             colors: list[int] | None = None) -> None:
+        """P-6 4×4-quadrant layout. 4 banks per page, each bank's 6
+        pads laid out in the top 2 rows × first 3 cols of its quadrant
+        (mirrors the P-6 hardware's 2x3 pad layout). Page 0 = banks
+        0-3, page 1 = banks 4-7."""
+        palette = colors or SP_BANK_COLORS
+        for idx in range(64):
+            push2_row = idx // 8
+            push2_col = idx % 8
+            top_half = push2_row >= 4
+            right_half = push2_col >= 4
+            if top_half:
+                bank_in_page = 0 if not right_half else 1
+            else:
+                bank_in_page = 2 if not right_half else 3
+            effective_bank = pad_page * 4 + bank_in_page
+            if effective_bank < 0 or effective_bank >= num_banks:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            row_in_quad = push2_row % 4
+            col_in_quad = push2_col % 4
+            # Top 2 rows of the 4-row quadrant + leftmost 3 cols hold the
+            # 6 P-6 pads. Bottom 2 rows + rightmost col are blank.
+            if row_in_quad < 2 or col_in_quad >= 3:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            cidx = effective_bank if effective_bank < len(palette) else 0
+            self.set_pad_color(idx, palette[cidx])
+
+    @staticmethod
+    def p6_quad_pad_to_bank_pad(idx: int) -> tuple[int, int]:
+        """Inverse of light_p6_quad_layout. Returns
+        (bank_in_page, pad_in_bank) where pad_in_bank is 0..5 (P-6 pad
+        1..6 in 2 rows × 3 cols, top row = pads 1-3). Returns (-1, -1)
+        for cells outside the 2x3 active area."""
+        push2_row = idx // 8
+        push2_col = idx % 8
+        top_half = push2_row >= 4
+        right_half = push2_col >= 4
+        if top_half:
+            bank_in_page = 0 if not right_half else 1
+        else:
+            bank_in_page = 2 if not right_half else 3
+        row_in_quad = push2_row % 4
+        col_in_quad = push2_col % 4
+        if row_in_quad < 2 or col_in_quad >= 3:
+            return (-1, -1)
+        # Pad 1 = top-left of quadrant's 2x3 area.
+        # row_in_quad 3 = top of quadrant → P-6 row 0 (pads 1-3)
+        # row_in_quad 2 = second row → P-6 row 1 (pads 4-6)
+        p6_row = 3 - row_in_quad        # 0 or 1
+        pad_in_bank = p6_row * 3 + col_in_quad
+        return (bank_in_page, pad_in_bank)
 
     def set_pads_from_compa_banks(self, has_sample_flags: list[bool]) -> None:
         for i, loaded in enumerate(has_sample_flags[:64]):

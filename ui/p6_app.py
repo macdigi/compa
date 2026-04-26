@@ -252,6 +252,11 @@ class P6App:
         self.push2_page: int = 0
         # Pad-bank page. 0 = A-D, 1 = E-H, 2 = I-J (SP-404 MK2 has 10 banks).
         self.push2_pad_page: int = 0
+        # Control-mode pad layout. 0 = SP-style 2-row strips (default),
+        # 1 = 4×4 quadrants. Cycled by the Push 2 Layout button. P-6
+        # has its own variants (row-per-bank vs. quadrant); index meaning
+        # is per-device — see _push2_control_layout_count().
+        self.push2_control_layout: int = 0
         # Push 2 surface mode — tracks the focused device-workspace tab
         # so the Push 2 surface re-roles (control / keys / sequence /
         # pattern / etc.) in lockstep with the Compa touchscreen.
@@ -259,6 +264,10 @@ class P6App:
         # pad_idx → MIDI note for actively-held keys-mode notes, so
         # we can convert release events back to the right note number.
         self._push2_keys_active: dict[int, int] = {}
+        # Push 2 pad indices currently flashed because a note-on
+        # arrived from the focused device. Cleared on the matching
+        # note-off (mirrors the device's own pad-held lighting).
+        self._push2_active_device_pads: set[int] = set()
         # First step displayed in pattern mode (0 = steps 1-8, 8 = 9-16
         # for 16-step patterns). Page-left/right cycles this in mode.
         self.push2_pattern_step_offset: int = 0
@@ -286,7 +295,12 @@ class P6App:
         # Per-(device, pattern) step grids. PiSequencer only holds the
         # currently-loaded pattern; we snapshot here on pattern launch
         # so each pattern keeps its own steps when the user switches.
-        self._compa_step_grids: dict[tuple[str, int], list] = {}
+        # Loaded from disk on startup, saved on shutdown.
+        try:
+            from engine.compa_step_persistence import load as _load_grids
+            self._compa_step_grids = _load_grids(self._step_grids_path())
+        except Exception:
+            self._compa_step_grids = {}
         # Most recent num_steps value before the last Double Loop
         # press, so Undo can revert it. None = nothing to undo.
         self._push2_last_num_steps: int | None = None
@@ -587,6 +601,30 @@ class P6App:
                 if _orig:
                     _orig(channel, cc, value)
             sp404_midi.on_cc = _on_sp404_cc
+
+        # Wire incoming pad-note callbacks so Push 2 flashes pads when
+        # the focused device plays them (its own hardware pad, sequencer,
+        # or a remote trigger). Both SP-404 and P-6 send note events on
+        # their MIDI Out — control mode lights the matching Push 2 pad
+        # in real time.
+        for _dev_key in ("SP-404MKII", "P-6"):
+            _midi = self._midi_connections.get(_dev_key)
+            if _midi is None:
+                continue
+            _orig_note = getattr(_midi, "on_note", None)
+            def _make_note_handler(dev_key, orig):
+                def _h(ch, note, vel):
+                    try:
+                        self._on_device_note(dev_key, ch, note, vel)
+                    except Exception:
+                        pass
+                    if orig is not None:
+                        try:
+                            orig(ch, note, vel)
+                        except Exception:
+                            pass
+                return _h
+            _midi.on_note = _make_note_handler(_dev_key, _orig_note)
 
         # Twister Genius — auto-detect and connect
         if self.twister.detect():
@@ -1118,12 +1156,17 @@ class P6App:
         if velocity == 0:
             return  # control mode acts only on press
 
-        bank_offset = idx // 16
-        pad_in_bank = idx % 16
         dev_key = getattr(self.device_manager, "focus_key", None)
+        from engine.push2 import Push2
 
         if dev_key == "SP-404MKII":
-            effective_bank = self.push2_pad_page * 4 + bank_offset
+            if self.push2_control_layout == 1:
+                bank_in_page, pad_in_bank = Push2.quad_pad_to_bank_pad(idx)
+            else:
+                bank_in_page, pad_in_bank = Push2.two_row_pad_to_bank_pad(idx)
+            if pad_in_bank < 0:
+                return
+            effective_bank = self.push2_pad_page * 4 + bank_in_page
             if effective_bank >= self._push2_sp_bank_count():
                 return
             midi = self._midi_connections.get("SP-404MKII")
@@ -1144,8 +1187,146 @@ class P6App:
                 pass
             return
 
+        if dev_key == "P-6":
+            if self.push2_control_layout == 1:
+                bank_in_page, pad_in_bank = Push2.p6_quad_pad_to_bank_pad(idx)
+                effective_bank = self.push2_pad_page * 4 + bank_in_page
+            else:
+                # Layout 0 (default): row-per-bank, all 8 banks visible.
+                bank, pad_in_bank = Push2.p6_row_pad_to_bank_pad(idx)
+                effective_bank = bank
+            if pad_in_bank < 0:
+                return
+            if effective_bank < 0 or effective_bank >= 8:
+                return
+            midi = self._midi_connections.get("P-6")
+            if midi is None:
+                return
+            from engine.controller_actions import _compute_pad_note
+            note, channel = _compute_pad_note(
+                "P-6", effective_bank, pad_in_bank, midi,
+            )
+            if note < 0:
+                return
+            try:
+                if velocity > 0:
+                    midi.send_note_on(note, velocity, channel=channel)
+                else:
+                    midi.send_note_off(note, channel=channel)
+            except Exception:
+                pass
+            return
+
+        # Generic fallback (other USB-class-compliant devices) — keep
+        # the legacy bottom-strip behaviour: rows 0-1 fire pad.trigger.1
+        # through pad.trigger.16 against whatever current bank Compa is
+        # focused on.
+        bank_offset = idx // 16
+        pad_in_bank = idx % 16
         if bank_offset == 0:
             _dispatch_action(f"pad.trigger.{pad_in_bank + 1}", velocity, self)
+
+    # ── Incoming-pad flash on Push 2 (control mode) ──────────────────
+
+    def _device_note_to_bank_pad(self, dev_key: str, channel: int,
+                                  note: int) -> tuple[int, int]:
+        """Reverse of `_compute_pad_note`. Given an incoming note from
+        the device, return (bank, pad_in_bank) or (-1, -1) if the note
+        isn't a pad trigger (e.g. chromatic, transport, CC echo)."""
+        if dev_key == "SP-404MKII":
+            if not (36 <= note <= 51):
+                return (-1, -1)
+            if not (0 <= channel <= 9):
+                return (-1, -1)
+            midi_row = (note - 36) // 4         # 0 (bottom of SP) .. 3 (top)
+            col = (note - 36) % 4
+            sp_row = 3 - midi_row               # 0 (top) .. 3 (bottom)
+            pad_in_bank = sp_row * 4 + col
+            return (channel, pad_in_bank)
+        if dev_key == "P-6":
+            # P-6 sample pads documented as ch11 (sampler) notes 48-95
+            # covering all 8 banks × 6 pads. We accept any channel in
+            # the sampler/auto family so pad-press echoes that travel
+            # on ch15 (Auto, "currently selected pad") also flash. The
+            # note value alone disambiguates the bank+pad.
+            if not (48 <= note <= 95):
+                return (-1, -1)
+            delta = note - 48
+            bank = delta // 6
+            pad_in_bank = delta % 6
+            if bank > 7 or pad_in_bank > 5:
+                return (-1, -1)
+            return (bank, pad_in_bank)
+        return (-1, -1)
+
+    def _push2_pad_idx_for_device_pad(self, dev_key: str, bank: int,
+                                       pad_in_bank: int) -> int:
+        """Forward of the layout helpers. Brute-force search the 64
+        Push 2 pads for one whose decoded (effective_bank, pad_in_bank)
+        matches. Returns -1 if the bank isn't currently visible (off
+        the active pad page) or pad_in_bank is invalid."""
+        from engine.push2 import Push2
+        layout = self.push2_control_layout
+        page = self.push2_pad_page
+        for idx in range(64):
+            if dev_key == "SP-404MKII":
+                if layout == 1:
+                    bp, p = Push2.quad_pad_to_bank_pad(idx)
+                else:
+                    bp, p = Push2.two_row_pad_to_bank_pad(idx)
+                if p < 0:
+                    continue
+                eff_bank = page * 4 + bp
+            elif dev_key == "P-6":
+                if layout == 1:
+                    bp, p = Push2.p6_quad_pad_to_bank_pad(idx)
+                    if p < 0:
+                        continue
+                    eff_bank = page * 4 + bp
+                else:
+                    eff_bank, p = Push2.p6_row_pad_to_bank_pad(idx)
+                    if p < 0:
+                        continue
+            else:
+                return -1
+            if eff_bank == bank and p == pad_in_bank:
+                return idx
+        return -1
+
+    def _on_device_note(self, dev_key: str, channel: int,
+                         note: int, velocity: int) -> None:
+        """Incoming note from SP/P-6. In control mode, flash the
+        matching Push 2 pad while the device holds the note, restore
+        on note-off. No-op if not in control mode, the device isn't
+        focused, or the note doesn't decode to a visible pad."""
+        if self.push2_mode != "control":
+            return
+        if getattr(self.device_manager, "focus_key", None) != dev_key:
+            return
+        push2 = getattr(self, "push2", None)
+        if push2 is None:
+            return
+        bank, pad_in_bank = self._device_note_to_bank_pad(
+            dev_key, channel, note)
+        if bank < 0 or pad_in_bank < 0:
+            return
+        idx = self._push2_pad_idx_for_device_pad(
+            dev_key, bank, pad_in_bank)
+        if idx < 0:
+            return
+        try:
+            if velocity > 0:
+                # Bright white pops against every bank color (red,
+                # blue, green, yellow, orange, magenta, teal, lime,
+                # purple). Avoids the cyan-near-teal confusion the
+                # earlier flash had on Bank G.
+                push2.flash_pad(idx, 122)
+                self._push2_active_device_pads.add(idx)
+            else:
+                push2.restore_pad(idx)
+                self._push2_active_device_pads.discard(idx)
+        except Exception:
+            pass
 
     def _on_push2_keys_pad(self, idx: int, velocity: int):
         """Keys-mode pad — forward as a chromatic note to the focused
@@ -1213,6 +1394,15 @@ class P6App:
         as a press-flash but don't fire MIDI. Ready for a CC table
         when one's confirmed."""
         return
+
+    def _step_grids_path(self) -> str:
+        """JSON file backing self._compa_step_grids."""
+        sessions_dir = self.config.get(
+            "P6_SESSIONS_DIR",
+            os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "sessions"),
+        )
+        return os.path.join(sessions_dir, "compa_step_grids.json")
 
     def _push2_pattern_sequencer(self):
         """Resolve the sequencer object pattern mode should drive."""
@@ -1478,9 +1668,9 @@ class P6App:
         """Push 2 touch strip routing.
 
         - DJ mode on SP-404 → crossfader (CC 8 on Ch1).
-        - Other modes → pitch bend on the focused device's primary
-          channel (no-op on SP since the firmware doesn't honor PB,
-          but harmless on P-6 if it ever does)."""
+        - All other modes / devices → CC 1 (modulation wheel) on the
+          focused device's main channel. The 14-bit strip value scales
+          to a 7-bit CC; touch at the bottom = 0, top = 127."""
         dev_key = getattr(self.device_manager, "focus_key", None)
         midi = self._midi_connections.get(dev_key) if dev_key else None
         if midi is None or getattr(midi, "_out", None) is None:
@@ -1491,11 +1681,12 @@ class P6App:
             except Exception:
                 pass
             return
-        ch = 15 if dev_key == "SP-404MKII" else 9
-        lsb = value & 0x7F
-        msb = (value >> 7) & 0x7F
+        # Mod wheel — universal 7-bit mapping; works on any device that
+        # responds to CC 1 (most synths/samplers route it to filter,
+        # vibrato depth, or similar).
+        ch = 0 if dev_key == "SP-404MKII" else 9
         try:
-            midi._out.send_message([0xE0 | ch, lsb, msb])
+            midi.send_cc(1, max(0, min(127, value >> 7)), channel=ch)
         except Exception:
             pass
 
@@ -1593,15 +1784,46 @@ class P6App:
         return 10
 
     def push2_pad_page_count(self) -> int:
-        """How many 4-bank windows cover the focused device's banks."""
+        """How many 4-bank windows cover the focused device's banks
+        under the current control layout."""
         dev_key = getattr(self.device_manager, "focus_key", None)
         if dev_key == "SP-404MKII":
+            # Both layouts are 4 banks per page, just arranged differently.
             return (self._push2_sp_bank_count() + 3) // 4
+        if dev_key == "P-6":
+            # Layout 0 (row-per-bank) shows all 8 banks at once → 1 page.
+            # Layout 1 (quadrant) shows 4 banks per page → 2 pages.
+            if self.push2_control_layout == 1:
+                return 2
+            return 1
         return 1
 
     def _push2_cycle_pad_page(self, delta: int) -> None:
         count = self.push2_pad_page_count()
         self.push2_pad_page = (self.push2_pad_page + delta) % count
+
+    def _push2_control_layout_count(self) -> int:
+        """How many control-mode pad layouts are available for the
+        focused device. Returning 1 means the Layout button is a
+        no-op (LED stays dim)."""
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        # Currently both SP and P-6 expose two layouts; other devices
+        # only have the legacy fallback so layout cycling is disabled.
+        if dev_key in ("SP-404MKII", "P-6"):
+            return 2
+        return 1
+
+    def _push2_cycle_control_layout(self) -> None:
+        """Advance push2_control_layout, wrapping per-device count.
+        Resets pad_page to 0 since the new layout may have different
+        paging."""
+        if self.push2_mode != "control":
+            return
+        count = self._push2_control_layout_count()
+        if count <= 1:
+            return
+        self.push2_control_layout = (self.push2_control_layout + 1) % count
+        self.push2_pad_page = 0
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
@@ -1744,23 +1966,52 @@ class P6App:
             except Exception:
                 pass
         elif name == "new":
-            # On the P-6 CHAIN tab, append a chain step using the
-            # current pattern. Otherwise no-op.
+            # CHAIN tab: append a chain step. PATTERN/SEQUENCE tab in
+            # pattern mode: clear the current pattern's step grid.
             if self.current_screen_name == "device_workspace":
                 ws = self.screens.get("device_workspace")
                 tabs = getattr(ws, "_tabs", [])
                 idx = getattr(ws, "_current_tab", 0)
-                if 0 <= idx < len(tabs) and tabs[idx][0] == "chain":
-                    ps = self.screens.get("pattern")
-                    chain = getattr(ps, "_chain", None)
-                    if chain is not None:
-                        from engine.p6_chain import ChainStep
-                        pat = 0
-                        try:
-                            pat = self.p6.state.active_pattern if self.p6 else 0
-                        except Exception:
-                            pass
-                        chain.steps.append(ChainStep(pattern=pat, bars=4))
+                if 0 <= idx < len(tabs):
+                    tab_key = tabs[idx][0]
+                    if tab_key == "chain":
+                        ps = self.screens.get("pattern")
+                        chain = getattr(ps, "_chain", None)
+                        if chain is not None:
+                            from engine.p6_chain import ChainStep
+                            pat = 0
+                            try:
+                                pat = self.p6.state.active_pattern if self.p6 else 0
+                            except Exception:
+                                pass
+                            chain.steps.append(ChainStep(pattern=pat, bars=4))
+                    elif tab_key in ("pattern", "sequence"):
+                        seq = self._push2_pattern_sequencer()
+                        if seq is not None:
+                            try:
+                                seq.clear_all()
+                            except Exception:
+                                pass
+        elif name == "layout" and self.push2_mode == "control":
+            # Cycle the active control-mode pad layout for the focused
+            # device (SP: 2-row strips → quadrants; P-6: row-per-bank →
+            # quadrants). The Layout button LED reflects the available
+            # state (lit when more than one layout is on offer).
+            self._push2_cycle_control_layout()
+        elif name == "quantize" and self.push2_mode == "pattern":
+            # Normalize all step velocities to 100 in the current
+            # pattern. Steps stay where they are (already grid-aligned)
+            # — this is the "even out the velocities" tweak.
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                try:
+                    for p in range(seq.num_pads):
+                        for s in range(seq.num_steps):
+                            cell = seq.grid[p][s]
+                            if cell.active:
+                                cell.velocity = 100
+                except Exception:
+                    pass
         elif name == "mute":
             # SP-404: toggle mute on the currently active bus by
             # flipping CC 7 (volume) between 0 and 100. Stores the
@@ -2089,6 +2340,12 @@ class P6App:
             return False
 
         print(f"Focus → {short_name}", flush=True)
+
+        # Reset Push 2 control-layout state on focus change — the
+        # layout count is per-device, and we don't want a stale layout
+        # index pointing past what the new device offers.
+        self.push2_control_layout = 0
+        self.push2_pad_page = 0
 
         # Auto-apply hardware theme
         theme.apply_theme_for_device(short_name)
@@ -2872,6 +3129,18 @@ class P6App:
                 pass
         try:
             self.master_clock.stop()
+        except Exception:
+            pass
+        # Persist Compa step grids (snapshot the live PiSequencer first
+        # so the currently-edited pattern doesn't lose its in-flight
+        # changes).
+        try:
+            dev_key = getattr(self.device_manager, "focus_key", "") or ""
+            midi = self._midi_connections.get(dev_key) if dev_key else None
+            if midi is not None:
+                self._save_step_grid(dev_key, int(midi.state.active_pattern))
+            from engine.compa_step_persistence import save as _save_grids
+            _save_grids(self._compa_step_grids, self._step_grids_path())
         except Exception:
             pass
         if self.push2_display:

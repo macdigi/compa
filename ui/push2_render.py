@@ -103,6 +103,9 @@ class Push2Renderer:
         # Last Undo LED color sent (lit when there's a pattern-mode
         # action available to undo).
         self._last_undo_led = -1
+        # Last Layout LED color sent (lit bright in control mode when
+        # the focused device exposes more than one pad layout).
+        self._last_layout_led = -1
         # Whether we've painted the "always-dim" named-button set yet.
         self._lit_static_buttons = False
 
@@ -265,6 +268,21 @@ class Push2Renderer:
             push2.set_button("undo", undo_color)
             self._last_undo_led = undo_color
 
+        # Layout LED — bright white in control mode when the focused
+        # device exposes more than one pad layout (cycled by tapping
+        # the button). Dim everywhere else so the legend is still
+        # visible in a dark room.
+        layout_color = 3
+        if mode_for_oct == "control":
+            try:
+                if int(self.app._push2_control_layout_count()) > 1:
+                    layout_color = 122
+            except Exception:
+                pass
+        if self._last_layout_led != layout_color:
+            push2.set_button("layout", layout_color)
+            self._last_layout_led = layout_color
+
         # D-pad LEDs (only sent when the desired color tuple changes,
         # to avoid spamming the bus with 80+ MIDI messages/sec).
         if mode_for_oct == "keys":
@@ -388,7 +406,9 @@ class Push2Renderer:
                              grid_hash, cstep, playing, pad_off,
                              act_bank, bank_off, bank_total)
 
-        frame_key = (mode, dev_key, pad_page, keys_state, pattern_state)
+        layout = getattr(self.app, "push2_control_layout", 0)
+        frame_key = (mode, dev_key, pad_page, layout,
+                     keys_state, pattern_state)
         if frame_key != self._last_pad_frame_key:
             self._repaint_pad_frame(push2, mode, dev_key, pad_page,
                                     keys_state, pattern_state)
@@ -473,8 +493,19 @@ class Push2Renderer:
         if mode == "looper":
             push2.light_looper_layout()
             return
+        # Control mode — dispatch on (device, layout). Layout 0 is the
+        # default per-device variant, layout 1 is the quadrant variant.
+        layout = getattr(self.app, "push2_control_layout", 0)
         if dev_key == "SP-404MKII":
-            push2.light_bank_frame_for_page(pad_page, num_banks=10)
+            if layout == 1:
+                push2.light_quad_bank_layout(pad_page, num_banks=10)
+            else:
+                push2.light_bank_frame_for_page(pad_page, num_banks=10)
+        elif dev_key == "P-6":
+            if layout == 1:
+                push2.light_p6_quad_layout(pad_page, num_banks=8)
+            else:
+                push2.light_p6_row_layout(num_banks=8)
         else:
             push2.light_bank_frame()
 
@@ -659,35 +690,23 @@ class Push2Renderer:
             surf.blit(ksurf, (14, y))
             return
 
+        # Control-mode status line — collapse all signals onto a single
+        # row so nothing falls behind the oscilloscope (which starts at
+        # y=50). One row at y=32 fits comfortably above the scope.
         try:
             page = self.app.push2_page
             page_count = self.app.push2_page_count()
         except Exception:
             page, page_count = 0, 1
-        if page_count > 1:
-            txt = f"CTRL {page + 1}/{page_count}"
-            psurf = self._font_tiny.render(txt, True, DIM)
-            surf.blit(psurf, (14, y))
-            y += psurf.get_height() + 1
-
         try:
             pad_page = self.app.push2_pad_page
             pad_pages = self.app.push2_pad_page_count()
         except Exception:
             pad_page, pad_pages = 0, 1
-        if pad_pages > 1:
-            first = pad_page * 4
-            try:
-                total = 10 if self.app.device_manager.focus_key == "SP-404MKII" else 4
-            except Exception:
-                total = 10
-            last = min(first + 3, total - 1)
-            letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
-            pbsurf = self._font_tiny.render(f"BANK {letters}", True, dev_color)
-            surf.blit(pbsurf, (14, y))
-            y += pbsurf.get_height() + 1
-
-        # Current pattern + launch page (Launch 1-8 + D-pad ←/→).
+        try:
+            dev_key_for_status = self.app.device_manager.focus_key
+        except Exception:
+            dev_key_for_status = None
         try:
             lp = int(self.app.push2_launch_page)
             lpc = int(self.app.push2_launch_page_count())
@@ -701,12 +720,25 @@ class Push2Renderer:
                 cur_pat = int(p6.state.active_pattern) + 1
         except Exception:
             cur_pat = 0
+        parts: list[str] = []
+        if page_count > 1:
+            parts.append(f"CTRL {page + 1}/{page_count}")
+        if pad_pages > 1:
+            first = pad_page * 4
+            if dev_key_for_status == "SP-404MKII":
+                total = 10
+            elif dev_key_for_status == "P-6":
+                total = 8
+            else:
+                total = 4
+            last = min(first + 3, total - 1)
+            letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
+            parts.append(f"BANK {letters}")
         if total_pats > 0:
-            first_pat = lp * 8 + 1
-            last_pat = min(first_pat + 7, lp * 8 + 8, total_pats)
-            page_segment = (f"  ·  1-8 ({lp + 1}/{lpc})"
-                            if lpc > 1 else "")
-            txt = f"PAT {cur_pat}/{total_pats}{page_segment}"
+            page_segment = f" ({lp + 1}/{lpc})" if lpc > 1 else ""
+            parts.append(f"PAT {cur_pat}/{total_pats}{page_segment}")
+        if parts:
+            txt = "  ·  ".join(parts)
             psurf = self._font_tiny.render(txt, True, dev_color)
             surf.blit(psurf, (14, y))
 
