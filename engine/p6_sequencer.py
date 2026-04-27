@@ -101,20 +101,27 @@ class PiSequencer:
         return PAD_NOTE_LO
 
     def configure_for_device(self, device_short_name: str):
-        """Set up row configs for a specific device."""
+        """Set up row configs for a specific device.
+
+        SP-404 MK2: 16 pad rows, one per SP pad. Notes follow Roland's
+        quirky 4×4 layout where pad 1 (top-left) = note 48 and pad 13
+        (bottom-left) = note 36. Mapped explicitly so step rows read
+        intuitively (row 0 = "PAD 1") regardless of the underlying
+        MIDI note. Sent on the active bus channel via current_bank
+        in the app dispatcher.
+
+        P-6: 6 pad rows."""
         if "SP-404" in device_short_name:
-            self.num_pads = 8
-            self.row_configs = [
-                RowConfig(ROW_PAD, "PAD 1"),
-                RowConfig(ROW_PAD, "PAD 2"),
-                RowConfig(ROW_PAD, "PAD 3"),
-                RowConfig(ROW_PAD, "PAD 4"),
-                RowConfig(ROW_CHROMATIC, "CHROM", color=(100, 150, 255)),
-                RowConfig(ROW_GHOST, "GHOST", color=(80, 80, 80)),
-                RowConfig(ROW_EXT_SRC, "EXT IN", note=NOTE_EXT_SOURCE,
-                          color=(255, 180, 50)),
-                RowConfig(ROW_PAD, "PAD 5"),
-            ]
+            self.num_pads = 16
+            self.row_configs = []
+            for i in range(16):
+                sp_row = i // 4         # 0 (top) .. 3 (bottom)
+                sp_col = i % 4
+                midi_row = 3 - sp_row   # SP MIDI: bottom row = 36-39
+                note = 36 + midi_row * 4 + sp_col
+                self.row_configs.append(
+                    RowConfig(ROW_PAD, f"PAD {i + 1}", note=note)
+                )
             # Ensure grid has enough rows
             while len(self.grid) < self.num_pads:
                 self.grid.append([StepData() for _ in range(MAX_STEPS)])

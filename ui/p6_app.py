@@ -2543,7 +2543,12 @@ class P6App:
     def _handle_p6_transport(self, action: str):
         """Process P-6 transport event in the main thread (auto-record + chain sync)."""
         if action in ("start", "continue"):
-            if self.auto_record and not self.recorder.is_recording:
+            # In Push 2 pattern mode the Record button is the explicit
+            # way to arm a take, so suppress auto-record entirely there
+            # — Play is just play. Outside pattern mode the existing
+            # auto-record-on-transport behaviour is preserved.
+            if (self.auto_record and not self.recorder.is_recording
+                    and self.push2_mode != "pattern"):
                 if not self.recorder._monitoring:
                     self.recorder.start_monitoring()
                 meta = {}
@@ -2551,12 +2556,7 @@ class P6App:
                     meta["bpm_at_record"] = self.p6.state.bpm
                     meta["pattern_at_record"] = self.p6.state.active_pattern
                 self.recorder.start_recording(metadata=meta)
-                # Don't auto-jump to the record screen when the user
-                # is performing on the Push 2 — they want to keep
-                # eyeing the sequence overview while recording. The
-                # recorder runs in the background; HUD shows status.
-                if self.push2_mode != "pattern":
-                    self.switch_screen("record")
+                self.switch_screen("record")
                 print("Auto-record started", flush=True)
             # Chain sync: start chain on P-6 transport
             chain_player = self.screens["pattern"].chain_player
