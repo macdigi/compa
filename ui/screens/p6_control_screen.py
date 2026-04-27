@@ -528,6 +528,37 @@ class P6ControlScreen:
         # ── Knobs (highlight the last-changed one) ───────────────────
         highlight_active = (now - self._last_cc_time < self._highlight_duration)
 
+        # SP-404 bus tabs — relabel Ctrl 1-6 knobs each frame to match
+        # the active effect's parameter names (e.g. for DJFX Looper:
+        # Ctrl 1 → "Length", Ctrl 2 → "Speed", Ctrl 3 → "Loop SW").
+        # Falls through to the static "Bx Ctrl N" name for effects
+        # without a parameter table entry.
+        if tab_key in ("bus1_fx", "bus2_fx", "bus3_fx",
+                        "bus4_fx", "input_fx"):
+            try:
+                from engine.sp404_effect_params import ctrl_label
+                fx_idx = 0
+                for k, c in self._knobs.get(tab_key, []):
+                    if c == 83:
+                        fx_idx = int(k.value)
+                        break
+                fx_name = fx_name_for_tab(tab_key, fx_idx) or ""
+                _CTRL_CC_TO_IDX = {16: 0, 17: 1, 18: 2,
+                                    80: 3, 81: 4, 82: 5}
+                for k, c in self._knobs.get(tab_key, []):
+                    if c not in _CTRL_CC_TO_IDX:
+                        continue
+                    idx = _CTRL_CC_TO_IDX[c]
+                    label = ctrl_label(fx_name, idx)
+                    # Only override if we actually got a name back
+                    # (ctrl_label returns "Ctrl N" when unknown so we
+                    # always take its result — keeps labels consistent
+                    # with the Push 2's encoder row).
+                    if label:
+                        k.label = label
+            except Exception:
+                pass
+
         for knob, cc in self._knobs.get(tab_key, []):
             if cc in _TOGGLE_CCS:
                 # Draw as toggle button instead of knob

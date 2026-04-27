@@ -1081,12 +1081,13 @@ class Push2Renderer:
         return out
 
     def _sp404_encoder_slots(self) -> list[dict]:
-        """SP-404 encoder row: Ctrl 1-6 of the currently active bus,
-        a placeholder for encoder 7, and the active effect on
-        encoder 8. Active bus is tracked on the Twister object
-        (shared source of truth with the touchscreen FX knobs)."""
+        """SP-404 encoder row: Ctrl 1-6 of the active bus (labeled with
+        the active effect's parameter names — Length / Speed / Loop SW
+        for DJFX Looper, Depth / Rate / Filter / Pitch / Resonance for
+        Downer, etc. — falls back to generic "Ctrl N" if the loaded
+        effect isn't in the parameter table). Slot 7 is reserved.
+        Slot 8 shows the active effect name + CC#83 index."""
         ctrl_ccs = [16, 17, 18, 80, 81, 82]
-        names = ["Ctrl 1", "Ctrl 2", "Ctrl 3", "Ctrl 4", "Ctrl 5", "Ctrl 6"]
         try:
             bus = int(self.app.twister.active_bus)
         except Exception:
@@ -1095,21 +1096,31 @@ class Push2Renderer:
             live = self.app.live_cc.get(bus, {}) or {}
         except Exception:
             live = {}
-        out = []
-        for i, cc in enumerate(ctrl_ccs):
-            out.append({"name": names[i], "value": live.get(cc)})
-        # Encoder 7 — reserved.
-        out.append({"name": "—", "value": None})
-        # Encoder 8 — active effect name. Value is the CC#83 index so
-        # the encoder cell still draws a fill bar that scrubs as the
-        # user spins through the effect list.
+
+        # Resolve the active effect on this bus so we can label the
+        # Ctrl knobs with its actual parameter names.
         try:
             from engine.sp404_effects import fx_name_for_tab
+            from engine.sp404_effect_params import ctrl_label
             tab = self.app._sp404_active_bus_tab()
             fx_idx = int(live.get(83, 0))
             fx_name = fx_name_for_tab(tab, fx_idx) or "—"
         except Exception:
             fx_name = "—"
             fx_idx = 0
+            ctrl_label = lambda *_: ""    # noqa — unused on failure
+
+        out = []
+        for i, cc in enumerate(ctrl_ccs):
+            try:
+                name = ctrl_label(fx_name, i)
+            except Exception:
+                name = f"Ctrl {i + 1}"
+            if not name:
+                name = f"Ctrl {i + 1}"
+            out.append({"name": name, "value": live.get(cc)})
+        # Encoder 7 — reserved.
+        out.append({"name": "—", "value": None})
+        # Encoder 8 — active effect name with CC#83 index as value.
         out.append({"name": f"FX: {fx_name}", "value": fx_idx})
         return out
