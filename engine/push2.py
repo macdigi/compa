@@ -838,25 +838,33 @@ class Push2:
             pad_offset: int = 0,
             num_pads_visible: int = 8) -> None:
         """Pure step-sequencer pad layout — all 8 rows × 8 cols dedicated
-        to step cells. Bank selector + pattern launchers live on the
-        Push 2 top/bot select button rows (above/below the display)
-        instead of stealing pad rows.
+        to VIEW step cells. Bank selector + pattern launchers live on
+        the Push 2 top/bot select button rows.
+
+        step_offset and the col are in VIEW step space (one visible
+        cell = view_step_factor internal cells). The sequencer
+        light-up reads view_step_active so a single tap of a coarsened
+        cell shows active if any underlying internal cell is on —
+        sub-step data is preserved across zoom-out/in cycles.
 
         Pad mapping (top-down):
           row 7 = pad (pad_offset + 0)
           row 6 = pad (pad_offset + 1)
           ...
-          row 0 = pad (pad_offset + 7)
-
-        For devices with fewer pads than visible rows (P-6 = 6), rows
-        beyond `num_pads_visible` are blanked. For devices with more
-        pads than 8 (SP-404 = 16), `pad_offset` shifts the visible
-        window — 2 pages of 8."""
-        current = (seq.current_step
-                   if seq is not None and getattr(seq, "playing", False)
-                   else -1)
+          row 0 = pad (pad_offset + 7)"""
+        playing = (seq is not None
+                    and getattr(seq, "playing", False))
+        try:
+            view_current = (seq.view_current_step()
+                             if playing else -1)
+        except Exception:
+            view_current = -1
         num_pads = getattr(seq, "num_pads", 0) if seq is not None else 0
-        num_steps = getattr(seq, "num_steps", 0) if seq is not None else 0
+        try:
+            view_n_steps = (seq.view_num_steps
+                             if seq is not None else 0)
+        except Exception:
+            view_n_steps = 0
         for idx in range(64):
             row = idx // 8
             col = idx % 8
@@ -868,14 +876,14 @@ class Push2:
                 continue
             pad = pad_offset + local_idx
             step = step_offset + col
-            if seq is None or pad >= num_pads or step >= num_steps:
+            if seq is None or pad >= num_pads or step >= view_n_steps:
                 self.set_pad_color(idx, COLOR_OFF)
                 continue
             try:
-                is_on = bool(seq.grid[pad][step].active)
+                is_on = seq.view_step_active(pad, step)
             except Exception:
                 is_on = False
-            is_current = step == current
+            is_current = step == view_current
             row_color = self.PATTERN_ROW_COLORS[
                 pad % len(self.PATTERN_ROW_COLORS)]
             if is_on and is_current:

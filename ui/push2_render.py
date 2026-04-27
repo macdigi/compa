@@ -1025,6 +1025,14 @@ class Push2Renderer:
             playing = bool(getattr(seq, "playing", False))
         except Exception:
             current_step, playing = -1, False
+        # View-zoom factor — visible step covers this many internal
+        # cells. Outlining the active 8-step pad window has to
+        # account for the wider underlying range.
+        try:
+            view_factor = max(1, int(
+                getattr(seq, "_view_step_factor", 1)))
+        except Exception:
+            view_factor = 1
 
         # Show all rows up to a sane cap. The whole pattern fits in
         # one row of height/num_pads tall cells; the visible-pad
@@ -1036,9 +1044,11 @@ class Push2Renderer:
         cell_w = max(4, w // num_steps)
         grid_w = cell_w * num_steps
 
-        # Active 8-step window bounds (in cell space).
-        active_step_lo = step_offset
-        active_step_hi = min(num_steps, step_offset + 8)
+        # Active visible-step window bounds, expanded into internal
+        # cell space so the outline scales with the view zoom factor.
+        active_step_lo = step_offset * view_factor
+        active_step_hi = min(num_steps,
+                              (step_offset + 8) * view_factor)
         # Active 8-pad window bounds (in row space).
         active_pad_lo = pad_offset
         active_pad_hi = min(num_pads, pad_offset + 8)
@@ -1104,9 +1114,13 @@ class Push2Renderer:
             bank_letter = chr(ord("A") + active_bank)
         except Exception:
             bank_letter = "?"
-        # Step page index (8 steps per page).
+        # Step page index (8 visible steps per page).
+        try:
+            view_n = int(seq.view_num_steps)
+        except Exception:
+            view_n = num_steps
         step_page = (step_offset // 8) + 1
-        step_pages = max(1, (num_steps + 7) // 8)
+        step_pages = max(1, (view_n + 7) // 8)
         # Current step-resolution note value (1/4, 1/8, 1/16, 1/32).
         try:
             note_val = seq.step_note_value()

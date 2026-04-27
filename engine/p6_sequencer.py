@@ -88,6 +88,21 @@ class PiSequencer:
         # tick.
         self.ticks_per_step = 24
 
+        # View step factor — how many internal cells each visible
+        # editable step represents. 1 = view at full grid resolution
+        # (every internal cell is one visible cell). 2 = each visible
+        # step covers 2 internal cells, 4 = 4 cells, etc. Zoom_out
+        # increases this; zoom_in either decreases it (toward 1) or,
+        # at 1, subdivides the underlying grid for true resolution
+        # increase.
+        #
+        # Critical: this is a VIEW property, not a grid transform.
+        # Zooming out then back in must NEVER lose sub-step data —
+        # the cells stay where they were, the visible step count
+        # just changes. Playback always uses ticks_per_step, which
+        # is the internal step duration regardless of view zoom.
+        self._view_step_factor: int = 1
+
         # Swing — proportion of one step that every odd-indexed step
         # is delayed by. 0 = no swing, 50 = max (odd step lands
         # halfway between two beats, classic shuffle). Applied in
@@ -175,15 +190,19 @@ class PiSequencer:
     # ── Resolution / duplication ────────────────────────────────────
 
     def zoom_in(self) -> bool:
-        """Halve `ticks_per_step` and double `num_steps` so each
-        existing step becomes two cells with the same total pattern
-        duration. The first cell of each pair holds the original
-        step's content; the second is empty (ready for sub-step
-        notes — e.g. 1/32-note hi-hat rolls).
+        """Show finer cells. If currently zoomed out (view factor > 1)
+        just halve the view factor — the underlying grid was already
+        at finer resolution and that data comes back into view. If at
+        view factor 1, actually subdivide the internal grid: halve
+        ticks_per_step, double num_steps, stretch each cell to two
+        cells with the first holding the original content (ready for
+        sub-step notes — e.g. 1/32-note hi-hat rolls).
 
         Returns True on success, False if already at the minimum
-        resolution (1/32 notes = 3 ticks per step) or expanding would
-        exceed MAX_STEPS."""
+        resolution and view factor 1."""
+        if self._view_step_factor > 1:
+            self._view_step_factor //= 2
+            return True
         if self.ticks_per_step <= 3:
             return False
         if self.num_steps * 2 > MAX_STEPS:
@@ -206,36 +225,18 @@ class PiSequencer:
         return True
 
     def zoom_out(self) -> bool:
-        """Double `ticks_per_step` and halve `num_steps`. Each pair of
-        cells collapses to one whose state is the OR of the two
-        (preserving any active step in either half, dropping precise
-        sub-step timing). Returns False if already at the maximum
-        coarseness (192 ticks per step = half-bar steps) or if
-        num_steps is already at the minimum (1)."""
-        if self.num_steps < 2:
+        """Show coarser cells. NON-DESTRUCTIVE — just doubles the
+        view-step factor so each visible cell now covers two
+        internal cells. Sub-step data is preserved; zooming back in
+        with Convert restores the detailed view exactly as it was
+        before. Returns False if already so far zoomed out that one
+        view step would cover the whole pattern."""
+        new_factor = self._view_step_factor * 2
+        if new_factor > self.num_steps:
             return False
-        if self.ticks_per_step >= 192:
+        if new_factor > 64:
             return False
-        new_steps = self.num_steps // 2
-        new_tps = self.ticks_per_step * 2
-        for pad in range(self.num_pads):
-            row = self.grid[pad]
-            for s in range(new_steps):
-                a, b = row[s * 2], row[s * 2 + 1]
-                merged_active = a.active or b.active
-                # Pick velocity from whichever half had a hit (prefer
-                # the on-beat one if both fired).
-                vel = a.velocity if a.active else b.velocity
-                prob = a.probability if a.active else b.probability
-                row[s] = StepData(active=merged_active,
-                                   velocity=vel,
-                                   probability=prob)
-            for s in range(new_steps, MAX_STEPS):
-                row[s] = StepData()
-        self.num_steps = new_steps
-        self.ticks_per_step = new_tps
-        if self.current_step >= new_steps:
-            self.current_step = 0
+        self._view_step_factor = new_factor
         return True
 
     def duplicate_pattern(self) -> bool:
@@ -258,14 +259,82 @@ class PiSequencer:
         return True
 
     def step_note_value(self) -> str:
-        """Human-readable note value for one step at the current
-        resolution. 24 ticks = 1/4 (quarter), 12 = 1/8, 6 = 1/16,
-        3 = 1/32, 48 = 1/2, 96 = 1/1. Returns "?" for unusual values
-        (e.g. mid-zoom transient states)."""
+        """Human-readable note value for one VISIBLE step at the
+        current view zoom. Combines the internal ticks_per_step with
+        the view step factor so the user always sees the resolution
+        they're currently editing at."""
+        tps = self.ticks_per_step * max(1, self._view_step_factor)
         return {
             96: "1/1",  48: "1/2",  24: "1/4",  12: "1/8",
              6: "1/16",  3: "1/32", 192: "2/1",
-        }.get(self.ticks_per_step, "?")
+        }.get(tps, "?")
+
+    # ── View-zoom helpers (cells visible to the user) ───────────────
+
+    @property
+    def view_num_steps(self) -> int:
+        """Visible step count at the current zoom. = num_steps when
+        not zoomed out."""
+        return max(1, self.num_steps // max(1, self._view_step_factor))
+
+    def view_step_range(self, view_step: int) -> tuple[int, int]:
+        """Internal-cell index range [start, end) covered by the
+        given visible step at the current view zoom."""
+        f = max(1, self._view_step_factor)
+        start = view_step * f
+        end = min(self.num_steps, start + f)
+        return (start, end)
+
+    def view_step_active(self, pad: int, view_step: int) -> bool:
+        """True if any internal cell within the visible step is
+        active. Used by the renderer to light visible cells."""
+        if not (0 <= pad < self.num_pads):
+            return False
+        start, end = self.view_step_range(view_step)
+        if start >= end:
+            return False
+        row = self.grid[pad]
+        for s in range(start, end):
+            if row[s].active:
+                return True
+        return False
+
+    def view_step_velocity(self, pad: int, view_step: int) -> int:
+        """Velocity of the first active internal cell within the
+        visible step, or 100 if none are active."""
+        if not (0 <= pad < self.num_pads):
+            return 100
+        start, end = self.view_step_range(view_step)
+        row = self.grid[pad]
+        for s in range(start, end):
+            if row[s].active:
+                return row[s].velocity
+        return 100
+
+    def toggle_view_step(self, pad: int, view_step: int) -> bool:
+        """Toggle the visible step. If any internal cell within the
+        view-step range is active, deactivates ALL of them (so a
+        single tap clears whatever's there). Otherwise activates the
+        first internal cell. Returns the new active state of the
+        visible step."""
+        if not (0 <= pad < self.num_pads):
+            return False
+        start, end = self.view_step_range(view_step)
+        if start >= end:
+            return False
+        row = self.grid[pad]
+        any_active = any(row[s].active for s in range(start, end))
+        if any_active:
+            for s in range(start, end):
+                row[s].active = False
+            return False
+        row[start].active = True
+        return True
+
+    def view_current_step(self) -> int:
+        """Visible step containing the playhead. Used by the
+        renderer to highlight the playhead column."""
+        return self.current_step // max(1, self._view_step_factor)
 
     # ── Nudge / rotation ────────────────────────────────────────────
 

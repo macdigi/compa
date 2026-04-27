@@ -1647,19 +1647,26 @@ class P6App:
         col = idx % 8
 
         # Top row of the grid (row 7) maps to first visible pad
-        # (pad_offset + 0); row 0 maps to pad_offset + 7.
+        # (pad_offset + 0); row 0 maps to pad_offset + 7. step_offset
+        # and col are in VIEW step space — toggle_view_step handles
+        # mapping to the underlying cells (clears any active cell in
+        # the visible range, or activates the leftmost otherwise).
         local_pad = 7 - row
         pad = self.push2_pattern_pad_offset + local_pad
-        step = self.push2_pattern_step_offset + col
+        view_step = self.push2_pattern_step_offset + col
         seq = self._push2_pattern_sequencer()
         if seq is None:
             return
         if pad >= getattr(seq, "num_pads", 0):
             return
-        if step >= getattr(seq, "num_steps", 0):
+        try:
+            view_n = int(seq.view_num_steps)
+        except Exception:
+            view_n = int(getattr(seq, "num_steps", 0))
+        if view_step >= view_n:
             return
         try:
-            seq.toggle_step(pad, step)
+            seq.toggle_view_step(pad, view_step)
         except Exception:
             pass
 
@@ -2136,8 +2143,14 @@ class P6App:
             if self.push2_mode == "pattern":
                 seq = self._push2_pattern_sequencer()
                 if seq is not None:
-                    num_steps = int(getattr(seq, "num_steps", 16))
-                    pages = max(1, (num_steps + 7) // 8)
+                    # step_offset is in VIEW step space — page count
+                    # follows view_num_steps so paging stays sane
+                    # across zoom levels.
+                    try:
+                        view_n = int(seq.view_num_steps)
+                    except Exception:
+                        view_n = int(getattr(seq, "num_steps", 16))
+                    pages = max(1, (view_n + 7) // 8)
                     cur_page = self.push2_pattern_step_offset // 8
                     delta = +1 if name == "page_right" else -1
                     new_page = (cur_page + delta) % pages
