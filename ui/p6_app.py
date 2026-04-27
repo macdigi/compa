@@ -2120,14 +2120,12 @@ class P6App:
                 self.push2_keys_base_note = min(
                     115, self.push2_keys_base_note + 12)
             elif self.push2_mode == "pattern":
-                # Step grid is now 8 rows tall, so the pad window shifts
-                # in 8-row strides (was 6 with the old combined layout).
-                seq = self._push2_pattern_sequencer()
-                num_pads = int(getattr(seq, "num_pads", 8)) if seq else 8
-                max_off = max(0, num_pads - 8)
-                self.push2_pattern_pad_offset = min(
-                    max_off,
-                    self.push2_pattern_pad_offset + 8,
+                # Octave Up scrolls the visible window UP to lower-
+                # numbered pads (Pad 1 etc.) — the SP-404's pads 1-4
+                # sit on the TOP physical row of the device, so "up"
+                # = "see the top of the SP". Decreases pad_offset.
+                self.push2_pattern_pad_offset = max(
+                    0, self.push2_pattern_pad_offset - 8,
                 )
             else:
                 self._push2_cycle_pad_page(+1)
@@ -2136,8 +2134,15 @@ class P6App:
                 self.push2_keys_base_note = max(
                     0, self.push2_keys_base_note - 12)
             elif self.push2_mode == "pattern":
-                self.push2_pattern_pad_offset = max(
-                    0, self.push2_pattern_pad_offset - 8,
+                # Octave Down scrolls DOWN to higher-numbered pads
+                # (9-16) — those sit on the BOTTOM physical rows of
+                # the SP. Increases pad_offset.
+                seq = self._push2_pattern_sequencer()
+                num_pads = int(getattr(seq, "num_pads", 8)) if seq else 8
+                max_off = max(0, num_pads - 8)
+                self.push2_pattern_pad_offset = min(
+                    max_off,
+                    self.push2_pattern_pad_offset + 8,
                 )
             else:
                 self._push2_cycle_pad_page(-1)
