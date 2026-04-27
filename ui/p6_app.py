@@ -2198,9 +2198,11 @@ class P6App:
         elif name == "device":
             self._push2_jump_to_tab("control")
         elif name.startswith("bot_select_") and self.push2_mode == "control":
-            # Bottom-row select buttons map to the SP-404 bus selector
-            # (B1, B2, B3, B4, IN) in SP control mode. Buttons 6-8 are
-            # reserved for future per-device features (kit, scene, etc.).
+            # Bottom-row select buttons in SP control mode:
+            #   1-5: bus selector (B1, B2, B3, B4, IN) — same colors
+            #        as the touchscreen bus pills
+            #   8:   toggle FX on/off (CC#19) on the active bus
+            #   6-7: reserved
             dev_key = getattr(self.device_manager, "focus_key", None)
             if dev_key == "SP-404MKII":
                 try:
@@ -2209,6 +2211,8 @@ class P6App:
                     return
                 if 0 <= idx <= 4 and getattr(self, "twister", None) is not None:
                     self.twister.active_bus = idx
+                elif idx == 7:
+                    self._sp404_toggle_fx_onoff()
         elif name == "nav_up":
             if self.push2_mode == "keys":
                 from engine.push2 import SCALES
@@ -2300,18 +2304,96 @@ class P6App:
 
     # SP-404 MK2 FX control CCs (Ctrl 1-6).
     _SP404_CTRL_CCS = [16, 17, 18, 80, 81, 82]
+    # SP-404 MK2 effect-select CC (per bus channel) and on/off CC.
+    _SP404_FX_SELECT_CC = 83
+    _SP404_FX_ONOFF_CC = 19
+
+    def _sp404_active_bus_tab(self) -> str:
+        """Map the Twister-tracked active bus index (0..4) to the
+        sp404_effects.py tab key used to look up the right effect
+        list. 0,1 = bus1/2 (BUS12_FX); 2,3 = bus3/4 (BUS34_FX);
+        4 = INPUT (INPUT_FX)."""
+        try:
+            bus = int(self.twister.active_bus)
+        except Exception:
+            bus = 0
+        if bus == 4:
+            return "input_fx"
+        if bus >= 2:
+            return f"bus{bus + 1}_fx"
+        return f"bus{bus + 1}_fx"
+
+    def _sp404_cycle_fx(self, delta: int) -> None:
+        """Cycle the active SP-404 effect on the focused bus by `delta`
+        (+1 = next, -1 = prev). Sends CC#83 to the bus channel and
+        wraps within the bus's effect list. Mirrors the touchscreen
+        FX selector behaviour."""
+        from engine.sp404_effects import fx_count_for_tab
+        midi = self._midi_connections.get("SP-404MKII")
+        if midi is None:
+            return
+        try:
+            bus = int(self.twister.active_bus)
+        except Exception:
+            bus = 0
+        tab = self._sp404_active_bus_tab()
+        count = fx_count_for_tab(tab)
+        if count <= 0:
+            return
+        current = int(self.live_cc.get(bus, {}).get(
+            self._SP404_FX_SELECT_CC, 0))
+        new_val = (current + delta) % count
+        if new_val == current:
+            return
+        try:
+            midi.send_cc(self._SP404_FX_SELECT_CC, new_val, channel=bus)
+            self.live_cc.setdefault(bus, {})[self._SP404_FX_SELECT_CC] = new_val
+        except Exception:
+            pass
+
+    def _sp404_toggle_fx_onoff(self) -> None:
+        """Toggle the FX on/off state on the focused bus by flipping
+        CC#19 between 127 (on) and 0 (off). Matches the touchscreen
+        FX-toggle button."""
+        midi = self._midi_connections.get("SP-404MKII")
+        if midi is None:
+            return
+        try:
+            bus = int(self.twister.active_bus)
+        except Exception:
+            bus = 0
+        current = int(self.live_cc.get(bus, {}).get(
+            self._SP404_FX_ONOFF_CC, 0))
+        new_val = 0 if current >= 64 else 127
+        try:
+            midi.send_cc(self._SP404_FX_ONOFF_CC, new_val, channel=bus)
+            self.live_cc.setdefault(bus, {})[self._SP404_FX_ONOFF_CC] = new_val
+        except Exception:
+            pass
 
     def _on_push2_encoder(self, idx: int, delta: int):
         """Push 2 performance encoder turn.
 
         P-6: nudge the CC of the Twister slot at the current encoder
         page's offset (8 params per page, 4 pages).
-        SP-404 MK2: encoders 1-6 adjust Ctrl 1-6 of the currently
-        active bus — same scheme as the SP's FX knobs on the Compa
-        touchscreen. Encoders 7-8 no-op for now."""
+        SP-404 MK2:
+          - encoders 1-6 adjust Ctrl 1-6 of the active bus
+          - encoder 7 (idx 6) reserved (future use)
+          - encoder 8 (idx 7) cycles the active effect on the bus
+            (CC#83). Wraps within the bus's effect list."""
         dev_key = getattr(self.device_manager, "focus_key", None)
 
         if dev_key == "SP-404MKII":
+            if idx == 7:
+                # Encoder 8: cycle effect select on the active bus.
+                # Treat any positive delta as +1 step, any negative
+                # as -1 step so a full sweep doesn't blast through 40
+                # effects in one motion.
+                step = 1 if delta > 0 else -1
+                self._sp404_cycle_fx(step)
+                return
+            if idx == 6:
+                return  # reserved
             if idx >= len(self._SP404_CTRL_CCS):
                 return
             cc = self._SP404_CTRL_CCS[idx]

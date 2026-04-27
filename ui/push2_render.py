@@ -351,7 +351,16 @@ class Push2Renderer:
             bus_palette = [127, 125, 126, 8, 9]
             for i in range(5):
                 bot_colors[i] = bus_palette[i] if i == active_bus else 1
-            # 6-8 stay -1 → mapped to 0 below
+            # Slot 8 (idx 7): FX on/off toggle. Bright green when the
+            # FX is on, dim white when off — mirrors the touchscreen
+            # FX-on toggle's color cue.
+            try:
+                fx_on = int(
+                    self.app.live_cc.get(active_bus, {}).get(19, 0)) >= 64
+            except Exception:
+                fx_on = False
+            bot_colors[7] = 126 if fx_on else 1
+            # Slots 6-7 stay -1 → mapped to 0 below.
         for i in range(8):
             color = bot_colors[i] if bot_colors[i] >= 0 else 0
             if self._last_botselect_leds[i] != color:
@@ -754,7 +763,19 @@ class Push2Renderer:
         except Exception:
             cur_pat = 0
         parts: list[str] = []
-        if page_count > 1:
+        # P-6 control mode — the 4 encoder pages map cleanly onto the
+        # device's tab structure on Compa. Label the page by its
+        # section so the user knows which knobs are visible at a
+        # glance.
+        p6_section = None
+        if dev_key_for_status == "P-6" and page_count > 1:
+            P6_SECTIONS = ["GRANULAR", "GRANULAR EXT",
+                           "FILTER + ENV", "MIXER + FX"]
+            if 0 <= page < len(P6_SECTIONS):
+                p6_section = P6_SECTIONS[page]
+        if p6_section is not None:
+            parts.append(f"{p6_section} ({page + 1}/{page_count})")
+        elif page_count > 1:
             parts.append(f"CTRL {page + 1}/{page_count}")
         if pad_pages > 1:
             first = pad_page * 4
@@ -767,6 +788,21 @@ class Push2Renderer:
             last = min(first + 3, total - 1)
             letters = f"{chr(ord('A') + first)}-{chr(ord('A') + last)}"
             parts.append(f"BANK {letters}")
+        # SP-404 active effect + on/off — sit between BANK and PAT so
+        # the user can read the FX state while looking at the bank
+        # letter and pattern info.
+        if dev_key_for_status == "SP-404MKII":
+            try:
+                from engine.sp404_effects import fx_name_for_tab
+                bus = int(self.app.twister.active_bus)
+                tab = self.app._sp404_active_bus_tab()
+                fx_idx = int(self.app.live_cc.get(bus, {}).get(83, 0))
+                fx_name = fx_name_for_tab(tab, fx_idx) or "—"
+                fx_on = int(self.app.live_cc.get(bus, {}).get(19, 0)) >= 64
+                state = "ON" if fx_on else "OFF"
+                parts.append(f"FX {fx_name} · {state}")
+            except Exception:
+                pass
         if total_pats > 0:
             page_segment = f" ({lp + 1}/{lpc})" if lpc > 1 else ""
             parts.append(f"PAT {cur_pat}/{total_pats}{page_segment}")
@@ -1045,9 +1081,9 @@ class Push2Renderer:
 
     def _sp404_encoder_slots(self) -> list[dict]:
         """SP-404 encoder row: Ctrl 1-6 of the currently active bus,
-        plus two placeholder slots. Active bus is tracked on the
-        Twister object (shared source of truth with the touchscreen
-        FX knobs)."""
+        a placeholder for encoder 7, and the active effect on
+        encoder 8. Active bus is tracked on the Twister object
+        (shared source of truth with the touchscreen FX knobs)."""
         ctrl_ccs = [16, 17, 18, 80, 81, 82]
         names = ["Ctrl 1", "Ctrl 2", "Ctrl 3", "Ctrl 4", "Ctrl 5", "Ctrl 6"]
         try:
@@ -1061,6 +1097,18 @@ class Push2Renderer:
         out = []
         for i, cc in enumerate(ctrl_ccs):
             out.append({"name": names[i], "value": live.get(cc)})
-        while len(out) < 8:
-            out.append({"name": "—", "value": None})
+        # Encoder 7 — reserved.
+        out.append({"name": "—", "value": None})
+        # Encoder 8 — active effect name. Value is the CC#83 index so
+        # the encoder cell still draws a fill bar that scrubs as the
+        # user spins through the effect list.
+        try:
+            from engine.sp404_effects import fx_name_for_tab
+            tab = self.app._sp404_active_bus_tab()
+            fx_idx = int(live.get(83, 0))
+            fx_name = fx_name_for_tab(tab, fx_idx) or "—"
+        except Exception:
+            fx_name = "—"
+            fx_idx = 0
+        out.append({"name": f"FX: {fx_name}", "value": fx_idx})
         return out
