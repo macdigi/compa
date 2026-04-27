@@ -944,7 +944,14 @@ class Push2Renderer:
                 vol = 100
             return ("VOL", f"{vol}", "Master  CC 7  Ch1")
         if name == "swing":
-            return ("SWING", "—", "swing engine not implemented yet")
+            try:
+                seq = self.app._push2_pattern_sequencer()
+                amt = int(getattr(seq, "swing_amount", 0)) if seq else 0
+            except Exception:
+                amt = 0
+            sub = ("straight" if amt == 0
+                    else f"odd steps shifted +{amt}% of step")
+            return ("SWING", f"{amt}%", sub)
         return None
 
     @staticmethod

@@ -416,23 +416,30 @@ class PiSequencer:
     def on_tick(self) -> None:
         """Called on every MIDI clock tick (24 per beat).
 
-        Swing: when the *next* step would be odd-indexed (1, 3, 5…),
-        delay the boundary by `swing_amount` percent of one step's
-        worth of ticks. Even steps fire on time. Result is the
-        classic shuffle feel — tighter at low values, dotted-eighth
-        at 50%."""
+        Swing: shifts odd-indexed steps later by a fraction of one
+        step's tick budget, and shifts the following even step
+        earlier by the same amount, so the total time over an
+        even→odd→even cycle is unchanged. The pattern plays at the
+        same tempo; only the odd-step placement moves.
+
+        At swing_amount = 50, odd step lands halfway between the two
+        even steps (classic triplet shuffle). 0 = straight, 50 = max."""
         if not self.playing:
             return
 
         self._tick_count += 1
 
-        # Per-tick budget: even steps use ticks_per_step as-is. Odd
-        # steps wait an extra (ticks_per_step * swing_amount / 100).
         budget = self.ticks_per_step
         next_step = (self.current_step + 1) % max(1, self.num_steps)
-        if next_step % 2 == 1 and self.swing_amount > 0:
-            budget += (self.ticks_per_step
-                        * max(0, min(50, self.swing_amount)) // 100)
+        swing = max(0, min(50, int(self.swing_amount)))
+        swing_delta = (self.ticks_per_step * swing) // 100
+        if swing_delta > 0:
+            if next_step % 2 == 1:
+                # Going TO an odd step: hold longer.
+                budget += swing_delta
+            else:
+                # Going TO an even step from an odd step: catch up.
+                budget = max(1, budget - swing_delta)
         if self._tick_count < budget:
             return
 
