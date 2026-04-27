@@ -831,6 +831,61 @@ class Push2:
     # Color per row in the pattern grid so each pad is visually distinct.
     PATTERN_ROW_COLORS = [127, 125, 126, 8, 9, 60, 73, 122]
 
+    def light_step_only_layout(
+            self, seq, step_offset: int = 0,
+            pad_offset: int = 0,
+            num_pads_visible: int = 8) -> None:
+        """Pure step-sequencer pad layout — all 8 rows × 8 cols dedicated
+        to step cells. Bank selector + pattern launchers live on the
+        Push 2 top/bot select button rows (above/below the display)
+        instead of stealing pad rows.
+
+        Pad mapping (top-down):
+          row 7 = pad (pad_offset + 0)
+          row 6 = pad (pad_offset + 1)
+          ...
+          row 0 = pad (pad_offset + 7)
+
+        For devices with fewer pads than visible rows (P-6 = 6), rows
+        beyond `num_pads_visible` are blanked. For devices with more
+        pads than 8 (SP-404 = 16), `pad_offset` shifts the visible
+        window — 2 pages of 8."""
+        current = (seq.current_step
+                   if seq is not None and getattr(seq, "playing", False)
+                   else -1)
+        num_pads = getattr(seq, "num_pads", 0) if seq is not None else 0
+        num_steps = getattr(seq, "num_steps", 0) if seq is not None else 0
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+            # Top row of grid → pad (pad_offset + 0). Row 7 of Push 2
+            # is the topmost row.
+            local_idx = 7 - row
+            if local_idx >= num_pads_visible:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            pad = pad_offset + local_idx
+            step = step_offset + col
+            if seq is None or pad >= num_pads or step >= num_steps:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            try:
+                is_on = bool(seq.grid[pad][step].active)
+            except Exception:
+                is_on = False
+            is_current = step == current
+            row_color = self.PATTERN_ROW_COLORS[
+                pad % len(self.PATTERN_ROW_COLORS)]
+            if is_on and is_current:
+                color = 122
+            elif is_on:
+                color = row_color
+            elif is_current:
+                color = 3
+            else:
+                color = COLOR_OFF
+            self.set_pad_color(idx, color)
+
     def light_pattern_layout(self, seq, step_offset: int = 0) -> None:
         """Paint Push 2 as a step-sequencer grid.
 

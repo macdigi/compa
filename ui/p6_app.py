@@ -1625,16 +1625,19 @@ class P6App:
         self._load_step_grid(cur_dev, cur_pat)
 
     def _on_push2_pattern_pad(self, idx: int, velocity: int):
-        """Combined Pattern-mode layout:
-          row 7 (very top, idx 56-63): bank selector (8 banks visible,
-            Shift+D-pad pages the window for SP'"'"'s I/J).
-          row 6 (idx 48-55): 8 pattern launchers; D-pad ←/→ pages
-            (8-pattern stride; P-6: 8 pages; SP: 2 pages).
-          rows 0-5 (bottom 48 pads): step sequencer for the currently
-            active pattern. Row 5 = top pad (offset+0), row 0 = bottom
-            pad (offset+5). Cols = 8 visible steps; Page-Left/Right
-            pages step columns and wraps at the ends. Octave Up/Down
-            scrolls the pad window.
+        """Pattern-mode pad layout: all 64 pads are step cells.
+
+          row 7 (top)    = pad (pad_offset + 0)
+          row 6          = pad (pad_offset + 1)
+          ...
+          row 0 (bottom) = pad (pad_offset + 7)
+          col N → step (step_offset + N)
+
+        Bank selector lives on the bottom select buttons (below the
+        Push 2 display); pattern launchers live on the top select
+        buttons (above the display). Page-Left/Right pages step
+        columns; Octave Up/Down pages the pad window for devices
+        with more than 8 pads (SP-404).
 
         Per-pattern step grids are snapshotted on launch so each
         pattern keeps its own step data."""
@@ -1643,26 +1646,10 @@ class P6App:
         row = idx // 8
         col = idx % 8
 
-        if row == 7:
-            # ── Bank selector (top row) ──────────────────────────
-            bank_idx = self.push2_pattern_bank_offset + col
-            if bank_idx >= self.push2_bank_count():
-                return
-            self._push2_set_bank(bank_idx)
-            return
-        if row == 6:
-            # ── Pattern launch (single row, 8 per page) ──────────
-            base = self.push2_pattern_launch_page * 8
-            pat_idx = base + col
-            if pat_idx >= self.push2_max_patterns():
-                return
-            self._push2_pattern_launch(pat_idx)
-            return
-
-        # ── Step sequencer (bottom 6 rows) ────────────────────────
-        # row 5 = top of seq area = first visible pad; offset shifts
-        # the window so pads beyond the first 6 are reachable.
-        pad = (5 - row) + self.push2_pattern_pad_offset
+        # Top row of the grid (row 7) maps to first visible pad
+        # (pad_offset + 0); row 0 maps to pad_offset + 7.
+        local_pad = 7 - row
+        pad = self.push2_pattern_pad_offset + local_pad
         step = self.push2_pattern_step_offset + col
         seq = self._push2_pattern_sequencer()
         if seq is None:
@@ -2067,11 +2054,15 @@ class P6App:
                 self.push2_keys_base_note = min(
                     115, self.push2_keys_base_note + 12)
             elif self.push2_mode == "pattern":
+                # Step grid is now 8 rows tall, so the pad window shifts
+                # in 8-row strides (was 6 with the old combined layout).
                 seq = self._push2_pattern_sequencer()
-                num_pads = int(getattr(seq, "num_pads", 6)) if seq else 6
-                max_off = max(0, num_pads - 6)
+                num_pads = int(getattr(seq, "num_pads", 8)) if seq else 8
+                max_off = max(0, num_pads - 8)
                 self.push2_pattern_pad_offset = min(
-                    max_off, self.push2_pattern_pad_offset + 1)
+                    max_off,
+                    self.push2_pattern_pad_offset + 8,
+                )
             else:
                 self._push2_cycle_pad_page(+1)
         elif name == "octave_down":
@@ -2080,7 +2071,8 @@ class P6App:
                     0, self.push2_keys_base_note - 12)
             elif self.push2_mode == "pattern":
                 self.push2_pattern_pad_offset = max(
-                    0, self.push2_pattern_pad_offset - 1)
+                    0, self.push2_pattern_pad_offset - 8,
+                )
             else:
                 self._push2_cycle_pad_page(-1)
         elif name == "note":
@@ -2197,6 +2189,17 @@ class P6App:
                 pass
         elif name == "device":
             self._push2_jump_to_tab("control")
+        elif name.startswith("bot_select_") and self.push2_mode == "pattern":
+            # Bottom-row select buttons in pattern mode = bank selector
+            # (was on the top pad row before — moved here to free the
+            # full 8×8 pad grid for step cells).
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1
+            except Exception:
+                return
+            bank_idx = self.push2_pattern_bank_offset + idx
+            if bank_idx < self.push2_bank_count():
+                self._push2_set_bank(bank_idx)
         elif name.startswith("bot_select_") and self.push2_mode == "control":
             # Bottom-row select buttons in SP control mode:
             #   1-5: bus selector (B1, B2, B3, B4, IN) — same colors
@@ -2243,8 +2246,22 @@ class P6App:
             else:
                 pages = self.push2_launch_page_count()
                 self.push2_launch_page = (self.push2_launch_page - 1) % pages
+        elif name.startswith("top_select_") and self.push2_mode == "pattern":
+            # Top-row select buttons in pattern mode = pattern launcher
+            # (was on row 6 of the pad grid — moved up here so the pads
+            # are pure step cells now). 8 patterns visible per page;
+            # Nav-Left/Right pages through the launcher window.
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1
+            except Exception:
+                return
+            base = self.push2_pattern_launch_page * 8
+            pat_idx = base + idx
+            if pat_idx < self.push2_max_patterns():
+                self._push2_pattern_launch(pat_idx)
         elif name.startswith("top_select_"):
-            # Top-row select buttons 1-N jump directly to page N-1.
+            # Top-row select buttons 1-N jump directly to encoder page
+            # N-1 in non-pattern modes.
             try:
                 idx = int(name.rsplit("_", 1)[1]) - 1
             except Exception:

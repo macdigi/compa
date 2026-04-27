@@ -232,18 +232,57 @@ class Push2Renderer:
             self._last_record_led = rec_color
 
         # Top select buttons = direct encoder-page jumps.
+        # Top-row select LEDs: pattern launchers in pattern mode,
+        # encoder-page jumps elsewhere.
         try:
-            current = self.app.push2_page
-            count = self.app.push2_page_count()
+            mode_top = self.app.push2_mode
         except Exception:
-            current, count = 0, 1
+            mode_top = "control"
+        top_colors = [0] * 8
+        if mode_top == "pattern":
+            try:
+                base = int(self.app.push2_pattern_launch_page) * 8
+                total_pats = int(self.app.push2_max_patterns())
+                # Active pattern within the current 8-window. p6.state
+                # tracks the device's currently-loaded pattern; we
+                # already use this in light_combined_pattern_layout.
+                cur_pat = 0
+                try:
+                    p6 = self.app.p6
+                    if p6 is not None:
+                        cur_pat = int(p6.state.active_pattern) + 1
+                except Exception:
+                    cur_pat = 0
+                # Pattern launchers tinted to match the focused device.
+                bright = (8 if (getattr(self.app.device_manager,
+                                          "focus_key", "") == "P-6")
+                          else 9)
+                dim = 15 if bright == 8 else 11
+                for i in range(8):
+                    pat = base + i + 1
+                    if pat > total_pats:
+                        top_colors[i] = 0
+                    elif pat == cur_pat:
+                        top_colors[i] = bright
+                    else:
+                        top_colors[i] = dim
+            except Exception:
+                pass
+        else:
+            try:
+                current = self.app.push2_page
+                count = self.app.push2_page_count()
+            except Exception:
+                current, count = 0, 1
+            for i in range(8):
+                if i >= count:
+                    top_colors[i] = 0
+                elif i == current:
+                    top_colors[i] = 122   # bright white — active page
+                else:
+                    top_colors[i] = 8     # dim amber — available page
         for i in range(8):
-            if i >= count:
-                color = 0
-            elif i == current:
-                color = 122   # bright white — active page
-            else:
-                color = 8     # dim amber — available page
+            color = top_colors[i]
             if self._last_topselect_leds[i] != color:
                 push2.set_button(f"top_select_{i + 1}", color)
                 self._last_topselect_leds[i] = color
@@ -334,15 +373,32 @@ class Push2Renderer:
             push2.set_button("nav_right", nav_target[3])
             self._last_nav_leds = nav_target
 
-        # Bottom-row select buttons: SP-404 bus selector in control mode.
-        # Active bus lit bright in its bus color; available buses dim;
-        # unmapped slots off.
+        # Bottom-row select buttons: SP-404 bus selector in control mode,
+        # bank selector in pattern mode, off otherwise.
         try:
             dev_key_for_bot = self.app.device_manager.focus_key
         except Exception:
             dev_key_for_bot = None
         bot_colors = [-1] * 8
-        if mode_for_oct == "control" and dev_key_for_bot == "SP-404MKII":
+        if mode_for_oct == "pattern":
+            try:
+                from engine.push2 import SP_BANK_COLORS
+                active_bank = int(self.app.push2_active_bank())
+                bank_offset = int(self.app.push2_pattern_bank_offset)
+                bank_total = int(self.app.push2_bank_count())
+                for i in range(8):
+                    slot = bank_offset + i
+                    if slot >= bank_total:
+                        bot_colors[i] = 0
+                    elif slot == active_bank:
+                        # Active bank: full color from the bank palette.
+                        cidx = slot if slot < len(SP_BANK_COLORS) else 0
+                        bot_colors[i] = SP_BANK_COLORS[cidx]
+                    else:
+                        bot_colors[i] = 1   # very dim white
+            except Exception:
+                pass
+        elif mode_for_oct == "control" and dev_key_for_bot == "SP-404MKII":
             try:
                 active_bus = int(self.app.twister.active_bus)
             except Exception:
@@ -498,35 +554,15 @@ class Push2Renderer:
                 )
             return
         if mode == "pattern":
-            cur_pat = pattern_state[0] if len(pattern_state) > 0 else 0
-            total = pattern_state[1] if len(pattern_state) > 1 else 64
-            ps_dev = pattern_state[2] if len(pattern_state) > 2 else dev_key
-            lp = pattern_state[3] if len(pattern_state) > 3 else 0
             offset = pattern_state[4] if len(pattern_state) > 4 else 0
             pad_off = pattern_state[8] if len(pattern_state) > 8 else 0
-            act_bank = pattern_state[9] if len(pattern_state) > 9 else 0
-            bank_off = pattern_state[10] if len(pattern_state) > 10 else 0
-            bank_tot = pattern_state[11] if len(pattern_state) > 11 else 8
             seq = getattr(self.app, "_push2_pattern_sequencer",
                           lambda: None)()
-            if ps_dev == "P-6":
-                bright, dim = 8, 15
-            elif ps_dev == "SP-404MKII":
-                bright, dim = 9, 11
-            else:
-                bright, dim = 122, 3
-            push2.light_combined_pattern_layout(
-                current_pattern=cur_pat,
-                total_patterns=total,
-                pattern_launch_page=lp,
+            push2.light_step_only_layout(
                 seq=seq,
                 step_offset=offset,
-                launch_bright=bright,
-                launch_dim=dim,
                 pad_offset=pad_off,
-                active_bank=act_bank,
-                bank_offset=bank_off,
-                bank_total=bank_tot,
+                num_pads_visible=8,
             )
             return
         if mode == "dj":
@@ -556,6 +592,20 @@ class Push2Renderer:
     def _render_frame(self, surf: pygame.Surface) -> None:
         surf.fill((0, 0, 0))
         dev_color = self._device_color()
+
+        # In pattern mode swap the body for a sequencer overview —
+        # tracks × all-steps grid with the active 8-step window
+        # focused. Header still draws at the top so device + BPM +
+        # status info stays consistent across modes.
+        try:
+            mode = self.app.push2_mode
+        except Exception:
+            mode = "control"
+        if mode == "pattern":
+            self._draw_header(surf, dev_color)
+            self._draw_pattern_overview(surf, dev_color,
+                                          top=50, height=110)
+            return
 
         self._draw_header(surf, dev_color)
         self._draw_scope(surf, dev_color, top=50, height=78)
@@ -867,6 +917,143 @@ class Push2Renderer:
         except Exception as e:
             log.warning("Compa logo PNG load failed: %s — using text fallback", e)
             return self._font_big.render("COMPA", True, COMPA_RED)
+
+    # ── Pattern-mode sequencer overview ───────────────────────────
+
+    def _draw_pattern_overview(self, surf, dev_color,
+                                top: int, height: int) -> None:
+        """Draw the full sequencer grid (tracks × all steps) on the
+        Push 2 display in pattern mode. The active 8-step page is
+        outlined in the device color; steps outside that window are
+        rendered dimmer so the user can see the whole pattern's shape
+        at a glance and know which slice the pads are editing.
+
+        Each track row corresponds to one pad (P-6 = 6 rows, SP = 16
+        rows — but we only show 8 at a time matching the visible pad
+        window via pad_offset, with the remaining hidden tracks
+        compressed into dim spacers). The playhead column gets a
+        bright vertical highlight while the sequencer is playing."""
+        pad_x = 14
+        x0 = pad_x
+        y0 = top + 4
+        w = SURF_W - pad_x * 2
+        h = height - 8
+
+        seq = None
+        try:
+            seq = self.app._push2_pattern_sequencer()
+        except Exception:
+            seq = None
+        if seq is None:
+            txt = self._font_small.render(
+                "no sequencer", True, (120, 120, 120))
+            surf.blit(txt, txt.get_rect(center=(SURF_W // 2,
+                                                  top + height // 2)))
+            return
+
+        num_pads = max(1, int(getattr(seq, "num_pads", 8)))
+        num_steps = max(1, int(getattr(seq, "num_steps", 16)))
+        try:
+            step_offset = int(self.app.push2_pattern_step_offset)
+        except Exception:
+            step_offset = 0
+        try:
+            pad_offset = int(self.app.push2_pattern_pad_offset)
+        except Exception:
+            pad_offset = 0
+        try:
+            current_step = int(getattr(seq, "current_step", -1))
+            playing = bool(getattr(seq, "playing", False))
+        except Exception:
+            current_step, playing = -1, False
+
+        # Show all rows up to a sane cap. The whole pattern fits in
+        # one row of height/num_pads tall cells; the visible-pad
+        # window (8 rows) is outlined to indicate which tracks the
+        # pads are currently editing.
+        rows_to_show = min(num_pads, 16)
+        cell_h = max(4, h // rows_to_show)
+        grid_h = cell_h * rows_to_show
+        cell_w = max(4, w // num_steps)
+        grid_w = cell_w * num_steps
+
+        # Active 8-step window bounds (in cell space).
+        active_step_lo = step_offset
+        active_step_hi = min(num_steps, step_offset + 8)
+        # Active 8-pad window bounds (in row space).
+        active_pad_lo = pad_offset
+        active_pad_hi = min(num_pads, pad_offset + 8)
+
+        for p in range(rows_to_show):
+            for s in range(num_steps):
+                cx = x0 + s * cell_w
+                cy = y0 + p * cell_h
+                in_active_step = active_step_lo <= s < active_step_hi
+                in_active_pad = active_pad_lo <= p < active_pad_hi
+                in_focus = in_active_step and in_active_pad
+
+                try:
+                    is_on = bool(seq.grid[p][s].active)
+                except Exception:
+                    is_on = False
+
+                if is_on:
+                    # Focused active step → device color. Out-of-focus
+                    # active steps → dimmer device color so the shape
+                    # of the pattern still reads.
+                    if in_focus:
+                        col = dev_color
+                    else:
+                        col = (dev_color[0] // 2,
+                               dev_color[1] // 2,
+                               dev_color[2] // 2)
+                else:
+                    # Empty cell. In-focus = dim grid line, out =
+                    # almost off so the focus window pops.
+                    if in_focus:
+                        col = (40, 40, 40)
+                    else:
+                        col = (20, 20, 20)
+                pygame.draw.rect(surf, col,
+                                 (cx + 1, cy + 1, cell_w - 2, cell_h - 2))
+
+        # Playhead column highlight (only while playing).
+        if playing and 0 <= current_step < num_steps:
+            ph_x = x0 + current_step * cell_w
+            pygame.draw.rect(surf, (240, 240, 240),
+                             (ph_x, y0, cell_w, grid_h), 1)
+
+        # Active-window outline.
+        ow_x = x0 + active_step_lo * cell_w
+        ow_y = y0 + active_pad_lo * cell_h
+        ow_w = (active_step_hi - active_step_lo) * cell_w
+        ow_h = (active_pad_hi - active_pad_lo) * cell_h
+        pygame.draw.rect(surf, dev_color, (ow_x, ow_y, ow_w, ow_h), 1)
+
+        # Pattern info status line at bottom-right.
+        try:
+            cur_pat = 0
+            p6 = self.app.p6
+            if p6 is not None:
+                cur_pat = int(p6.state.active_pattern) + 1
+            total_pats = int(self.app.push2_max_patterns())
+        except Exception:
+            cur_pat, total_pats = 0, 0
+        try:
+            from engine.push2 import SP_BANK_COLORS  # noqa
+            active_bank = int(self.app.push2_active_bank())
+            bank_letter = chr(ord("A") + active_bank)
+        except Exception:
+            bank_letter = "?"
+        # Step page index (8 steps per page).
+        step_page = (step_offset // 8) + 1
+        step_pages = max(1, (num_steps + 7) // 8)
+        info = (f"Bank {bank_letter}  ·  Pat {cur_pat}/{total_pats}  "
+                f"·  Step {step_page}/{step_pages}")
+        info_surf = self._font_tiny.render(info, True, dev_color)
+        surf.blit(info_surf,
+                   (SURF_W - info_surf.get_width() - 14,
+                    y0 + grid_h + 4))
 
     # ── Scope + meters ────────────────────────────────────────────
 
