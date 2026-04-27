@@ -682,10 +682,13 @@ class P6RadioScreen:
                     points.append((scope_rect.x + 4 + px, py))
 
             if len(points) > 1:
+                # Filled waveform via single polygon (was a per-pixel
+                # draw_line loop that tanked Pi CPU at 100+%).
                 dim = (dc[0] // 5, dc[1] // 5, dc[2] // 5)
-                for px_x, py in points:
-                    if py != center_y:
-                        pygame.draw.line(surface, dim, (px_x, center_y), (px_x, py))
+                poly = list(points)
+                poly.append((points[-1][0], center_y))
+                poly.append((points[0][0], center_y))
+                pygame.draw.polygon(surface, dim, poly)
                 pygame.draw.lines(surface, dc, False, points, 2)
         else:
             pygame.draw.line(surface, (35, 35, 48),

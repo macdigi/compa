@@ -690,11 +690,16 @@ class DeviceWorkspaceScreen:
                         points.append((scope_rect.x + 4 + px, py))
 
                 if len(points) > 1:
-                    # Filled waveform
+                    # Filled waveform — single polygon spanning the
+                    # wave shape and back along the centerline so the
+                    # fill renders in one pygame call instead of ~1000
+                    # per-pixel draw_line calls (the old loop burned
+                    # ~120% CPU on a Pi 3B at 60 fps).
                     dim = (dc[0] // 5, dc[1] // 5, dc[2] // 5)
-                    for px_x, py in points:
-                        if py != center_y:
-                            pygame.draw.line(surface, dim, (px_x, center_y), (px_x, py))
+                    poly = list(points)
+                    poly.append((points[-1][0], center_y))
+                    poly.append((points[0][0], center_y))
+                    pygame.draw.polygon(surface, dim, poly)
                     pygame.draw.lines(surface, dc, False, points, 2)
             else:
                 # Silent — dim center line

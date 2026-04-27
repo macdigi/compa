@@ -296,6 +296,18 @@ class Push2Renderer:
             mode_for_oct = "control"
         if mode_for_oct == "keys":
             octave_color = 22  # always usable in keys mode
+        elif mode_for_oct == "pattern":
+            # Pattern mode: octave Up/Down strides the visible pad
+            # window in 8-row jumps. Lit dim cyan when there's more
+            # than 8 pads (SP-404 = 16 pads → 2 pages); off otherwise
+            # (P-6 has 6 pads, all visible at once).
+            try:
+                seq = self.app._push2_pattern_sequencer()
+                num_pads = (int(getattr(seq, "num_pads", 0))
+                            if seq is not None else 0)
+            except Exception:
+                num_pads = 0
+            octave_color = 22 if num_pads > 8 else 0
         else:
             try:
                 pad_pages = self.app.push2_pad_page_count()
@@ -953,7 +965,11 @@ class Push2Renderer:
         x0 = pad_x
         y0 = top + 4
         w = SURF_W - pad_x * 2
-        h = height - 8
+        # Reserve a strip at the bottom for the status line + page
+        # indicator so neither gets clipped at the bottom of the
+        # 160px display.
+        status_h = 14
+        h = height - 8 - status_h
 
         seq = None
         try:
@@ -1069,12 +1085,22 @@ class Push2Renderer:
             note_val = seq.step_note_value()
         except Exception:
             note_val = "?"
+        # Pad-page indicator for devices with more than 8 pads (SP).
+        # P-6 has 6 pads so this is always 1/1 and we omit it.
+        pad_page_str = ""
+        if num_pads > 8:
+            pad_total_pages = (num_pads + 7) // 8
+            cur_pad_page = (pad_offset // 8) + 1
+            pad_page_str = f"  ·  Pads {cur_pad_page}/{pad_total_pages}"
         info = (f"Bank {bank_letter}  ·  Pat {cur_pat}/{total_pats}  "
-                f"·  Step {step_page}/{step_pages}  ·  {note_val}")
+                f"·  Step {step_page}/{step_pages}  ·  {note_val}"
+                f"{pad_page_str}")
         info_surf = self._font_tiny.render(info, True, dev_color)
+        # Place inside the reserved status strip so nothing clips off
+        # the bottom of the 160px display.
+        info_y = top + height - info_surf.get_height() - 2
         surf.blit(info_surf,
-                   (SURF_W - info_surf.get_width() - 14,
-                    y0 + grid_h + 4))
+                   (SURF_W - info_surf.get_width() - 14, info_y))
 
     # ── Scope + meters ────────────────────────────────────────────
 
@@ -1122,10 +1148,14 @@ class Push2Renderer:
                         points.append((scope_rect.x + 2 + px, py))
 
                 if len(points) > 1:
-                    dim = (dev_color[0] // 5, dev_color[1] // 5, dev_color[2] // 5)
-                    for px_x, py in points:
-                        if py != cy:
-                            pygame.draw.line(surf, dim, (px_x, cy), (px_x, py))
+                    # Single polygon for the fill — replaces ~900
+                    # per-pixel draw_line calls per frame at 20fps.
+                    dim = (dev_color[0] // 5, dev_color[1] // 5,
+                           dev_color[2] // 5)
+                    poly = list(points)
+                    poly.append((points[-1][0], cy))
+                    poly.append((points[0][0], cy))
+                    pygame.draw.polygon(surf, dim, poly)
                     pygame.draw.lines(surf, dev_color, False, points, 2)
 
             if recent.ndim > 1 and recent.shape[1] > 0:

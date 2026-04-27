@@ -2014,6 +2014,29 @@ class P6App:
                 return
             _dispatch_action("transport.play", value, self)
         elif name == "record":
+            # In pattern mode: toggle the Compa recorder directly
+            # (start_recording / stop_recording) so the Push 2 record
+            # button arms a take of the current performance. Outside
+            # pattern mode: legacy auto-record toggle action.
+            if self.push2_mode == "pattern":
+                rec = getattr(self, "recorder", None)
+                if rec is None:
+                    return
+                try:
+                    if rec.is_recording:
+                        rec.stop_recording()
+                    else:
+                        if not rec._monitoring:
+                            rec.start_monitoring()
+                        meta = {}
+                        if self.p6:
+                            meta["bpm_at_record"] = self.p6.state.bpm
+                            meta["pattern_at_record"] = (
+                                self.p6.state.active_pattern)
+                        rec.start_recording(metadata=meta)
+                except Exception:
+                    pass
+                return
             _dispatch_action("transport.record", value, self)
         elif name == "stop_clip":
             if self.push2_mode == "pattern":
@@ -2528,7 +2551,12 @@ class P6App:
                     meta["bpm_at_record"] = self.p6.state.bpm
                     meta["pattern_at_record"] = self.p6.state.active_pattern
                 self.recorder.start_recording(metadata=meta)
-                self.switch_screen("record")
+                # Don't auto-jump to the record screen when the user
+                # is performing on the Push 2 — they want to keep
+                # eyeing the sequence overview while recording. The
+                # recorder runs in the background; HUD shows status.
+                if self.push2_mode != "pattern":
+                    self.switch_screen("record")
                 print("Auto-record started", flush=True)
             # Chain sync: start chain on P-6 transport
             chain_player = self.screens["pattern"].chain_player
