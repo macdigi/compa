@@ -19,11 +19,65 @@ from engine.device_profiles import cc_map_to_legacy, build_cc_lookup
 from engine.sp404_effects import fx_name_for_tab, fx_count_for_tab
 from engine.midi_lfo import MidiLFO, ALL_SHAPES, SHAPE_SINE
 
-# Default tab config (P-6 fallback)
-_DEFAULT_TABS = ["granular", "filter", "envelope", "mixer", "fx"]
+# P-6 4-page tab structure — each page holds exactly 8 knobs in a
+# 4×2 grid so the labels read clean. Mirrors the Push 2 encoder page
+# layout so knob assignments stay in sync between the touchscreen and
+# the controller.
+_P6_4PAGE_CC_MAP = {
+    "granular": [
+        (23, "Grain Size",    0, 127, 64),
+        (21, "Grains",        0, 127, 0),
+        (19, "Head Pos",      0, 127, 0),
+        (20, "Head Speed",    0, 127, 64),
+        (15, "Grain Shape",   0, 127, 0),
+        (13, "Detune",        0, 127, 0),
+        (25, "Spread",        0, 127, 0),
+        (68, "Grain Jitter",  0, 127, 0),
+    ],
+    "granular_ext": [
+        (18, "Fine Tune",     0, 127, 64),
+        (76, "Coarse Tune",   0, 127, 64),
+        (3,  "Rev Prob",      0, 127, 0),
+        (79, "Start Mode",    0, 127, 0),
+        (88, "Sample Sel",    0, 127, 0),
+        (16, "Time KF",       0, 127, 64),
+        (26, "Cutoff KF",     0, 127, 64),
+        (78, "Vel Sens",      0, 127, 64),
+    ],
+    "filter_env": [
+        (74, "Cutoff",        0, 127, 127),
+        (71, "Resonance",     0, 127, 0),
+        (12, "Filter Type",   0, 127, 0),
+        (24, "Env Depth",     0, 127, 64),
+        (73, "Attack",        0, 127, 0),
+        (75, "Decay",         0, 127, 64),
+        (30, "Sustain",       0, 127, 127),
+        (72, "Release",       0, 127, 32),
+    ],
+    "mixer_fx": [
+        (7,  "Level",         0, 127, 100),
+        (10, "Pan",           0, 127, 64),
+        (9,  "Auto Pan",      0, 127, 0),
+        (85, "Send Delay",    0, 127, 0),
+        (90, "Delay Time",    0, 127, 64),
+        (92, "Delay Level",   0, 127, 0),
+        (89, "Reverb Time",   0, 127, 64),
+        (91, "Reverb Level",  0, 127, 0),
+    ],
+}
+
+# Default tab config (P-6 fallback) — 4-page layout, 8 knobs each.
+_DEFAULT_TABS = ["granular", "granular_ext", "filter_env", "mixer_fx"]
 _DEFAULT_LABELS = {
-    "granular": "GRANULAR", "filter": "FILTER", "envelope": "ENVELOPE",
-    "mixer": "MIXER", "fx": "FX", "clock": "CLOCK", "lfo": "LFO",
+    "granular": "GRANULAR",
+    "granular_ext": "GRANULAR EXT",
+    "filter_env": "FILTER + ENV",
+    "mixer_fx": "MIXER + FX",
+    # Legacy P-6 keys retained so device profiles that still expose
+    # these by name keep rendering with a friendly label. Not in
+    # _DEFAULT_TABS anymore.
+    "filter": "FILTER", "envelope": "ENVELOPE", "mixer": "MIXER", "fx": "FX",
+    "clock": "CLOCK", "lfo": "LFO",
     # SP-404 categories — 5 FX buses + looper + DJ
     "bus1_fx": "BUS 1", "bus2_fx": "BUS 2", "bus3_fx": "BUS 3",
     "bus4_fx": "BUS 4", "input_fx": "INPUT FX",
@@ -50,7 +104,7 @@ _SP404_CATEGORY_CHANNELS = {
 # Module-level fallback lookup (for P-6 when no device profile)
 CC_TO_TAB = {}
 for _i, _tab in enumerate(_DEFAULT_TABS):
-    for _cc, *_ in P6_CC_MAP.get(_tab, []):
+    for _cc, *_ in _P6_4PAGE_CC_MAP.get(_tab, []):
         CC_TO_TAB[_cc] = _i
 
 
@@ -63,7 +117,7 @@ class P6ControlScreen:
         self._knobs: dict[str, list[tuple[Knob, int]]] = {}
         self._tab_buttons: list[tuple[pygame.Rect, str]] = []
 
-        # Resolve CC map from device profile or P-6 fallback
+        # Resolve CC map from device profile or P-6 fallback (4-page).
         dev = getattr(app, "device", None)
         if dev and dev.cc_map:
             self._cc_map = cc_map_to_legacy(dev.cc_map)
@@ -71,7 +125,7 @@ class P6ControlScreen:
             # Build tabs from device's CC categories + clock
             self._tabs = list(dev.cc_map.keys()) + ["clock"]
         else:
-            self._cc_map = P6_CC_MAP
+            self._cc_map = _P6_4PAGE_CC_MAP
             self._cc_lookup = CC_LOOKUP
             self._tabs = _DEFAULT_TABS + ["clock"]
 
@@ -116,7 +170,7 @@ class P6ControlScreen:
             self._cc_lookup = build_cc_lookup(dev.cc_map)
             self._tabs = list(dev.cc_map.keys()) + ["clock", "lfo"]
         else:
-            self._cc_map = P6_CC_MAP
+            self._cc_map = _P6_4PAGE_CC_MAP
             self._cc_lookup = CC_LOOKUP
             self._tabs = _DEFAULT_TABS + ["clock", "lfo"]
 
@@ -146,14 +200,26 @@ class P6ControlScreen:
             self._tab_buttons.append((rect, tab_key))
 
     def _build_knobs(self):
-        """Create knobs for each tab based on device CC map."""
+        """Create knobs for each tab based on device CC map.
+
+        P-6 uses a 4×2 grid of 8 larger knobs per tab (matches the
+        4-page split). SP-404 / device-profile tabs keep the legacy
+        7×2 grid (up to 14 knobs) since their bus tabs hold more
+        params per page."""
         self._knobs = {}
 
         content_y = 80
         content_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - content_y - 10
-        knob_r = 26
-        cols = 7
-        rows = 2
+
+        is_p6_layout = self._cc_map is _P6_4PAGE_CC_MAP
+        if is_p6_layout:
+            cols = 4
+            rows = 2
+            knob_r = 38
+        else:
+            cols = 7
+            rows = 2
+            knob_r = 26
         cell_w = theme.SCREEN_WIDTH // cols
         cell_h = content_h // rows
 
@@ -165,7 +231,7 @@ class P6ControlScreen:
                 row = idx // cols
                 col = idx % cols
                 if row >= rows:
-                    break  # Max 14 knobs per tab
+                    break  # Max knobs per tab (8 for P-6, 14 for SP)
 
                 cx = col * cell_w + cell_w // 2
                 cy = content_y + row * cell_h + cell_h // 2
