@@ -544,13 +544,15 @@ class Push2Renderer:
     def _sequencer_grid_hash(seq) -> int:
         """Hash of the sequencer grid's active flags — drives the
         renderer's repaint trigger. Each (pad, step) gets a unique
-        bit so any toggle changes the hash, regardless of how many
-        steps the pattern actually has (up to 64)."""
+        bit so any toggle changes the hash. Covers up to 16 pads ×
+        64 steps (= 1024 bits, easy for a Python int) so toggling
+        a step on pads 9-16 of the SP triggers an immediate LED
+        repaint instead of waiting for a page flip."""
         try:
             num_pads = getattr(seq, "num_pads", 0)
             num_steps = getattr(seq, "num_steps", 0)
             h = 0
-            for p in range(min(num_pads, 8)):
+            for p in range(min(num_pads, 16)):
                 row = seq.grid[p]
                 for s in range(min(num_steps, 64)):
                     if row[s].active:
