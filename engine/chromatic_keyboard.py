@@ -239,7 +239,9 @@ class ChromaticKeyboard:
                     data, _ = msg
                     self._handle_message(data)
                 else:
-                    time.sleep(0.001)
+                    # 5ms idle sleep — well under USB-MIDI latency,
+                    # 5x lower CPU than a 1ms poll.
+                    time.sleep(0.005)
             except Exception:
                 # Device disconnected
                 log.info("ChromaticKB disconnected")

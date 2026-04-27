@@ -2189,7 +2189,11 @@ class P6App:
                 pass
         elif name == "new":
             # CHAIN tab: append a chain step. PATTERN/SEQUENCE tab in
-            # pattern mode: clear the current pattern's step grid.
+            # pattern mode: clear the current pattern's step grid —
+            # but require two presses within ~3 seconds so an
+            # accidental tap doesn't wipe a take. First press arms
+            # the confirm overlay; second press while armed actually
+            # clears.
             if self.current_screen_name == "device_workspace":
                 ws = self.screens.get("device_workspace")
                 tabs = getattr(ws, "_tabs", [])
@@ -2208,12 +2212,24 @@ class P6App:
                                 pass
                             chain.steps.append(ChainStep(pattern=pat, bars=4))
                     elif tab_key in ("pattern", "sequence"):
-                        seq = self._push2_pattern_sequencer()
-                        if seq is not None:
-                            try:
-                                seq.clear_all()
-                            except Exception:
-                                pass
+                        now = time.monotonic()
+                        pending = getattr(
+                            self, "_push2_new_confirm_until", 0.0)
+                        if pending and now < pending:
+                            # Second press within the confirm window
+                            # — actually clear and dismiss the prompt.
+                            seq = self._push2_pattern_sequencer()
+                            if seq is not None:
+                                try:
+                                    seq.clear_all()
+                                except Exception:
+                                    pass
+                            self._push2_new_confirm_until = 0.0
+                        else:
+                            # First press — arm the confirm window
+                            # (the renderer reads this attr to draw
+                            # the "press again to clear" overlay).
+                            self._push2_new_confirm_until = now + 3.0
         elif name == "layout" and self.push2_mode == "control":
             # Cycle the active control-mode pad layout for the focused
             # device (SP: 2-row strips → quadrants; P-6: row-per-bank →

@@ -286,7 +286,10 @@ class P6Midi:
                         self.state.active_pattern = prog
 
                 else:
-                    time.sleep(0.001)
+                    # 5ms idle sleep — keeps wake-up rate at 200/s
+                    # without hurting MIDI responsiveness (well under
+                    # typical USB-MIDI latency).
+                    time.sleep(0.005)
 
             except Exception:
                 log.exception("P-6 MIDI poll error")

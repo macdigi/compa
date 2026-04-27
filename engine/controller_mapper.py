@@ -294,7 +294,9 @@ class ActiveBinding:
                 self.mapper._on_binding_lost(self)
                 return
             if msg is None:
-                time.sleep(0.001)
+                # 5ms idle sleep keeps wake-up rate at 200/s without
+                # hurting controller responsiveness.
+                time.sleep(0.005)
                 continue
             data, _delta = msg
             self._handle_message(data)

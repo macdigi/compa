@@ -967,7 +967,13 @@ class Push2:
         while not self._stop.is_set():
             msg = midi_in.get_message()
             if msg is None:
-                time.sleep(0.001)
+                # 5ms idle sleep — well under USB-MIDI latency
+                # (~10ms typical) so input still feels instant, but
+                # cuts the wake-up rate from 1000/s to 200/s. Two of
+                # these threads run for the Push 2 (User + Live ports)
+                # and the savings compound across every MIDI poll
+                # loop in the codebase.
+                time.sleep(0.005)
                 continue
             data, _ts = msg
             self._handle(data, label)

@@ -333,15 +333,27 @@ class Push2Renderer:
             push2.set_button("page_right", page_color)
 
         # Pattern-edit cluster — Double Loop, Duplicate, Convert,
-        # Fixed Length all light up bright in pattern mode and stay
-        # dim everywhere else.
+        # Fixed Length, New all light up in pattern mode and stay
+        # dim everywhere else. New flashes bright red while a
+        # confirm-to-clear is armed (3-second window after first
+        # press).
         if mode_for_oct == "pattern":
             dl_color = 60       # pink — Double Loop (extend empty)
             dup_color = 60      # pink — Duplicate (extend with copy)
             cv_color = 50       # cyan — Convert (zoom in / finer)
             fl_color = 50       # cyan — Fixed Length (zoom out)
+            try:
+                pending = float(getattr(
+                    self.app, "_push2_new_confirm_until", 0.0))
+                if pending and time.monotonic() < pending:
+                    new_color = 127   # bright red — clear armed
+                else:
+                    new_color = 9     # orange — clears the pattern
+            except Exception:
+                new_color = 9
         else:
             dl_color = dup_color = cv_color = fl_color = 3
+            new_color = 3
         if self._last_dl_led != dl_color:
             push2.set_button("double_loop", dl_color)
             self._last_dl_led = dl_color
@@ -354,6 +366,9 @@ class Push2Renderer:
         if getattr(self, "_last_fl_led", -1) != fl_color:
             push2.set_button("fixed_length", fl_color)
             self._last_fl_led = fl_color
+        if getattr(self, "_last_new_led", -1) != new_color:
+            push2.set_button("new", new_color)
+            self._last_new_led = new_color
 
         # Undo LED — bright cyan in pattern mode when there's a
         # step-count change available to revert.
@@ -1103,6 +1118,61 @@ class Push2Renderer:
         info_y = top + height - info_surf.get_height() - 2
         surf.blit(info_surf,
                    (SURF_W - info_surf.get_width() - 14, info_y))
+
+        # Confirm-to-clear overlay — when New has been pressed once
+        # in the pattern tab, draw a pulsing red prompt across the
+        # middle of the display so the second press feels intentional.
+        try:
+            pending = float(getattr(
+                self.app, "_push2_new_confirm_until", 0.0))
+        except Exception:
+            pending = 0.0
+        if pending and time.monotonic() < pending:
+            self._draw_new_confirm_overlay(surf, top, height, pending)
+
+    def _draw_new_confirm_overlay(self, surf, top: int, height: int,
+                                    pending_until: float) -> None:
+        """Pop a centered "Press New again to clear" prompt while the
+        confirm window is open. Counts down the seconds remaining so
+        the user sees the window."""
+        try:
+            remaining = pending_until - time.monotonic()
+            if remaining <= 0:
+                return
+            secs = int(remaining) + 1
+            # Cache fonts for the overlay (allocating SysFont every
+            # frame churns GC).
+            if not hasattr(self, "_new_confirm_fonts"):
+                self._new_confirm_fonts = (
+                    pygame.font.SysFont("dejavusans-bold", 28),
+                    pygame.font.SysFont("dejavusans-bold", 16),
+                )
+            big_font, small_font = self._new_confirm_fonts
+            red = (255, 60, 90)
+            big_surf = big_font.render("CLEAR PATTERN?", True, red)
+            sub_surf = small_font.render(
+                f"press NEW again to confirm  ({secs})",
+                True, (235, 235, 235))
+            pad = 14
+            box_w = max(big_surf.get_width(),
+                         sub_surf.get_width()) + pad * 2
+            box_h = (big_surf.get_height() + sub_surf.get_height()
+                      + pad * 2 + 4)
+            box_x = SURF_W // 2 - box_w // 2
+            box_y = top + (height - box_h) // 2
+            backdrop = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+            backdrop.fill((0, 0, 0, 220))
+            surf.blit(backdrop, (box_x, box_y))
+            pygame.draw.rect(surf, red,
+                              (box_x, box_y, box_w, box_h), 2,
+                              border_radius=6)
+            big_x = SURF_W // 2 - big_surf.get_width() // 2
+            surf.blit(big_surf, (big_x, box_y + pad))
+            sub_x = SURF_W // 2 - sub_surf.get_width() // 2
+            sub_y = box_y + pad + big_surf.get_height() + 4
+            surf.blit(sub_surf, (sub_x, sub_y))
+        except Exception:
+            pass
 
     # ── Scope + meters ────────────────────────────────────────────
 
