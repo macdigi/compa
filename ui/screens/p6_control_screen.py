@@ -19,60 +19,72 @@ from engine.device_profiles import cc_map_to_legacy, build_cc_lookup
 from engine.sp404_effects import fx_name_for_tab, fx_count_for_tab
 from engine.midi_lfo import MidiLFO, ALL_SHAPES, SHAPE_SINE
 
-# P-6 4-page tab structure — each page holds exactly 8 knobs in a
-# 4×2 grid so the labels read clean. Mirrors the Push 2 encoder page
-# layout so knob assignments stay in sync between the touchscreen and
-# the controller.
+# P-6 5-page tab structure — each page holds 8 knobs in a 4×2 grid.
+# Mirrors the Push 2 encoder page layout and the device-workspace
+# control tab so knob assignments stay in sync across all three
+# surfaces. Covers every documented P-6 CC (40 of 40).
 _P6_4PAGE_CC_MAP = {
     "granular": [
-        (23, "Grain Size",    0, 127, 64),
-        (21, "Grains",        0, 127, 0),
-        (19, "Head Pos",      0, 127, 0),
-        (20, "Head Speed",    0, 127, 64),
-        (15, "Grain Shape",   0, 127, 0),
-        (13, "Detune",        0, 127, 0),
-        (25, "Spread",        0, 127, 0),
-        (68, "Grain Jitter",  0, 127, 0),
+        (23, "Grain Size",          0, 127, 64),
+        (21, "Grains",              0, 127, 0),
+        (19, "Head Position",       0, 127, 0),
+        (20, "Head Speed",          0, 127, 64),
+        (15, "Grain Shape",         0, 127, 0),
+        (13, "Detune",              0, 127, 0),
+        (25, "Spread",              0, 127, 0),
+        (68, "Grain Jitter",        0, 127, 0),
     ],
     "granular_ext": [
-        (18, "Fine Tune",     0, 127, 64),
-        (76, "Coarse Tune",   0, 127, 64),
-        (3,  "Rev Prob",      0, 127, 0),
-        (79, "Start Mode",    0, 127, 0),
-        (88, "Sample Sel",    0, 127, 0),
-        (16, "Time KF",       0, 127, 64),
-        (26, "Cutoff KF",     0, 127, 64),
-        (78, "Vel Sens",      0, 127, 64),
+        (18, "Fine Tune",           0, 127, 64),
+        (76, "Coarse Tune",         0, 127, 64),
+        (3,  "Reverse Prob",        0, 127, 0),
+        (79, "Start Mode",          0, 127, 0),
+        (88, "Sample Select",       0, 127, 0),
+        (16, "Grain Time KF",       0, 127, 64),
+        (26, "Cutoff KF",           0, 127, 64),
+        (78, "Velocity Sens",       0, 127, 64),
     ],
     "filter_env": [
-        (74, "Cutoff",        0, 127, 127),
-        (71, "Resonance",     0, 127, 0),
-        (12, "Filter Type",   0, 127, 0),
-        (24, "Env Depth",     0, 127, 64),
-        (73, "Attack",        0, 127, 0),
-        (75, "Decay",         0, 127, 64),
-        (30, "Sustain",       0, 127, 127),
-        (72, "Release",       0, 127, 32),
+        (74, "Cutoff",              0, 127, 127),
+        (71, "Resonance",           0, 127, 0),
+        (12, "Filter Type",         0, 127, 0),
+        (24, "Env Depth",           0, 127, 64),
+        (73, "Attack",              0, 127, 0),
+        (75, "Decay",               0, 127, 64),
+        (30, "Sustain",             0, 127, 127),
+        (72, "Release",             0, 127, 32),
     ],
-    "mixer_fx": [
-        (7,  "Level",         0, 127, 100),
-        (10, "Pan",           0, 127, 64),
-        (9,  "Auto Pan",      0, 127, 0),
-        (85, "Send Delay",    0, 127, 0),
-        (90, "Delay Time",    0, 127, 64),
-        (92, "Delay Level",   0, 127, 0),
-        (89, "Reverb Time",   0, 127, 64),
-        (91, "Reverb Level",  0, 127, 0),
+    "env_mixer": [
+        (28, "Amp Switch",          0, 127, 0),
+        (29, "Env Mode",            0, 127, 0),
+        (77, "Env Time KF",         0, 127, 64),
+        (7,  "Level",               0, 127, 100),
+        (10, "Pan",                 0, 127, 64),
+        (9,  "Auto Pan",            0, 127, 0),
+        (14, "Level Jitter",        0, 127, 0),
+        (84, "Output Bus",          0, 127, 0),
+    ],
+    "fx_sends": [
+        (85, "Send Delay",          0, 127, 0),
+        (86, "Send Reverb",         0, 127, 0),
+        (90, "Delay Time",          0, 127, 64),
+        (92, "Delay Level",         0, 127, 0),
+        (89, "Reverb Time",         0, 127, 64),
+        (91, "Reverb Level",        0, 127, 0),
+        (17, "Lo-fi Intensity",     0, 127, 0),
+        (87, "Lo-fi Switch",        0, 127, 0),
     ],
 }
 
-# Default tab config (P-6 fallback) — 4-page layout, 8 knobs each.
-_DEFAULT_TABS = ["granular", "granular_ext", "filter_env", "mixer_fx"]
+# Default tab config (P-6 fallback) — 5-page layout, 8 knobs each.
+_DEFAULT_TABS = ["granular", "granular_ext", "filter_env",
+                 "env_mixer", "fx_sends"]
 _DEFAULT_LABELS = {
     "granular": "GRANULAR",
     "granular_ext": "GRANULAR EXT",
     "filter_env": "FILTER + ENV",
-    "mixer_fx": "MIXER + FX",
+    "env_mixer": "ENV EXT + MIXER",
+    "fx_sends": "FX SENDS",
     # Legacy P-6 keys retained so device profiles that still expose
     # these by name keep rendering with a friendly label. Not in
     # _DEFAULT_TABS anymore.

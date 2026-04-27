@@ -837,9 +837,10 @@ class DeviceWorkspaceScreen:
     # ── P-6 Control ──────────────────────────────────────────────────
 
     # Section name shown in the page header for each Twister P-6 page.
-    # Indices 0..3 line up with _build_p6_pages() in twister_genius.
+    # Indices 0..4 line up with _build_p6_pages() in twister_genius.
     _P6_PAGE_SECTIONS = [
-        "GRANULAR", "GRANULAR EXT", "FILTER + ENV", "MIXER + FX",
+        "GRANULAR", "GRANULAR EXT", "FILTER + ENV",
+        "ENV EXT + MIXER", "FX SENDS",
     ]
 
     def _draw_p6_control(self, surface, f_med, f_small, f_tiny):
@@ -930,9 +931,22 @@ class DeviceWorkspaceScreen:
                 surf = f_tiny.render(f"{int(val)}", True, self._device_color)
                 surface.blit(surf, surf.get_rect(center=(cx, cy)))
 
-                # Label below
-                surf = f_tiny.render(slot.name[:8], True, theme.TEXT_DIM)
-                surface.blit(surf, surf.get_rect(centerx=cx, top=cy + knob_r + 2))
+                # Label below — full name, scaled down if it overflows
+                # the cell so we never truncate or chop the param name.
+                label_max_w = max(60, col_gap - 8)
+                lbl_surf = f_tiny.render(slot.name, True, theme.TEXT_DIM)
+                if lbl_surf.get_width() > label_max_w:
+                    # Scale the rendered surface to fit horizontally
+                    # while preserving aspect ratio. Cheaper than
+                    # re-rendering at smaller font size.
+                    scale = label_max_w / lbl_surf.get_width()
+                    new_w = label_max_w
+                    new_h = max(8, int(lbl_surf.get_height() * scale))
+                    lbl_surf = pygame.transform.smoothscale(
+                        lbl_surf, (new_w, new_h))
+                surface.blit(lbl_surf,
+                             lbl_surf.get_rect(
+                                 centerx=cx, top=cy + knob_r + 2))
         else:
             # Fallback: old section-based knobs
             for knob, cc, ch in self._knobs:
