@@ -167,31 +167,46 @@ SLOTS_PER_PAGE = len(FX_KNOB_INDICES)  # 14
 
 
 def _build_p6_pages() -> list[list[EffectSlot]]:
-    """Build parameter pages for the P-6 (knobs = direct CC control)."""
-    # P-6 params organized as pages matching the P-6's sections
+    """Build parameter pages for the P-6 (knobs = direct CC control).
+
+    4 pages of 8 params each — matches the touchscreen P-6 control
+    layout and the Push 2 encoder pages 1:1, so all three surfaces
+    advance through the same sections in lockstep:
+
+      Page 1: GRANULAR
+      Page 2: GRANULAR EXT
+      Page 3: FILTER + ENV
+      Page 4: MIXER + FX
+
+    A connected Twister hardware uses the same 8 slots per page —
+    its bottom 2 rows of knobs stay dark on each page (8 of 16 used).
+    Worth it for the per-page section clarity on the touchscreen +
+    Push 2."""
     p6_params = [
-        # Page 1: Granular engine (16 params — fills entire 4x4 Twister)
+        # Page 1: GRANULAR (8 slots)
         ("Grain Size",  23, COLOR_YELLOW),   ("Grains",       21, COLOR_YELLOW),
         ("Head Pos",    19, COLOR_YELLOW),    ("Head Speed",   20, COLOR_YELLOW),
         ("Grain Shape", 15, COLOR_YELLOW),    ("Detune",       13, COLOR_YELLOW),
         ("Spread",      25, COLOR_YELLOW),    ("Jitter",       68, COLOR_YELLOW),
+        # Page 2: GRANULAR EXT (8 slots)
         ("Fine Tune",   18, COLOR_YELLOW),    ("Coarse Tune",  76, COLOR_YELLOW),
         ("Rev Prob",     3, COLOR_YELLOW),    ("Start Mode",   79, COLOR_YELLOW),
         ("Sample Sel",  88, COLOR_YELLOW),    ("Time KF",      16, COLOR_YELLOW),
         ("Cutoff KF",   26, COLOR_YELLOW),    ("Vel Sens",     78, COLOR_YELLOW),
-        # Page 2: Filter + Envelope + Mixer + FX (16 params)
+        # Page 3: FILTER + ENV (8 slots)
         ("Cutoff",      74, COLOR_YELLOW),    ("Resonance",    71, COLOR_YELLOW),
         ("Filter Type", 12, COLOR_YELLOW),    ("Env Depth",    24, COLOR_YELLOW),
         ("Attack",      73, COLOR_YELLOW),    ("Decay",        75, COLOR_YELLOW),
         ("Sustain",     30, COLOR_YELLOW),    ("Release",      72, COLOR_YELLOW),
+        # Page 4: MIXER + FX (8 slots)
         ("Level",        7, COLOR_YELLOW),    ("Pan",          10, COLOR_YELLOW),
         ("Auto Pan",     9, COLOR_YELLOW),    ("Send Delay",   85, COLOR_YELLOW),
         ("Delay Time",  90, COLOR_YELLOW),    ("Delay Level",  92, COLOR_YELLOW),
         ("Reverb Time", 89, COLOR_YELLOW),    ("Reverb Level", 91, COLOR_YELLOW),
     ]
     pages = []
-    for page_start in range(0, len(p6_params), 16):  # 16 per page (full 4x4)
-        chunk = p6_params[page_start:page_start + 16]
+    for page_start in range(0, len(p6_params), 8):  # 8 per page
+        chunk = p6_params[page_start:page_start + 8]
         page = []
         for name, cc, color in chunk:
             slot = EffectSlot(name, color)

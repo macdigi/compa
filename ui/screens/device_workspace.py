@@ -836,18 +836,32 @@ class DeviceWorkspaceScreen:
 
     # ── P-6 Control ──────────────────────────────────────────────────
 
+    # Section name shown in the page header for each Twister P-6 page.
+    # Indices 0..3 line up with _build_p6_pages() in twister_genius.
+    _P6_PAGE_SECTIONS = [
+        "GRANULAR", "GRANULAR EXT", "FILTER + ENV", "MIXER + FX",
+    ]
+
     def _draw_p6_control(self, surface, f_med, f_small, f_tiny):
-        """P-6 control: shows Twister-mapped parameters with live knob feedback."""
+        """P-6 control: shows Twister-mapped parameters with live knob
+        feedback. 4 pages × 8 knobs in a 4×2 grid. Header reads the
+        section name (GRANULAR / GRANULAR EXT / FILTER + ENV /
+        MIXER + FX) so you know which knobs you're looking at without
+        counting."""
         tw = self.app.twister
 
         # ── Page header ─────────────────────────────────────────────
         fx_y = self._controls_top + 2
 
-        # Page label
-        if tw.connected:
-            page_label = f"Page {tw.current_page + 1}/{tw.page_count}"
+        # Page label — section name + page index/total.
+        try:
+            section = self._P6_PAGE_SECTIONS[tw.current_page]
+        except Exception:
+            section = "P-6 Control"
+        if tw.page_count > 1:
+            page_label = f"{section}  ·  Page {tw.current_page + 1}/{tw.page_count}"
         else:
-            page_label = "P-6 Control"
+            page_label = section
         surf = f_small.render(page_label, True, self._device_color)
         surface.blit(surf, (10, fx_y + 3))
 
@@ -869,19 +883,19 @@ class DeviceWorkspaceScreen:
                 surf = f_small.render(f"P{p + 1}", True, tc)
                 surface.blit(surf, surf.get_rect(center=r.center))
 
-        # ── 4x4 Parameter knobs (from Twister's current P-6 page) ────
-        # Layout is always available when targeting the P-6; the Twister
-        # hardware just decorates page switching / live knob feedback.
+        # ── 4×2 Parameter knobs (from Twister's current P-6 page) ────
+        # 8 knobs per page → bigger, more readable. Layout works
+        # whether or not Twister hardware is connected.
         if tw.is_p6_mode and tw.slots:
             slots = tw.slots
-            n = min(16, len(slots))
+            n = min(8, len(slots))
             live = self.app.live_cc.get(14, {})  # P-6 auto channel (ch15, idx 14)
 
-            # 4x4 grid layout
-            cols, rows = 4, 4
+            # 4×2 grid layout — knob radius scales with available space.
+            cols, rows = 4, 2
             ctrl_top = fx_y + 26
             ctrl_h = self._controls_h - 30
-            knob_r = min(24, ctrl_h // (rows * 3))
+            knob_r = min(40, ctrl_h // (rows * 3))
             col_gap = (theme.SCREEN_WIDTH - 70) // cols  # room for page column
             row_gap = ctrl_h // rows
             start_x = 10 + col_gap // 2
