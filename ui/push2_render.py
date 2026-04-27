@@ -770,7 +770,8 @@ class Push2Renderer:
         p6_section = None
         if dev_key_for_status == "P-6" and page_count > 1:
             P6_SECTIONS = ["GRANULAR", "GRANULAR EXT",
-                           "FILTER + ENV", "MIXER + FX"]
+                           "FILTER + ENV", "ENV EXT + MIXER",
+                           "FX SENDS"]
             if 0 <= page < len(P6_SECTIONS):
                 p6_section = P6_SECTIONS[page]
         if p6_section is not None:
