@@ -320,12 +320,28 @@ class Push2Renderer:
             push2.set_button("page_left", page_color)
             push2.set_button("page_right", page_color)
 
-        # Double Loop LED — bright pink in pattern mode (action: cycle
-        # PiSequencer length 16→32→64→16). Dim everywhere else.
-        dl_color = 60 if mode_for_oct == "pattern" else 3
+        # Pattern-edit cluster — Double Loop, Duplicate, Convert,
+        # Fixed Length all light up bright in pattern mode and stay
+        # dim everywhere else.
+        if mode_for_oct == "pattern":
+            dl_color = 60       # pink — Double Loop (extend empty)
+            dup_color = 60      # pink — Duplicate (extend with copy)
+            cv_color = 50       # cyan — Convert (zoom in / finer)
+            fl_color = 50       # cyan — Fixed Length (zoom out)
+        else:
+            dl_color = dup_color = cv_color = fl_color = 3
         if self._last_dl_led != dl_color:
             push2.set_button("double_loop", dl_color)
             self._last_dl_led = dl_color
+        if getattr(self, "_last_dup_led", -1) != dup_color:
+            push2.set_button("duplicate", dup_color)
+            self._last_dup_led = dup_color
+        if getattr(self, "_last_convert_led", -1) != cv_color:
+            push2.set_button("convert", cv_color)
+            self._last_convert_led = cv_color
+        if getattr(self, "_last_fl_led", -1) != fl_color:
+            push2.set_button("fixed_length", fl_color)
+            self._last_fl_led = fl_color
 
         # Undo LED — bright cyan in pattern mode when there's a
         # step-count change available to revert.
@@ -1048,8 +1064,13 @@ class Push2Renderer:
         # Step page index (8 steps per page).
         step_page = (step_offset // 8) + 1
         step_pages = max(1, (num_steps + 7) // 8)
+        # Current step-resolution note value (1/4, 1/8, 1/16, 1/32).
+        try:
+            note_val = seq.step_note_value()
+        except Exception:
+            note_val = "?"
         info = (f"Bank {bank_letter}  ·  Pat {cur_pat}/{total_pats}  "
-                f"·  Step {step_page}/{step_pages}")
+                f"·  Step {step_page}/{step_pages}  ·  {note_val}")
         info_surf = self._font_tiny.render(info, True, dev_color)
         surf.blit(info_surf,
                    (SURF_W - info_surf.get_width() - 14,

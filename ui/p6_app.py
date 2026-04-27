@@ -2028,9 +2028,52 @@ class P6App:
                 self._push2_last_num_steps = cur
                 seq.num_steps = 32 if cur < 32 else (64 if cur < 64 else 16)
                 self.push2_pattern_step_offset = 0
+        elif name == "duplicate" and self.push2_mode == "pattern":
+            # Duplicate the current pattern: double the length AND copy
+            # the existing step grid into the new second half so the
+            # pattern plays twice in a row (vs Double Loop which just
+            # extends with empty cells).
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                self._push2_last_num_steps = int(getattr(
+                    seq, "num_steps", 16))
+                try:
+                    seq.duplicate_pattern()
+                except Exception:
+                    pass
+                self.push2_pattern_step_offset = 0
+        elif name == "convert" and self.push2_mode == "pattern":
+            # Zoom in: halve ticks_per_step, double num_steps, stretch
+            # the grid so existing notes stay on the same beats while
+            # adding sub-step cells between them. Lets the user draw
+            # finer rhythms (e.g. 1/16 → 1/32 hi-hat rolls).
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                self._push2_last_num_steps = int(getattr(
+                    seq, "num_steps", 16))
+                try:
+                    seq.zoom_in()
+                except Exception:
+                    pass
+                self.push2_pattern_step_offset = 0
+        elif name == "fixed_length" and self.push2_mode == "pattern":
+            # Zoom out: double ticks_per_step, halve num_steps. Pairs
+            # of cells collapse with OR so any active step in either
+            # half survives. Inverse of Convert / zoom-in.
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                self._push2_last_num_steps = int(getattr(
+                    seq, "num_steps", 16))
+                try:
+                    seq.zoom_out()
+                except Exception:
+                    pass
+                self.push2_pattern_step_offset = 0
         elif name == "undo" and self.push2_mode == "pattern":
             # In pattern mode, Undo reverts the most recent step-count
-            # change made via Double Loop.
+            # change made via Double Loop / Duplicate / Convert /
+            # Fixed Length. Only the num_steps is restored — content
+            # preserved by zoom_in/duplicate stays as transformed.
             if self._push2_last_num_steps is not None:
                 seq = self._push2_pattern_sequencer()
                 if seq is not None:

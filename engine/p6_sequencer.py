@@ -81,6 +81,13 @@ class PiSequencer:
         self.current_step = 0
         self._tick_count = 0
 
+        # Step resolution: how many MIDI clock ticks make one step.
+        # Default is 24 (= 1 beat per step). Halving this doubles the
+        # grid resolution (1/8 → 1/16 → 1/32). The on_tick loop reads
+        # this attribute so changes take effect on the next clock
+        # tick.
+        self.ticks_per_step = 24
+
         # MIDI output
         self._midi_out = None  # set by the app
         self._active_notes: list[tuple[int, int]] = []  # (note, channel) pairs
@@ -151,6 +158,101 @@ class PiSequencer:
             for step in range(MAX_STEPS):
                 self.grid[pad][step].active = False
 
+    # ── Resolution / duplication ────────────────────────────────────
+
+    def zoom_in(self) -> bool:
+        """Halve `ticks_per_step` and double `num_steps` so each
+        existing step becomes two cells with the same total pattern
+        duration. The first cell of each pair holds the original
+        step's content; the second is empty (ready for sub-step
+        notes — e.g. 1/32-note hi-hat rolls).
+
+        Returns True on success, False if already at the minimum
+        resolution (1/32 notes = 3 ticks per step) or expanding would
+        exceed MAX_STEPS."""
+        if self.ticks_per_step <= 3:
+            return False
+        if self.num_steps * 2 > MAX_STEPS:
+            return False
+        new_steps = self.num_steps * 2
+        new_tps = self.ticks_per_step // 2
+        for pad in range(self.num_pads):
+            row = self.grid[pad]
+            # Walk from the back so we don't clobber earlier cells.
+            for s in range(self.num_steps - 1, -1, -1):
+                src = row[s]
+                row[s * 2] = StepData(active=src.active,
+                                       velocity=src.velocity,
+                                       probability=src.probability)
+                row[s * 2 + 1] = StepData()
+        self.num_steps = new_steps
+        self.ticks_per_step = new_tps
+        if self.current_step >= new_steps:
+            self.current_step = 0
+        return True
+
+    def zoom_out(self) -> bool:
+        """Double `ticks_per_step` and halve `num_steps`. Each pair of
+        cells collapses to one whose state is the OR of the two
+        (preserving any active step in either half, dropping precise
+        sub-step timing). Returns False if already at the maximum
+        coarseness (192 ticks per step = half-bar steps) or if
+        num_steps is already at the minimum (1)."""
+        if self.num_steps < 2:
+            return False
+        if self.ticks_per_step >= 192:
+            return False
+        new_steps = self.num_steps // 2
+        new_tps = self.ticks_per_step * 2
+        for pad in range(self.num_pads):
+            row = self.grid[pad]
+            for s in range(new_steps):
+                a, b = row[s * 2], row[s * 2 + 1]
+                merged_active = a.active or b.active
+                # Pick velocity from whichever half had a hit (prefer
+                # the on-beat one if both fired).
+                vel = a.velocity if a.active else b.velocity
+                prob = a.probability if a.active else b.probability
+                row[s] = StepData(active=merged_active,
+                                   velocity=vel,
+                                   probability=prob)
+            for s in range(new_steps, MAX_STEPS):
+                row[s] = StepData()
+        self.num_steps = new_steps
+        self.ticks_per_step = new_tps
+        if self.current_step >= new_steps:
+            self.current_step = 0
+        return True
+
+    def duplicate_pattern(self) -> bool:
+        """Double the pattern length and copy the existing content into
+        the new second half. Pattern timing (ticks_per_step) is
+        unchanged — the result plays the same beat twice in a row.
+        Returns False if doubling would exceed MAX_STEPS."""
+        if self.num_steps * 2 > MAX_STEPS:
+            return False
+        old_n = self.num_steps
+        new_n = old_n * 2
+        for pad in range(self.num_pads):
+            row = self.grid[pad]
+            for s in range(old_n):
+                src = row[s]
+                row[old_n + s] = StepData(active=src.active,
+                                           velocity=src.velocity,
+                                           probability=src.probability)
+        self.num_steps = new_n
+        return True
+
+    def step_note_value(self) -> str:
+        """Human-readable note value for one step at the current
+        resolution. 24 ticks = 1/4 (quarter), 12 = 1/8, 6 = 1/16,
+        3 = 1/32, 48 = 1/2, 96 = 1/1. Returns "?" for unusual values
+        (e.g. mid-zoom transient states)."""
+        return {
+            96: "1/1",  48: "1/2",  24: "1/4",  12: "1/8",
+             6: "1/16",  3: "1/32", 192: "2/1",
+        }.get(self.ticks_per_step, "?")
+
     def start(self) -> None:
         """Start playback from step 0."""
         self.current_step = 0
@@ -171,10 +273,10 @@ class PiSequencer:
             return
 
         self._tick_count += 1
-        if self._tick_count < 24:
+        if self._tick_count < self.ticks_per_step:
             return
 
-        # Beat boundary — advance step
+        # Step boundary — advance step
         self._tick_count = 0
         self._all_notes_off()
 
