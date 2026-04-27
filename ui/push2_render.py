@@ -992,7 +992,13 @@ class Push2Renderer:
             surf.blit(lbl_surf, (rect.x + 6, rect.y + 2))
 
             if value is not None:
-                val_surf = self._font_tiny.render(f"{int(value)}", True, dev_color)
+                # Prefer the slot's `value_text` override (used by SP-404
+                # Ctrl knobs to show formatted values like "0.23 sec",
+                # "OFF", "1/4", etc.). Fall back to the raw int.
+                text = slot.get("value_text")
+                if not text:
+                    text = f"{int(value)}"
+                val_surf = self._font_tiny.render(text, True, dev_color)
                 surf.blit(val_surf, (rect.right - val_surf.get_width() - 4,
                                      rect.bottom - val_surf.get_height() - 2))
 
@@ -1098,10 +1104,12 @@ class Push2Renderer:
             live = {}
 
         # Resolve the active effect on this bus so we can label the
-        # Ctrl knobs with its actual parameter names.
+        # Ctrl knobs with its actual parameter names AND format their
+        # values in the SP's units (sec, dB, Hz, OFF/ON, sync divs, …).
         try:
             from engine.sp404_effects import fx_name_for_tab
-            from engine.sp404_effect_params import ctrl_label
+            from engine.sp404_effect_params import (ctrl_label,
+                                                     format_value)
             tab = self.app._sp404_active_bus_tab()
             fx_idx = int(live.get(83, 0))
             fx_name = fx_name_for_tab(tab, fx_idx) or "—"
@@ -1109,6 +1117,7 @@ class Push2Renderer:
             fx_name = "—"
             fx_idx = 0
             ctrl_label = lambda *_: ""    # noqa — unused on failure
+            format_value = lambda *_: ""
 
         out = []
         for i, cc in enumerate(ctrl_ccs):
@@ -1118,7 +1127,14 @@ class Push2Renderer:
                 name = f"Ctrl {i + 1}"
             if not name:
                 name = f"Ctrl {i + 1}"
-            out.append({"name": name, "value": live.get(cc)})
+            raw = live.get(cc)
+            slot = {"name": name, "value": raw}
+            if raw is not None:
+                try:
+                    slot["value_text"] = format_value(fx_name, i, int(raw))
+                except Exception:
+                    pass
+            out.append(slot)
         # Encoder 7 — reserved.
         out.append({"name": "—", "value": None})
         # Encoder 8 — active effect name with CC#83 index as value.
