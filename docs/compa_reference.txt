@@ -464,66 +464,115 @@ Plays the focused device chromatically through the Push 2 pad grid.
     Step root pitch class -1 / +1.
 
 
--- Push 2: pattern mode --
+-- Push 2: pattern mode (overlay sequencer) --
 
-Combined pattern launcher + step sequencer driven by Compa's master
-clock (independent of the device's clock). The pad grid splits into
-three regions:
+Compa's pattern mode is an OVERLAY sequencer — its own grid that
+fires samples on the focused device via MIDI but never writes to
+the device's own pattern memory. Bank/pattern switches on Compa
+re-target which samples the next step plays without touching what
+the SP-404 or P-6 has stored internally. Set up your kits on the
+device, then perform overlay sequences on top, switching banks
+and patterns on the fly during playback.
 
-  Row 7 (top)         Bank selector — tap to change the focused
-                      device's active pattern bank. The active bank
-                      lights bright in its theme color (yellow for
-                      P-6, orange for SP); inactive banks dim white.
-                      For devices with more banks than the 8-cell
-                      window can show, Shift+Nav-Left/Right pages
-                      the bank window.
+Driven by Compa's internal master clock (independent of the
+device's clock so tempo stays rock-solid). The Push 2 surface
+splits into:
 
-  Row 6 (launchers)   Pattern launchers 1-8 within the active bank.
-                      Tap to select that pattern. The current pattern
-                      lights bright; others dim. Nav-Left/Right pages
-                      through pattern octaves (1-8 / 9-16 / etc).
+  8×8 pad grid       Step cells. Row 7 (top) = first visible pad,
+                     row 0 (bottom) = 8th visible pad. Cols are
+                     8 step columns. Tap to toggle a step. P-6
+                     uses 6 of 8 rows; SP uses 8 of 16 with octave
+                     paging.
 
-  Rows 0-5 (steps)    Step sequencer for the currently selected
-                      pattern (up to 6 pad rows visible). Tap a step
-                      to toggle it on/off; tap an active step again
-                      to clear. Bright = step on, dim = available.
+  Bottom select      Bank selector (replaces the old top pad row).
+                     Active bank in its bank-palette color, others
+                     dim white. Tap to switch banks live.
 
-  Page Left / Page Right
-    Page through the 8-step window when the pattern is longer than 8
-    steps (LEDs dim cyan when paging is available).
+  Top select         Pattern launchers 1-8 within the active 8-pat
+                     window. Active pattern bright in device theme
+                     color, others dim. Nav-Left/Right pages
+                     through 1-8 / 9-16 / etc.
 
-  Octave Up / Octave Down
-    Page through the visible pad rows when the device has more pads
-    than the 6 visible rows (e.g. SP's 16 pads need 3 pad pages).
+  Push 2 display     Sequencer overview — full tracks × all-steps
+                     grid showing the pattern's whole shape. The
+                     active 8-step × 8-pad window outlines in the
+                     device color so you always see which slice
+                     the pads are editing. Playhead column lights
+                     while playing. Status line at the bottom
+                     reads Bank · Pat · Step · note value · Pads
+                     page · Swing %.
+
+  Page Left / Right
+    Pages the 8-step window. LEDs dim cyan when more than one
+    step page exists.
+
+  Octave Up / Down
+    Pages the 8-pad window for devices with > 8 pads. Up scrolls
+    to upper-numbered pads (SP pads 1-8 at the top of the
+    physical face), Down scrolls to lower (pads 9-16).
 
   Double Loop
-    Cycles pattern length: 16 -> 32 -> 64 -> 16 steps. The button
-    LED is bright pink in pattern mode.
+    Cycles pattern length 16 → 32 → 64 → 16 steps, extending with
+    empty cells. Bright pink LED in pattern mode.
 
-  Undo
-    Reverts the last Double-Loop length change. The LED lights bright
-    blue when an undo is available, dim otherwise.
+  Duplicate
+    Doubles pattern length AND copies the existing content into
+    the new second half — same beat plays twice in a row.
+
+  Convert / Fixed Length
+    Step-resolution zoom. Convert halves the step duration
+    (1/4 → 1/8 → 1/16 → 1/32) keeping notes on the same beats and
+    adding sub-step cells between them — for drawing fine rhythms
+    like 1/32 hi-hat rolls. Fixed Length is the inverse (zoom
+    out). Bright cyan LEDs in pattern mode.
+
+  Repeat / Accent (nudge)
+    Rotate the entire pattern one step earlier (Repeat) or later
+    (Accent). Useful for re-aligning a freshly-written pattern
+    with the downbeat. Cyan LEDs in pattern mode.
+
+  Swing encoder (dedicated knob to the left of the display)
+    Adjusts the overlay sequencer's swing 0-50%. Even-indexed
+    steps fire on the beat; odd-indexed steps are delayed by
+    `swing %` of one step's worth of ticks. Status line shows
+    "Sw N%" when non-zero.
+
+  Encoders 1-2 (top row, leftmost)
+    Pattern remix knobs — performance shuffle controls.
+      Encoder 1: density. Each detent re-rolls every step in the
+        pattern at the knob's density level (0% = empty, 100% =
+        every cell on).
+      Encoder 2: velocity spread. Re-rolls velocities of every
+        active step within a wider window as you turn.
+    Use them mid-performance to morph or recover a pattern.
 
   Quantize
-    Normalizes every active step's velocity to 100. Useful when you
-    want a consistent feel across an entire pattern.
+    Normalizes every active step's velocity to 100.
 
   New
-    Clears every step in the current pattern's grid. The pattern
-    launchers stay where they are; only the step grid is wiped.
+    Clears every step in the current pattern's grid. Two-press
+    safety: first press lights the New button red and pops a
+    "CLEAR PATTERN? press NEW again to confirm (3)" overlay on
+    the Push 2 display with a 3-second countdown. Second press
+    inside the window actually clears.
 
   Play
-    In pattern mode, Play toggles BOTH the Compa step sequencer AND
-    the focused device's transport. First press starts both; second
-    press stops both.
+    Toggles the overlay sequencer + the focused device's transport.
+    First press starts both; second press stops both. Auto-record
+    is suppressed while pattern mode is active so Play just plays.
+
+  Record
+    Toggles the Compa recorder (start/stop a take of the overlay
+    sequencer's audio output). Metadata captures BPM + active
+    pattern. Independent of Play.
 
   Stop Clip
-    Stops the Compa step sequencer immediately.
+    Stops the overlay sequencer immediately.
 
   Step grids persist
     Each (device, pattern) step grid is saved to
     sessions/compa_step_grids.json on shutdown and reloaded on the
-    next launch, so step data survives a service restart.
+    next launch, so overlay-sequencer data survives a restart.
 
 
 -- Push 2: DJ mode (SP-404 only) --

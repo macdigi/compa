@@ -248,7 +248,11 @@ The Push 2 is the recommended performance surface for Compa. Plug it in via USB 
 
 **Keys mode** — chromatic and in-scale layouts (chromatic, major, minor, min/maj pent, blues, dorian, mixolydian, harmonic minor). Held notes replace BPM in the display centerpiece. Octave shift, root step, and scale cycle live on the D-pad and Octave buttons.
 
-**Pattern mode** — combined launch grid + step sequencer driven by Compa's master clock (independent of the device's clock so tempo stays rock-solid). Top row = bank selector, second row = pattern launchers 1-8, bottom 6 rows = step grid. **Quantize** normalizes velocities to 100, **New** clears the current pattern, **Double Loop** cycles step length 16→32→64, **Undo** reverts the last length change. Per-(device, pattern) step grids persist to disk and survive a service restart.
+**Pattern mode** — an **overlay sequencer**. Compa holds the grid and fires samples on the focused device via MIDI, but never writes to the device's own pattern memory. Set up kits on the SP/P-6, then perform overlay sequences on top — switch banks and patterns on the fly during playback to use the same grid as a live remix engine. Driven by Compa's master clock so tempo is rock-solid.
+
+Push 2 layout: full 8×8 pad grid is step cells. Bank selector lives on the bottom select buttons, pattern launchers on the top select buttons. Push 2 display shows a tracks × all-steps overview with the active 8-step window outlined; status line reads `Bank A · Pat 1/64 · Step 1/2 · 1/16 · Pads 1/2 · Sw 25%`.
+
+Editing controls: **Quantize** normalizes velocities to 100; **New** clears the pattern (two-press safety); **Double Loop** extends pattern length 16→32→64 with empty cells; **Duplicate** doubles length and copies the existing content; **Convert / Fixed Length** zoom step resolution (1/4 ↔ 1/8 ↔ 1/16 ↔ 1/32); **Repeat / Accent** nudge the pattern left/right one step. The **Swing encoder** sets odd-step shuffle 0–50%. **Encoders 1-2** are live remix knobs — encoder 1 re-rolls density, encoder 2 randomizes velocities of active steps — for performance morphing without editing the grid manually. Per-(device, pattern) step grids persist to disk and survive a service restart.
 
 **Touch strip** — sends CC 1 (mod wheel) on the focused device's main channel in control / keys / pattern modes; in DJ mode it's the SP-404 crossfader.
 

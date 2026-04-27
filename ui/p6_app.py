@@ -1807,8 +1807,21 @@ class P6App:
             except Exception:
                 pass
             return
-        # name == "swing": stubbed (no audible effect — popup still fires
-        # so the user sees the encoder is recognized).
+        if name == "swing":
+            # Adjust the active overlay-sequencer's swing amount in
+            # 1% steps. Range 0..50 (50% = max shuffle = odd step
+            # halfway between two beats). Display popup shows the
+            # current value via _push2_last_special_encoder above.
+            seq = self._push2_pattern_sequencer()
+            if seq is None:
+                return
+            try:
+                cur = int(getattr(seq, "swing_amount", 0))
+                new_val = max(0, min(50, cur + int(delta)))
+                seq.swing_amount = new_val
+            except Exception:
+                pass
+            return
 
     def _on_push2_pitch_bend(self, value: int):
         """Push 2 touch strip routing.
@@ -2092,6 +2105,22 @@ class P6App:
                 except Exception:
                     pass
                 self.push2_pattern_step_offset = 0
+        elif name == "repeat" and self.push2_mode == "pattern":
+            # Nudge left — rotate the entire pattern one step earlier.
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                try:
+                    seq.nudge(-1)
+                except Exception:
+                    pass
+        elif name == "accent" and self.push2_mode == "pattern":
+            # Nudge right — rotate the entire pattern one step later.
+            seq = self._push2_pattern_sequencer()
+            if seq is not None:
+                try:
+                    seq.nudge(+1)
+                except Exception:
+                    pass
         elif name == "undo" and self.push2_mode == "pattern":
             # In pattern mode, Undo reverts the most recent step-count
             # change made via Double Loop / Duplicate / Convert /
@@ -2478,13 +2507,49 @@ class P6App:
     def _on_push2_encoder(self, idx: int, delta: int):
         """Push 2 performance encoder turn.
 
-        P-6: nudge the CC of the Twister slot at the current encoder
-        page's offset (8 params per page, 4 pages).
-        SP-404 MK2:
+        Pattern mode (overlay sequencer): encoders 1-2 are the
+        "remix" knobs — encoder 1 re-rolls the step grid at a
+        density proportional to its position; encoder 2 randomizes
+        velocities of active steps within a spread. Encoders 3-8
+        fall through to the device-specific control mapping below.
+
+        P-6 control: nudge the CC of the Twister slot at the current
+        encoder page's offset (8 params per page, 4 pages).
+        SP-404 control:
           - encoders 1-6 adjust Ctrl 1-6 of the active bus
-          - encoder 7 (idx 6) reserved (future use)
-          - encoder 8 (idx 7) cycles the active effect on the bus
-            (CC#83). Wraps within the bus's effect list."""
+          - encoder 7 reserved
+          - encoder 8 cycles the active effect (CC#83)."""
+        if self.push2_mode == "pattern":
+            seq = self._push2_pattern_sequencer()
+            if seq is None:
+                return
+            if idx == 0:
+                # Encoder 1: density. Track 0..100 on the sequencer
+                # itself so each detent re-rolls a fresh pattern at
+                # the current density level.
+                cur = int(getattr(seq, "_remix_density", 30))
+                new_val = max(0, min(100, cur + int(delta) * 4))
+                seq._remix_density = new_val
+                try:
+                    seq.randomize_density(new_val)
+                except Exception:
+                    pass
+                return
+            if idx == 1:
+                # Encoder 2: velocity spread. 0 leaves velocities
+                # alone; turning the knob re-rolls velocity for every
+                # active step within a wider window.
+                cur = int(getattr(seq, "_remix_vel_spread", 0))
+                new_val = max(0, min(100, cur + int(delta) * 4))
+                seq._remix_vel_spread = new_val
+                try:
+                    seq.randomize_velocities(new_val)
+                except Exception:
+                    pass
+                return
+            # Encoders 3-8 in pattern mode: no-op for now (reserved).
+            return
+
         dev_key = getattr(self.device_manager, "focus_key", None)
 
         if dev_key == "SP-404MKII":

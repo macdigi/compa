@@ -188,7 +188,7 @@ class Push2Renderer:
         "add_device", "add_track", "master",
         "tap_tempo", "metronome", "delete", "undo",
         "convert", "double_loop", "quantize", "new", "fixed_length",
-        "duplicate", "automate",
+        "duplicate", "automate", "repeat", "accent",
         "shift", "select", "setup", "user",
         "stop_clip", "mute", "solo",
         "launch_1", "launch_2", "launch_3", "launch_4",
@@ -369,6 +369,16 @@ class Push2Renderer:
         if getattr(self, "_last_new_led", -1) != new_color:
             push2.set_button("new", new_color)
             self._last_new_led = new_color
+
+        # Nudge buttons (Repeat = nudge left, Accent = nudge right)
+        # — bright in pattern mode, dim everywhere else.
+        nudge_color = 22 if mode_for_oct == "pattern" else 3  # cyan
+        if getattr(self, "_last_repeat_led", -1) != nudge_color:
+            push2.set_button("repeat", nudge_color)
+            self._last_repeat_led = nudge_color
+        if getattr(self, "_last_accent_led", -1) != nudge_color:
+            push2.set_button("accent", nudge_color)
+            self._last_accent_led = nudge_color
 
         # Undo LED — bright cyan in pattern mode when there's a
         # step-count change available to revert.
@@ -1109,9 +1119,16 @@ class Push2Renderer:
             pad_total_pages = (num_pads + 7) // 8
             cur_pad_page = (pad_offset // 8) + 1
             pad_page_str = f"  ·  Pads {cur_pad_page}/{pad_total_pages}"
+        # Swing amount (overlay sequencer's percent shuffle on odd
+        # steps). Hide when 0 to keep the status line tight.
+        try:
+            swing_amt = int(getattr(seq, "swing_amount", 0))
+        except Exception:
+            swing_amt = 0
+        swing_str = f"  ·  Sw {swing_amt}%" if swing_amt > 0 else ""
         info = (f"Bank {bank_letter}  ·  Pat {cur_pat}/{total_pats}  "
                 f"·  Step {step_page}/{step_pages}  ·  {note_val}"
-                f"{pad_page_str}")
+                f"{pad_page_str}{swing_str}")
         info_surf = self._font_tiny.render(info, True, dev_color)
         # Place inside the reserved status strip so nothing clips off
         # the bottom of the 160px display.

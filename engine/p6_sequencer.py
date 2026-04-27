@@ -88,6 +88,13 @@ class PiSequencer:
         # tick.
         self.ticks_per_step = 24
 
+        # Swing — proportion of one step that every odd-indexed step
+        # is delayed by. 0 = no swing, 50 = max (odd step lands
+        # halfway between two beats, classic shuffle). Applied in
+        # on_tick: when about to advance to an odd step, the boundary
+        # waits for the extra tick budget. Range clamped 0..50.
+        self.swing_amount: int = 0
+
         # MIDI output
         self._midi_out = None  # set by the app
         self._active_notes: list[tuple[int, int]] = []  # (note, channel) pairs
@@ -260,6 +267,69 @@ class PiSequencer:
              6: "1/16",  3: "1/32", 192: "2/1",
         }.get(self.ticks_per_step, "?")
 
+    # ── Nudge / rotation ────────────────────────────────────────────
+
+    def nudge(self, delta: int) -> None:
+        """Rotate every pad's step grid by `delta` positions. Positive
+        delta shifts notes toward later steps (right), negative toward
+        earlier (left). Applies to all `num_steps` columns; cells past
+        the end wrap around. Used for re-aligning a pattern with a
+        downbeat without redrawing it."""
+        if self.num_steps <= 0:
+            return
+        d = delta % self.num_steps
+        if d == 0:
+            return
+        n = self.num_steps
+        for pad in range(self.num_pads):
+            row = self.grid[pad]
+            # Rotate by `d` steps to the right. Build new ordered slice
+            # for the active range, leave anything past num_steps alone.
+            slice_active = [row[s] for s in range(n)]
+            for s in range(n):
+                row[(s + d) % n] = slice_active[s]
+            # Replace each rotated cell with a fresh StepData copy so
+            # references aren't shared across the row (else editing
+            # one cell mutates a sibling).
+            for s in range(n):
+                src = row[s]
+                row[s] = StepData(active=src.active,
+                                   velocity=src.velocity,
+                                   probability=src.probability)
+
+    # ── Randomize ───────────────────────────────────────────────────
+
+    def randomize_density(self, density_pct: int) -> None:
+        """Set every step in every pad to a fresh random active state.
+        `density_pct` (0-100) controls the probability that each cell
+        ends up active. 0 = empty, 100 = every cell on. Velocities
+        keep their existing values; only the active flag is rolled."""
+        density = max(0, min(100, int(density_pct))) / 100.0
+        for pad in range(self.num_pads):
+            row = self.grid[pad]
+            for s in range(self.num_steps):
+                row[s].active = (random.random() < density)
+
+    def randomize_velocities(self, spread_pct: int) -> None:
+        """Re-roll the velocity of every active step within a range
+        centered on 100. `spread_pct` (0-100) is the half-width as a
+        % of full velocity range — 0 leaves velocities untouched,
+        100 picks any value 0..127. Doesn't touch the active flags."""
+        spread = max(0, min(100, int(spread_pct)))
+        if spread == 0:
+            return
+        half = int(127 * spread / 200)  # half-width in MIDI units
+        if half <= 0:
+            return
+        for pad in range(self.num_pads):
+            row = self.grid[pad]
+            for s in range(self.num_steps):
+                if row[s].active:
+                    base = 100
+                    lo = max(1, base - half)
+                    hi = min(127, base + half)
+                    row[s].velocity = random.randint(lo, hi)
+
     def start(self) -> None:
         """Start playback from step 0."""
         self.current_step = 0
@@ -275,19 +345,33 @@ class PiSequencer:
         self._tick_count = 0
 
     def on_tick(self) -> None:
-        """Called on every MIDI clock tick (24 per beat)."""
+        """Called on every MIDI clock tick (24 per beat).
+
+        Swing: when the *next* step would be odd-indexed (1, 3, 5…),
+        delay the boundary by `swing_amount` percent of one step's
+        worth of ticks. Even steps fire on time. Result is the
+        classic shuffle feel — tighter at low values, dotted-eighth
+        at 50%."""
         if not self.playing:
             return
 
         self._tick_count += 1
-        if self._tick_count < self.ticks_per_step:
+
+        # Per-tick budget: even steps use ticks_per_step as-is. Odd
+        # steps wait an extra (ticks_per_step * swing_amount / 100).
+        budget = self.ticks_per_step
+        next_step = (self.current_step + 1) % max(1, self.num_steps)
+        if next_step % 2 == 1 and self.swing_amount > 0:
+            budget += (self.ticks_per_step
+                        * max(0, min(50, self.swing_amount)) // 100)
+        if self._tick_count < budget:
             return
 
         # Step boundary — advance step
         self._tick_count = 0
         self._all_notes_off()
 
-        self.current_step = (self.current_step + 1) % self.num_steps
+        self.current_step = next_step
         self._trigger_current_step()
 
         if self.on_step_change:

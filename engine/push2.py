@@ -103,6 +103,8 @@ _BUTTON_CC = {
     52: "add_device",
     53: "add_track",
     28: "master",
+    56: "repeat",
+    57: "accent",
     # Edit / pattern column (left side)
     35: "convert",
     87: "new",
