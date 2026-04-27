@@ -551,11 +551,15 @@ class Push2Renderer:
                 grid_hash = self._sequencer_grid_hash(seq)
                 cstep = int(getattr(seq, "current_step", 0))
                 playing = bool(getattr(seq, "playing", False))
+                view_factor = int(
+                    getattr(seq, "_view_step_factor", 1))
             else:
                 grid_hash, cstep, playing = 0, 0, False
+                view_factor = 1
             pattern_state = (cur_pat, total, dev_key, lp, offset,
                              grid_hash, cstep, playing, pad_off,
-                             act_bank, bank_off, bank_total)
+                             act_bank, bank_off, bank_total,
+                             view_factor)
 
         layout = getattr(self.app, "push2_control_layout", 0)
         frame_key = (mode, dev_key, pad_page, layout,
@@ -1025,36 +1029,38 @@ class Push2Renderer:
             playing = bool(getattr(seq, "playing", False))
         except Exception:
             current_step, playing = -1, False
-        # View-zoom factor — visible step covers this many internal
-        # cells. Outlining the active 8-step pad window has to
-        # account for the wider underlying range.
-        try:
-            view_factor = max(1, int(
-                getattr(seq, "_view_step_factor", 1)))
-        except Exception:
-            view_factor = 1
 
-        # Show all rows up to a sane cap. The whole pattern fits in
-        # one row of height/num_pads tall cells; the visible-pad
-        # window (8 rows) is outlined to indicate which tracks the
-        # pads are currently editing.
+        # Render the overview at the SAME visible-step resolution the
+        # user is editing at — one screen cell maps 1:1 to one Push 2
+        # pad column. Press the next pad → next cell on screen lights
+        # up. When zoomed out, multiple internal cells collapse into
+        # one visible cell here (active = any underlying cell active).
+        try:
+            view_n_steps = int(seq.view_num_steps)
+        except Exception:
+            view_n_steps = num_steps
+
         rows_to_show = min(num_pads, 16)
         cell_h = max(4, h // rows_to_show)
         grid_h = cell_h * rows_to_show
-        cell_w = max(4, w // num_steps)
-        grid_w = cell_w * num_steps
+        cell_w = max(4, w // max(1, view_n_steps))
+        grid_w = cell_w * view_n_steps
 
-        # Active visible-step window bounds, expanded into internal
-        # cell space so the outline scales with the view zoom factor.
-        active_step_lo = step_offset * view_factor
-        active_step_hi = min(num_steps,
-                              (step_offset + 8) * view_factor)
+        # Active 8-VIEW-step window bounds.
+        active_step_lo = step_offset
+        active_step_hi = min(view_n_steps, step_offset + 8)
         # Active 8-pad window bounds (in row space).
         active_pad_lo = pad_offset
         active_pad_hi = min(num_pads, pad_offset + 8)
 
+        # Playhead in visible-step space.
+        try:
+            view_playhead = int(seq.view_current_step()) if playing else -1
+        except Exception:
+            view_playhead = -1
+
         for p in range(rows_to_show):
-            for s in range(num_steps):
+            for s in range(view_n_steps):
                 cx = x0 + s * cell_w
                 cy = y0 + p * cell_h
                 in_active_step = active_step_lo <= s < active_step_hi
@@ -1062,7 +1068,7 @@ class Push2Renderer:
                 in_focus = in_active_step and in_active_pad
 
                 try:
-                    is_on = bool(seq.grid[p][s].active)
+                    is_on = seq.view_step_active(p, s)
                 except Exception:
                     is_on = False
 
@@ -1086,13 +1092,14 @@ class Push2Renderer:
                 pygame.draw.rect(surf, col,
                                  (cx + 1, cy + 1, cell_w - 2, cell_h - 2))
 
-        # Playhead column highlight (only while playing).
-        if playing and 0 <= current_step < num_steps:
-            ph_x = x0 + current_step * cell_w
+        # Playhead column highlight (only while playing) — at the
+        # visible step containing the playhead.
+        if playing and 0 <= view_playhead < view_n_steps:
+            ph_x = x0 + view_playhead * cell_w
             pygame.draw.rect(surf, (240, 240, 240),
                              (ph_x, y0, cell_w, grid_h), 1)
 
-        # Active-window outline.
+        # Active-window outline (1:1 with the 8 pad columns).
         ow_x = x0 + active_step_lo * cell_w
         ow_y = y0 + active_pad_lo * cell_h
         ow_w = (active_step_hi - active_step_lo) * cell_w
