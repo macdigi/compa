@@ -1,0 +1,15 @@
+{
+  "name": "compa-os-download-worker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cloudflare Worker for stable Compa OS download URLs",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "wrangler": "^4.14.1"
+  }
+}

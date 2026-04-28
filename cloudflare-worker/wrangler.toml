@@ -1,0 +1,6 @@
+name = "compa-os-downloads"
+main = "src/worker.ts"
+compatibility_date = "2026-04-28"
+
+[vars]
+RAW_DOWNLOAD_BASE = "https://f004.backblazeb2.com/file/compa-os-downloads"

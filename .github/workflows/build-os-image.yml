@@ -47,6 +47,16 @@ jobs:
             echo "version=${{ github.event.inputs.version || 'dev' }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve download base URL
+        id: download_base
+        run: |
+          BASE_URL='${{ vars.COMPA_OS_DOWNLOAD_BASE_URL }}'
+          if [[ -z "$BASE_URL" ]]; then
+            BASE_URL='https://f004.backblazeb2.com/file/compa-os-downloads'
+          fi
+          BASE_URL="${BASE_URL%/}"
+          echo "url=${BASE_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Free runner disk space
         # Default GitHub runner has ~14 GB free; pi-gen wants 25-30 GB.
         # Strip out toolchains and SDKs we won't touch during this run.
@@ -193,9 +203,9 @@ jobs:
           body: |
             ## Compa OS image
 
-            **Download:** [compa-os-${{ steps.ver.outputs.version }}.img.xz](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-${{ steps.ver.outputs.version }}.img.xz) (Backblaze B2)
+            **Download:** [compa-os-${{ steps.ver.outputs.version }}.img.xz](${{ steps.download_base.outputs.url }}/compa-os-${{ steps.ver.outputs.version }}.img.xz)
 
-            **SHA-256:** [checksum file](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-${{ steps.ver.outputs.version }}.img.xz.sha256)
+            **SHA-256:** [checksum file](${{ steps.download_base.outputs.url }}/compa-os-${{ steps.ver.outputs.version }}.img.xz.sha256)
 
             ### Install
             1. Download the `.img.xz` file above.

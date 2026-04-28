@@ -25,6 +25,20 @@ B2 bucket. You need to give GitHub Actions credentials:
 That's it. Secrets are scoped to this repo and only readable by
 workflow runs.
 
+### Optional: stable pretty download URL
+
+If you want release notes to point at a Cloudflare-backed pretty URL
+instead of the raw B2 hostname, deploy the Worker in
+`cloudflare-worker/` and then set this repo variable:
+
+```bash
+gh variable set COMPA_OS_DOWNLOAD_BASE_URL \
+  --repo macdigi/compa \
+  --body 'https://downloads.example.com'
+```
+
+If the variable is unset, the workflow falls back to the raw B2 URL.
+
 ## Cutting a release
 
 ```bash
@@ -39,7 +53,7 @@ which:
 - Compresses the image with xz
 - Uploads it to B2 as both `compa-os-1.0.0.img.xz` and
   `compa-os-latest.img.xz` (so the README "latest" link always works)
-- Creates a GitHub Release pointing at the B2 download
+- Creates a GitHub Release pointing at either the pretty download base URL (`COMPA_OS_DOWNLOAD_BASE_URL`) or the raw B2 URL when that variable is unset
 
 ## Manual / dev builds
 
