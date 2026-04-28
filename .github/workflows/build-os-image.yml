@@ -24,7 +24,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # GitHub-hosted native arm64 Linux runner. Bypasses the QEMU
+    # emulation layer that pi-gen needs on x86_64 hosts (and the
+    # binfmt registration tug-of-war between apt's qemu-user-binfmt
+    # and docker/setup-qemu-action). Builds are also ~2x faster
+    # since the chroot runs natively. ~$0.005/min for private repos.
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
 
     steps:
