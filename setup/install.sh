@@ -72,6 +72,7 @@ apt-get install -y --no-install-recommends \
     python3-venv \
     python3-numpy \
     python3-pygame \
+    python3-rtmidi \
     libsdl2-2.0-0 \
     libsdl2-mixer-2.0-0 \
     libsdl2-image-2.0-0 \
@@ -128,7 +129,6 @@ sudo -u "${COMPA_USER}" "${COMPA_DIR}/venv/bin/pip" install \
     --quiet --disable-pip-version-check \
     sounddevice \
     soundfile \
-    python-rtmidi \
     pyusb \
     evdev
 ok "Python packages installed"
