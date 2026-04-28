@@ -56,21 +56,24 @@ jobs:
           df -h /
 
       - name: Install pi-gen build dependencies
+        # Match the package set the usimd/pi-gen-action installs on
+        # the runner — minus its custom additions. pi-gen's docker
+        # mode runs the build inside its own container; the host
+        # only needs binfmt-support + qemu-user-binfmt so the kernel
+        # can transparently execute the arm64 binaries the chroot
+        # invokes.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            coreutils quilt parted \
-            qemu-user-static qemu-user-binfmt binfmt-support \
-            debootstrap zerofree zip dosfstools libcap2-bin \
-            grep rsync xz-utils file git curl bc qemu-utils \
-            kpartx gpg pigz arch-test \
+            binfmt-support quilt parted coreutils qemu-user-binfmt \
+            debootstrap zerofree zip dosfstools e2fsprogs libcap2-bin \
+            libarchive-tools grep rsync xz-utils curl xxd file git \
+            kmod bc gpg pigz arch-test \
             >/dev/null
-          # binfmt-support requires the kernel module + registration
-          # so qemu can transparently run aarch64 binaries.
-          sudo systemctl restart systemd-binfmt
-          # Sanity check: qemu-aarch64 is what pi-gen invokes when it
-          # chroots into the arm64 rootfs.
-          which qemu-aarch64-static qemu-aarch64 || true
+          # Make sure the binfmt registrations are loaded so the
+          # docker chroot can run aarch64 binaries.
+          sudo systemctl restart systemd-binfmt || true
+          ls /proc/sys/fs/binfmt_misc/qemu-aarch64* 2>&1 || true
 
       - name: Clone pi-gen (arm64 branch)
         run: |
