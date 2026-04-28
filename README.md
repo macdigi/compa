@@ -359,7 +359,7 @@ Tap a device card and Compa opens a full-screen workspace with a live oscillosco
 
 ### Ableton Push 2 Display
 
-The Push 2's 960×160 RGB display, driven directly from the Pi. Header shows the focused device pill, BPM (or held-note overlay in keys mode), the COMPA logo, and a mode-specific status line. The middle band is a live oscilloscope tinted with the device color, flanked by L/R level meters. The bottom row labels the eight active encoders.
+The Push 2's 960×160 RGB display, driven directly from the Pi. Header shows the focused device pill, BPM (or held-note overlay in keys mode), the COMPA logo, and a mode-specific status line. The middle band is a live oscilloscope tinted with the device color, flanked by L/R level meters. Pattern mode swaps the body for a sequencer overview — tracks × visible-step grid showing the whole pattern shape at the current zoom, with the active 8-pad / 8-step focus window outlined.
 
 **Control mode** — per-device pad layouts cycled by the Layout button:
 
@@ -372,7 +372,13 @@ The Push 2's 960×160 RGB display, driven directly from the Pi. Header shows the
   <img src="docs/screenshots/push2_SP-404_control_quad.png" alt="Push 2 — SP-404 Control (quadrants)" width="49%">
 </p>
 
-**Keys / Pattern modes** — chromatic keyboard with held-note overlay, combined pattern launcher + step sequencer:
+**Dynamic effect labels** — when an effect is loaded on the SP-404, encoders 1-6 relabel to that effect's actual parameters (Length / Speed / Loop SW for DJFX Looper, Time / Feedback / Send / L Damp F / H Damp F / Mode for Ko-Da-Ma, etc.) with values formatted in the SP's own units (Hz / dB / sec / sync divs / ON/OFF):
+
+<p align="center">
+  <img src="docs/screenshots/push2_SP-404_control_active_fx.png" alt="Push 2 — SP-404 Control with active effect" width="100%">
+</p>
+
+**Keys / Pattern modes** — chromatic keyboard with held-note overlay, overlay sequencer with full-pattern overview:
 
 <p align="center">
   <img src="docs/screenshots/push2_P-6_keys.png" alt="Push 2 — P-6 Keys" width="49%">
@@ -381,6 +387,12 @@ The Push 2's 960×160 RGB display, driven directly from the Pi. Header shows the
 <p align="center">
   <img src="docs/screenshots/push2_SP-404_keys.png" alt="Push 2 — SP-404 Keys" width="49%">
   <img src="docs/screenshots/push2_SP-404_pattern.png" alt="Push 2 — SP-404 Pattern" width="49%">
+</p>
+
+The **New** button uses a two-press confirm so an accidental tap can't wipe a take in progress — first press lights the button red and pops a centered prompt with a 3-second countdown:
+
+<p align="center">
+  <img src="docs/screenshots/push2_pattern_new_confirm.png" alt="Push 2 — Pattern Clear confirm overlay" width="100%">
 </p>
 
 **SP-404 DJ + Looper modes** — DJ action grid with live crossfade readout, looper action layout:
