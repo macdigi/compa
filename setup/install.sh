@@ -79,6 +79,8 @@ apt-get install -y --no-install-recommends \
     libportaudio2 \
     libsndfile1 \
     libusb-1.0-0 \
+    libasound2-dev \
+    pkg-config \
     ffmpeg \
     libts-bin \
     sshfs \
