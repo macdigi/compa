@@ -49,11 +49,28 @@ git push origin v1.0.0
 
 That's it. The push triggers `.github/workflows/build-os-image.yml`,
 which:
-- Builds Pi OS Lite + Compa via `pi-gen` (~30-45 min)
+- Builds Pi OS Lite + Compa via `pi-gen` (~30 min on the native arm64 runner)
 - Compresses the image with xz
 - Uploads it to B2 as both `compa-os-1.0.0.img.xz` and
-  `compa-os-latest.img.xz` (so the README "latest" link always works)
-- Creates a GitHub Release pointing at either the pretty download base URL (`COMPA_OS_DOWNLOAD_BASE_URL`) or the raw B2 URL when that variable is unset
+  `compa-os-latest.img.xz` (so the public download flow always
+  resolves to the newest build)
+- Creates a GitHub Release pointing at either the pretty download
+  base URL (`COMPA_OS_DOWNLOAD_BASE_URL`) or the raw B2 URL when
+  that variable is unset
+
+## How users actually download
+
+Public-facing downloads go through **[raredata.net/compa](https://raredata.net/compa#download)**:
+producer drops their email → Resend fires a 24-hour B2 presigned URL →
+Brevo records the contact in the "Compa OS downloads" list (id 15) for
+release announcements. The unauthed B2 URL is *not* the user-facing
+link — it's the build target only. Source for the email-gated flow
+lives in [`raredata-net-site`](https://github.com/macdigi/raredata-net-site)
+under `app/api/compa/download/route.ts` + `lib/b2Download.ts`.
+
+If the public URL ever needs to be moved (off raredata.net, to a
+Cloudflare worker, etc.), the only thing the compa repo needs to know
+about is `README.md` line ~500 — that's the single user-facing link.
 
 ## Manual / dev builds
 
@@ -61,16 +78,19 @@ Use the workflow's "Run workflow" button on the Actions page if you
 want to build off `main` without cutting a tag. Set the version input
 to something like `dev-2026-04-28` so the artifact has a sensible
 filename. No GitHub Release is created for manual builds — the
-artifact still goes to B2 under that filename.
+artifact still goes to B2 under that filename, and `compa-os-latest.img.xz`
+gets overwritten with the dev build (so the email-gated download
+will hand out the dev build until the next release run).
 
-## Quick verification of an uploaded image
+## Quick verification of an uploaded image (sysadmin path)
+
+The `.sha256` sidecar stays unauthenticated on B2 — small, no PII —
+so you can curl it directly without going through the email flow:
 
 ```bash
-# Download
-curl -sLO https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-latest.img.xz
 curl -sLO https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-latest.img.xz.sha256
-
-# Verify
+# Then download the image via raredata.net/compa, save next to the
+# .sha256 file with the matching name, and:
 sha256sum -c compa-os-latest.img.xz.sha256
 ```
 

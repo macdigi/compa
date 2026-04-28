@@ -496,14 +496,14 @@ To flash Raspberry Pi OS Lite first:
 
 For producers who want zero terminal time. Download a pre-baked SD card image with Compa already installed and configured to boot straight into the touchscreen UI:
 
-1. Download the latest image:
-   - Always-current: **[compa-os-latest.img.xz](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-latest.img.xz)** ([sha256](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-latest.img.xz.sha256))
+1. Get the image:
+   - **[Download Compa OS at raredata.net/compa](https://raredata.net/compa#download)** — drop your email, get a 24-hour signed link in your inbox. We'll add you to the Compa list so you hear about new device support and big releases (no spam, unsubscribe in every email).
    - Specific version: see the [Releases page](https://github.com/macdigi/compa/releases/latest)
 2. Open **Raspberry Pi Imager** → Choose OS → "Use custom" → select the `.img.xz` file
 3. Choose your SD card → Write
 4. Insert SD card into Pi, plug in your sampler, power on. Compa boots straight up.
 
-> *The Compa OS image is built from the same `install.sh` above — both paths end at the same place. Image is rebuilt + uploaded to B2 automatically by the [Build Compa OS image](https://github.com/macdigi/compa/actions/workflows/build-os-image.yml) workflow whenever a `v*` tag is pushed.*
+> *The Compa OS image is built from the same `install.sh` above — both paths end at the same place. Image is rebuilt and re-uploaded automatically by the [Build Compa OS image](https://github.com/macdigi/compa/actions/workflows/build-os-image.yml) workflow whenever a `v*` tag is pushed.*
 
 ### Samba Share (optional)
 
