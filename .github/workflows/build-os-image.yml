@@ -56,24 +56,32 @@ jobs:
           df -h /
 
       - name: Install pi-gen build dependencies
-        # Match the package set the usimd/pi-gen-action installs on
-        # the runner — minus its custom additions. pi-gen's docker
-        # mode runs the build inside its own container; the host
-        # only needs binfmt-support + qemu-user-binfmt so the kernel
-        # can transparently execute the arm64 binaries the chroot
-        # invokes.
+        # pi-gen's docker mode runs the build inside its own
+        # container; the host only needs the listed apt packages.
+        # qemu binfmt registration is handled by the next step
+        # (docker/setup-qemu-action) — that one is more reliable on
+        # GitHub runners than relying on systemd-binfmt.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            binfmt-support quilt parted coreutils qemu-user-binfmt \
+            binfmt-support quilt parted coreutils \
             debootstrap zerofree zip dosfstools e2fsprogs libcap2-bin \
             libarchive-tools grep rsync xz-utils curl xxd file git \
             kmod bc gpg pigz arch-test \
             >/dev/null
-          # Make sure the binfmt registrations are loaded so the
-          # docker chroot can run aarch64 binaries.
-          sudo systemctl restart systemd-binfmt || true
+
+      - name: Register qemu binfmt handlers (aarch64 + arm)
+        # Uses tonistiigi/binfmt under the hood to register cross-arch
+        # handlers in the kernel's binfmt_misc. Without this, pi-gen's
+        # `arch-test arm64` check inside docker fails with
+        # "arm64: not supported on this machine/kernel".
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+      - name: Verify binfmt
+        run: |
           ls /proc/sys/fs/binfmt_misc/qemu-aarch64* 2>&1 || true
+          arch-test arm64 || echo "arch-test still says no — relying on docker"
 
       - name: Clone pi-gen (arm64 branch)
         run: |
