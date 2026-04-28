@@ -101,11 +101,19 @@ jobs:
           rm -f pi-gen/stage2/EXPORT_IMAGE pi-gen/stage2/EXPORT_NOOBS
 
       - name: Stage Compa layer
+        # 00-run.sh references ${BASE_DIR}/setup/install.sh (and the
+        # udev rule) — BASE_DIR is /pi-gen inside pi-gen's chroot.
+        # Mirror the source setup/ layout so those paths resolve.
         run: |
+          mkdir -p pi-gen/setup
+          cp compa-src/setup/install.sh pi-gen/setup/install.sh
+          cp compa-src/setup/50-ableton-push-2.rules \
+             pi-gen/setup/50-ableton-push-2.rules
           cp -r compa-src/setup/pi-gen-stage pi-gen/stage-compa
-          chmod +x pi-gen/stage-compa/prerun.sh \
+          chmod +x pi-gen/setup/install.sh \
+                   pi-gen/stage-compa/prerun.sh \
                    pi-gen/stage-compa/00-compa/00-run.sh
-          ls -la pi-gen/stage-compa/
+          ls -la pi-gen/setup/ pi-gen/stage-compa/
 
       - name: Write pi-gen config
         run: |
