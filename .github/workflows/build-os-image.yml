@@ -181,32 +181,37 @@ jobs:
           echo "filename=${FRIENDLY}" >> "$GITHUB_OUTPUT"
           echo "sha256_filename=${FRIENDLY}.sha256" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to Backblaze B2
+      - name: Upload to Backblaze B2 (S3-compatible API)
+        # The native B2 CLI's `b2 account authorize` implicitly calls
+        # listBuckets — which our bucket-scoped application key
+        # explicitly cannot do. B2's S3-compatible API authenticates
+        # per-request with no list-style preflight, so it works fine
+        # with a key restricted to a single bucket. The public download
+        # URL stays at f004.backblazeb2.com/file/<bucket>/<key>.
         env:
-          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
-          B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY }}
+          AWS_DEFAULT_REGION:    us-west-004
+          B2_BUCKET:             compa-os-downloads
+          B2_ENDPOINT:           https://s3.us-west-004.backblazeb2.com
         run: |
-          if [[ -z "${B2_KEY_ID}" || -z "${B2_APP_KEY}" ]]; then
+          if [[ -z "${AWS_ACCESS_KEY_ID}" || -z "${AWS_SECRET_ACCESS_KEY}" ]]; then
             echo "::error::B2_KEY_ID / B2_APP_KEY secrets are not configured."
             exit 1
           fi
-          pip install --quiet b2
-          export B2_APPLICATION_KEY_ID="${B2_KEY_ID}"
-          export B2_APPLICATION_KEY="${B2_APP_KEY}"
-          b2 account authorize "${B2_KEY_ID}" "${B2_APP_KEY}"
-          b2 file upload --no-progress compa-os-downloads \
-            "${{ steps.artifact.outputs.filename }}" \
-            "${{ steps.artifact.outputs.filename }}"
-          b2 file upload --no-progress compa-os-downloads \
-            "${{ steps.artifact.outputs.sha256_filename }}" \
-            "${{ steps.artifact.outputs.sha256_filename }}"
+          IMG="${{ steps.artifact.outputs.filename }}"
+          SHA="${{ steps.artifact.outputs.sha256_filename }}"
+
+          aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
+            "${IMG}" "s3://${B2_BUCKET}/${IMG}"
+          aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
+            "${SHA}" "s3://${B2_BUCKET}/${SHA}"
+
           # Always-current copies under the "latest" name.
-          b2 file upload --no-progress compa-os-downloads \
-            "${{ steps.artifact.outputs.filename }}" \
-            "compa-os-latest.img.xz"
-          b2 file upload --no-progress compa-os-downloads \
-            "${{ steps.artifact.outputs.sha256_filename }}" \
-            "compa-os-latest.img.xz.sha256"
+          aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
+            "${IMG}" "s3://${B2_BUCKET}/compa-os-latest.img.xz"
+          aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
+            "${SHA}" "s3://${B2_BUCKET}/compa-os-latest.img.xz.sha256"
 
       - name: Create GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
