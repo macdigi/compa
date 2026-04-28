@@ -59,11 +59,18 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            coreutils quilt parted qemu-user-static \
+            coreutils quilt parted \
+            qemu-user-static qemu-user-binfmt binfmt-support \
             debootstrap zerofree zip dosfstools libcap2-bin \
             grep rsync xz-utils file git curl bc qemu-utils \
             kpartx gpg pigz arch-test \
             >/dev/null
+          # binfmt-support requires the kernel module + registration
+          # so qemu can transparently run aarch64 binaries.
+          sudo systemctl restart systemd-binfmt
+          # Sanity check: qemu-aarch64 is what pi-gen invokes when it
+          # chroots into the arm64 rootfs.
+          which qemu-aarch64-static qemu-aarch64 || true
 
       - name: Clone pi-gen (arm64 branch)
         run: |
