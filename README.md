@@ -496,12 +496,14 @@ To flash Raspberry Pi OS Lite first:
 
 For producers who want zero terminal time. Download a pre-baked SD card image with Compa already installed and configured to boot straight into the touchscreen UI:
 
-1. Download `compa-os-latest.img.xz` from [the latest release](https://github.com/macdigi/compa/releases/latest) (or via [raredata.net/compa](https://raredata.net/compa))
-2. Open Raspberry Pi Imager → Choose OS → "Use custom" → select the `.img.xz` file
+1. Download the latest image:
+   - Always-current: **[compa-os-latest.img.xz](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-latest.img.xz)** ([sha256](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-latest.img.xz.sha256))
+   - Specific version: see the [Releases page](https://github.com/macdigi/compa/releases/latest)
+2. Open **Raspberry Pi Imager** → Choose OS → "Use custom" → select the `.img.xz` file
 3. Choose your SD card → Write
 4. Insert SD card into Pi, plug in your sampler, power on. Compa boots straight up.
 
-> *Compa OS image is built from the same `install.sh` above — both paths end at the same place.*
+> *The Compa OS image is built from the same `install.sh` above — both paths end at the same place. Image is rebuilt + uploaded to B2 automatically by the [Build Compa OS image](https://github.com/macdigi/compa/actions/workflows/build-os-image.yml) workflow whenever a `v*` tag is pushed.*
 
 ### Samba Share (optional)
 

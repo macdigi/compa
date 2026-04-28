@@ -1,0 +1,133 @@
+name: Build Compa OS image
+
+# Build the bootable Compa OS .img.xz and publish it to the
+# compa-os-downloads B2 bucket + a GitHub Release.
+#
+# Trigger manually from the Actions tab (Run workflow), OR push a
+# git tag like `v1.0` and the build kicks off automatically.
+#
+# Requires two repo secrets (Settings → Secrets and variables →
+# Actions):
+#   B2_KEY_ID   — Backblaze B2 application key ID
+#   B2_APP_KEY  — Backblaze B2 application key
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for this build (e.g. 1.0.0). Used in the filename.'
+        required: true
+        default: 'dev'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: compa-src
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version || 'dev' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Compa OS image (pi-gen)
+        uses: usimd/pi-gen-action@v1
+        with:
+          # Fork-and-customize Pi OS Lite 64-bit (stages 0+1+2). Stage
+          # 3+ are desktop, we don't need them.
+          stage-list: stage0 stage1 stage2 ${{ github.workspace }}/compa-src/setup/pi-gen-stage
+          image-name: compa-os-${{ steps.ver.outputs.version }}
+          enable-ssh: '1'
+          username: pi
+          # We don't bake a default password into the image — first-
+          # boot wizard prompts for one. Use 'compa' as a placeholder
+          # so pi-gen passes its required-field check.
+          password: compa
+          hostname: compa
+          locale: en_US.UTF-8
+          timezone: Etc/UTC
+          keyboard-keymap: us
+          release: bookworm
+          compression: xz
+          compression-level: '6'
+          verbose-output: 'false'
+
+      - name: Find image artifact
+        id: artifact
+        run: |
+          IMG=$(find . -name 'image_*-compa-os-*.img.xz' | head -1)
+          if [[ -z "$IMG" ]]; then
+            echo "No image produced — check pi-gen logs above" >&2
+            exit 1
+          fi
+          NAME=$(basename "$IMG")
+          # Friendly name — drop the pi-gen image_ prefix.
+          FRIENDLY="compa-os-${{ steps.ver.outputs.version }}.img.xz"
+          mv "$IMG" "./${FRIENDLY}"
+          sha256sum "./${FRIENDLY}" > "./${FRIENDLY}.sha256"
+          ls -lh "./${FRIENDLY}" "./${FRIENDLY}.sha256"
+          echo "filename=${FRIENDLY}" >> "$GITHUB_OUTPUT"
+          echo "sha256_filename=${FRIENDLY}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to Backblaze B2
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+        run: |
+          if [[ -z "${B2_KEY_ID}" || -z "${B2_APP_KEY}" ]]; then
+            echo "::error::B2_KEY_ID / B2_APP_KEY secrets are not configured."
+            echo "Set them in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          pip install --quiet b2
+          export B2_APPLICATION_KEY_ID="${B2_KEY_ID}"
+          export B2_APPLICATION_KEY="${B2_APP_KEY}"
+          b2 account authorize "${B2_KEY_ID}" "${B2_APP_KEY}"
+          b2 file upload --no-progress compa-os-downloads \
+            "${{ steps.artifact.outputs.filename }}" \
+            "${{ steps.artifact.outputs.filename }}"
+          b2 file upload --no-progress compa-os-downloads \
+            "${{ steps.artifact.outputs.sha256_filename }}" \
+            "${{ steps.artifact.outputs.sha256_filename }}"
+          # Upload again as `compa-os-latest.img.xz` so the README's
+          # "latest" link always works without needing to update.
+          b2 file upload --no-progress compa-os-downloads \
+            "${{ steps.artifact.outputs.filename }}" \
+            "compa-os-latest.img.xz"
+          b2 file upload --no-progress compa-os-downloads \
+            "${{ steps.artifact.outputs.sha256_filename }}" \
+            "compa-os-latest.img.xz.sha256"
+
+      - name: Create GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Compa ${{ steps.ver.outputs.version }}
+          body: |
+            ## Compa OS image
+
+            **Download:** [compa-os-${{ steps.ver.outputs.version }}.img.xz](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-${{ steps.ver.outputs.version }}.img.xz) (Backblaze B2)
+
+            **SHA-256:** [checksum file](https://f004.backblazeb2.com/file/compa-os-downloads/compa-os-${{ steps.ver.outputs.version }}.img.xz.sha256)
+
+            ### Install
+            1. Download the `.img.xz` file above.
+            2. Open Raspberry Pi Imager → Choose OS → "Use custom" → select the file.
+            3. Choose your SD card → Write.
+            4. Insert SD card into your Pi, plug in your sampler, power on.
+
+            See the [Quick Start in the README](https://github.com/macdigi/compa#install) for full details.
+          draft: false
+          prerelease: false

@@ -26,6 +26,22 @@ COMPA_BRANCH="${COMPA_BRANCH:-main}"
 COMPA_USER="${COMPA_USER:-pi}"
 COMPA_DIR="${COMPA_DIR:-/home/${COMPA_USER}/compa}"
 
+# Chroot mode — when set to 1 we skip every "live" systemd action
+# (start/restart, udevadm trigger, systemctl is-active checks).
+# Used by pi-gen during the Compa OS image build, where there's no
+# running init to talk to. Service is still enabled so it starts on
+# first real boot. Detected automatically if /proc/1/comm isn't
+# systemd, but can also be forced via env var.
+COMPA_IN_CHROOT="${COMPA_IN_CHROOT:-}"
+if [[ -z "$COMPA_IN_CHROOT" ]]; then
+    if [[ ! -d /run/systemd/system ]] || \
+       ! grep -qs '^systemd' /proc/1/comm 2>/dev/null; then
+        COMPA_IN_CHROOT=1
+    else
+        COMPA_IN_CHROOT=0
+    fi
+fi
+
 # ── Helpers ─────────────────────────────────────────────────────────
 log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -166,9 +182,13 @@ cat > /etc/udev/rules.d/99-p6-automount.rules <<'EOF'
 ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ATTRS{idVendor}=="0582", ATTRS{idProduct}=="0300", RUN+="/bin/mkdir -p /media/pi/P-6", RUN+="/bin/mount /dev/%k /media/pi/P-6"
 ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z]", RUN+="/bin/umount /media/pi/P-6"
 EOF
-udevadm control --reload-rules
-udevadm trigger
-ok "udev rules reloaded"
+if [[ "$COMPA_IN_CHROOT" != "1" ]]; then
+    udevadm control --reload-rules
+    udevadm trigger
+    ok "udev rules reloaded"
+else
+    ok "udev rules installed (will load on first boot)"
+fi
 
 # ── Phase 8: systemd service ────────────────────────────────────────
 log "Installing systemd service"
@@ -207,16 +227,23 @@ SupplementaryGroups=audio video input render
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable compa.service >/dev/null 2>&1
-ok "compa.service enabled"
-
-# Restart if already running, otherwise start fresh
-if systemctl is-active --quiet compa.service; then
-    systemctl restart compa.service
-    ok "compa.service restarted"
+if [[ "$COMPA_IN_CHROOT" == "1" ]]; then
+    # Inside pi-gen build chroot — no live systemd. Just create the
+    # symlink so the service starts on first boot of the image.
+    ln -sf /etc/systemd/system/compa.service \
+        /etc/systemd/system/multi-user.target.wants/compa.service
+    ok "compa.service enabled (will start on first boot)"
 else
-    systemctl start compa.service || warn "compa.service start deferred — reboot to pick up GPU/audio config changes"
+    systemctl daemon-reload
+    systemctl enable compa.service >/dev/null 2>&1
+    ok "compa.service enabled"
+    if systemctl is-active --quiet compa.service; then
+        systemctl restart compa.service
+        ok "compa.service restarted"
+    else
+        systemctl start compa.service \
+            || warn "compa.service start deferred — reboot to pick up GPU/audio config changes"
+    fi
 fi
 
 # ── Done ────────────────────────────────────────────────────────────
