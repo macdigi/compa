@@ -24,11 +24,9 @@ on:
 
 jobs:
   build:
-    # GitHub-hosted native arm64 Linux runner. Bypasses the QEMU
-    # emulation layer that pi-gen needs on x86_64 hosts (and the
-    # binfmt registration tug-of-war between apt's qemu-user-binfmt
-    # and docker/setup-qemu-action). Builds are also ~2x faster
-    # since the chroot runs natively. ~$0.005/min for private repos.
+    # Native arm64 runner — pi-gen's chroot runs without QEMU
+    # translation, ~2x faster than emulating on an x86 host. Costs
+    # ~$0.005/min for private repos (~$0.15 per 30-min build).
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
 
@@ -71,33 +69,14 @@ jobs:
           df -h /
 
       - name: Install pi-gen build dependencies
-        # pi-gen's docker mode bind-mounts /usr/bin/qemu-aarch64 from
-        # the host into the build container, so we need the actual
-        # qemu binary on the host (qemu-user-binfmt). The kernel-side
-        # binfmt registration is handled by the next step
-        # (docker/setup-qemu-action).
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            binfmt-support quilt parted coreutils qemu-user-binfmt \
+            quilt parted coreutils \
             debootstrap zerofree zip dosfstools e2fsprogs libcap2-bin \
             libarchive-tools grep rsync xz-utils curl xxd file git \
             kmod bc gpg pigz arch-test \
             >/dev/null
-          which qemu-aarch64 qemu-aarch64-static || true
-
-      - name: Register qemu binfmt handlers (aarch64 + arm)
-        # Uses tonistiigi/binfmt under the hood to register cross-arch
-        # handlers in the kernel's binfmt_misc. Without this, pi-gen's
-        # `arch-test arm64` check inside docker fails with
-        # "arm64: not supported on this machine/kernel".
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,arm
-      - name: Verify binfmt
-        run: |
-          ls /proc/sys/fs/binfmt_misc/qemu-aarch64* 2>&1 || true
-          arch-test arm64 || echo "arch-test still says no — relying on docker"
 
       - name: Clone pi-gen (arm64 branch)
         run: |
