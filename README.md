@@ -473,39 +473,35 @@ Every screen, feature, and workflow documented in the help system — searchable
 
 ### Install
 
+**Two paths — pick the one that fits.**
+
+#### Option A — One-command install (you already have a Pi)
+
+If you have a Raspberry Pi running fresh **Raspberry Pi OS Lite (64-bit)**, the entire install is one line:
+
 ```bash
-# 1. Flash Raspberry Pi OS Lite (64-bit) to SD card
-#    Use Raspberry Pi Imager. Set username: pi, enable SSH, configure WiFi.
-
-# 2. SSH in
 ssh pi@compa.local
-
-# 3. Clone the repo
-git clone https://github.com/macdigi/compa.git
-cd compa
-
-# 4. Create virtual environment (system-site-packages for pygame/numpy)
-python3 -m venv venv --system-site-packages
-source venv/bin/activate
-
-# 5. Install Python dependencies
-pip install pygame sounddevice soundfile numpy python-rtmidi evdev
-
-# 6. Install system packages
-sudo apt update
-sudo apt install -y ffmpeg libts-bin samba
-
-# 7. Install fonts (bundled in docs/fonts/)
-sudo mkdir -p /usr/local/share/fonts
-sudo cp docs/fonts/*.ttf /usr/local/share/fonts/
-sudo fc-cache -f
-
-# 8. Set up the systemd service
-sudo cp setup/compa.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable compa
-sudo systemctl start compa
+curl -sSL https://raw.githubusercontent.com/macdigi/compa/main/setup/install.sh | sudo bash
+sudo reboot
 ```
+
+The installer pulls all dependencies, clones the repo to `/home/pi/compa`, sets up the Python venv, installs fonts + udev rules + the systemd autostart service. It's idempotent — re-run anytime to update.
+
+To flash Raspberry Pi OS Lite first:
+1. Download **Raspberry Pi Imager** from [raspberrypi.com/software](https://www.raspberrypi.com/software/)
+2. Choose Pi OS Lite (64-bit), set username `pi`, enable SSH, configure WiFi
+3. Flash → boot → SSH in → run the install command above
+
+#### Option B — Compa OS image (just flash and go)
+
+For producers who want zero terminal time. Download a pre-baked SD card image with Compa already installed and configured to boot straight into the touchscreen UI:
+
+1. Download `compa-os-latest.img.xz` from [the latest release](https://github.com/macdigi/compa/releases/latest) (or via [raredata.net/compa](https://raredata.net/compa))
+2. Open Raspberry Pi Imager → Choose OS → "Use custom" → select the `.img.xz` file
+3. Choose your SD card → Write
+4. Insert SD card into Pi, plug in your sampler, power on. Compa boots straight up.
+
+> *Compa OS image is built from the same `install.sh` above — both paths end at the same place.*
 
 ### Samba Share (optional)
 

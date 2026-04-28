@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# Compa one-command installer.
+#
+# Turns a fresh Raspberry Pi OS Lite (64-bit) into a Compa appliance:
+#   - Installs all system + Python dependencies
+#   - Clones the repo to /home/pi/compa (or pulls latest if already there)
+#   - Sets up the Python venv + pip packages
+#   - Installs fonts, udev rules, systemd autostart service
+#   - Configures GPU memory split, screen blanking, audio settings
+#
+# Idempotent — re-running the script updates the existing install
+# in place. Used the same way by Path A (manual install on top of
+# Pi OS) and Path B (the Compa OS image's pi-gen build stage).
+#
+# Usage:
+#   curl -sSL https://raw.githubusercontent.com/macdigi/compa/main/setup/install.sh | sudo bash
+#
+# Or after manually cloning the repo:
+#   sudo bash setup/install.sh
+
+set -euo pipefail
+
+# ── Config ──────────────────────────────────────────────────────────
+COMPA_REPO="${COMPA_REPO:-https://github.com/macdigi/compa.git}"
+COMPA_BRANCH="${COMPA_BRANCH:-main}"
+COMPA_USER="${COMPA_USER:-pi}"
+COMPA_DIR="${COMPA_DIR:-/home/${COMPA_USER}/compa}"
+
+# ── Helpers ─────────────────────────────────────────────────────────
+log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+die()  { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+# ── Pre-flight ──────────────────────────────────────────────────────
+[[ "$(id -u)" -eq 0 ]] || die "Must run as root. Try: sudo bash $0"
+
+if ! id -u "$COMPA_USER" >/dev/null 2>&1; then
+    die "User '${COMPA_USER}' does not exist. Create it first or set COMPA_USER=<name>."
+fi
+
+if [[ ! -e /proc/device-tree/model ]] || \
+   ! grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null; then
+    warn "This doesn't look like a Raspberry Pi. Continuing anyway."
+fi
+
+# ── Phase 1: System packages ────────────────────────────────────────
+log "Installing system packages"
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -qq
+apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-numpy \
+    python3-pygame \
+    libsdl2-2.0-0 \
+    libsdl2-mixer-2.0-0 \
+    libsdl2-image-2.0-0 \
+    libsdl2-ttf-2.0-0 \
+    libportaudio2 \
+    libsndfile1 \
+    libusb-1.0-0 \
+    ffmpeg \
+    libts-bin \
+    sshfs \
+    samba \
+    avahi-daemon \
+    git \
+    fonts-dejavu-core \
+    >/dev/null
+ok "System packages installed"
+
+# ── Phase 2: Repo clone or pull ─────────────────────────────────────
+log "Setting up repository at ${COMPA_DIR}"
+if [[ -d "${COMPA_DIR}/.git" ]]; then
+    sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" fetch --quiet origin
+    sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" reset --hard "origin/${COMPA_BRANCH}" >/dev/null
+    ok "Updated existing checkout to origin/${COMPA_BRANCH}"
+else
+    rm -rf "${COMPA_DIR}"
+    sudo -u "${COMPA_USER}" git clone --branch "${COMPA_BRANCH}" --depth 1 \
+        "${COMPA_REPO}" "${COMPA_DIR}" >/dev/null
+    ok "Cloned ${COMPA_REPO} → ${COMPA_DIR}"
+fi
+chown -R "${COMPA_USER}:${COMPA_USER}" "${COMPA_DIR}"
+
+# ── Phase 3: Python venv + pip packages ─────────────────────────────
+log "Creating Python virtual environment"
+if [[ ! -x "${COMPA_DIR}/venv/bin/python" ]]; then
+    sudo -u "${COMPA_USER}" python3 -m venv \
+        "${COMPA_DIR}/venv" --system-site-packages
+    ok "Created venv at ${COMPA_DIR}/venv"
+else
+    ok "Existing venv kept"
+fi
+
+log "Installing Python packages (this can take a few minutes)"
+sudo -u "${COMPA_USER}" "${COMPA_DIR}/venv/bin/pip" install \
+    --quiet --disable-pip-version-check --upgrade pip
+sudo -u "${COMPA_USER}" "${COMPA_DIR}/venv/bin/pip" install \
+    --quiet --disable-pip-version-check \
+    sounddevice \
+    soundfile \
+    python-rtmidi \
+    pyusb \
+    evdev
+ok "Python packages installed"
+
+# ── Phase 4: Fonts ──────────────────────────────────────────────────
+log "Installing bundled fonts"
+mkdir -p /usr/local/share/fonts/compa
+if compgen -G "${COMPA_DIR}/docs/fonts/*.ttf" > /dev/null; then
+    cp "${COMPA_DIR}"/docs/fonts/*.ttf /usr/local/share/fonts/compa/
+    fc-cache -f >/dev/null
+    ok "Fonts installed and cache rebuilt"
+else
+    warn "No bundled fonts found in docs/fonts/ — using system fonts only"
+fi
+
+# ── Phase 5: Pi config (GPU split, no blanking, audio) ──────────────
+log "Configuring Pi boot/runtime settings"
+CONFIG_TXT=/boot/firmware/config.txt
+[[ -f "$CONFIG_TXT" ]] || CONFIG_TXT=/boot/config.txt
+CMDLINE_TXT=/boot/firmware/cmdline.txt
+[[ -f "$CMDLINE_TXT" ]] || CMDLINE_TXT=/boot/cmdline.txt
+
+# GPU memory split — 64 MB is plenty for the touchscreen UI
+if ! grep -q "^gpu_mem=" "$CONFIG_TXT"; then
+    echo "gpu_mem=64" >> "$CONFIG_TXT"
+    ok "GPU memory split set to 64 MB"
+fi
+
+# Disable onboard audio to free a card slot for the USB devices
+if grep -q "^dtparam=audio=on" "$CONFIG_TXT"; then
+    sed -i 's/^dtparam=audio=on/dtparam=audio=off/' "$CONFIG_TXT"
+    ok "Onboard audio disabled (USB devices take priority)"
+fi
+
+# Disable console screen blanking so the touchscreen never goes dark
+if [[ -f "$CMDLINE_TXT" ]] && ! grep -q "consoleblank=0" "$CMDLINE_TXT"; then
+    sed -i 's/$/ consoleblank=0/' "$CMDLINE_TXT"
+    ok "Screen blanking disabled"
+fi
+
+# ── Phase 6: Audio realtime priority ────────────────────────────────
+log "Configuring audio realtime priority"
+cat > /etc/security/limits.d/audio.conf <<'EOF'
+@audio   -  rtprio     95
+@audio   -  memlock    unlimited
+@audio   -  nice       -19
+EOF
+usermod -a -G audio,video,input,render "${COMPA_USER}"
+ok "Audio limits + user groups set"
+
+# ── Phase 7: udev rules (Push 2 + P-6 USB) ──────────────────────────
+log "Installing udev rules"
+if [[ -f "${COMPA_DIR}/setup/50-ableton-push-2.rules" ]]; then
+    cp "${COMPA_DIR}/setup/50-ableton-push-2.rules" \
+        /etc/udev/rules.d/50-ableton-push-2.rules
+    ok "Push 2 USB rule installed"
+fi
+cat > /etc/udev/rules.d/99-p6-automount.rules <<'EOF'
+# Auto-mount Roland P-6 USB storage
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ATTRS{idVendor}=="0582", ATTRS{idProduct}=="0300", RUN+="/bin/mkdir -p /media/pi/P-6", RUN+="/bin/mount /dev/%k /media/pi/P-6"
+ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z]", RUN+="/bin/umount /media/pi/P-6"
+EOF
+udevadm control --reload-rules
+udevadm trigger
+ok "udev rules reloaded"
+
+# ── Phase 8: systemd service ────────────────────────────────────────
+log "Installing systemd service"
+cat > /etc/systemd/system/compa.service <<EOF
+[Unit]
+Description=Compa — touchscreen companion for music hardware
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${COMPA_USER}
+Group=${COMPA_USER}
+WorkingDirectory=${COMPA_DIR}
+ExecStart=${COMPA_DIR}/venv/bin/python ${COMPA_DIR}/ui/p6_app.py
+Restart=always
+RestartSec=3
+
+# Audio realtime priority
+Nice=-10
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+
+# Display: KMSDRM for direct framebuffer rendering
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_FBDEV=/dev/fb0
+Environment=SDL_MOUSE_RELATIVE=0
+Environment=SDL_INPUT_LINUX_KEEP_KBD=1
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/${COMPA_USER}
+
+# Audio + USB device access
+SupplementaryGroups=audio video input render
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable compa.service >/dev/null 2>&1
+ok "compa.service enabled"
+
+# Restart if already running, otherwise start fresh
+if systemctl is-active --quiet compa.service; then
+    systemctl restart compa.service
+    ok "compa.service restarted"
+else
+    systemctl start compa.service || warn "compa.service start deferred — reboot to pick up GPU/audio config changes"
+fi
+
+# ── Done ────────────────────────────────────────────────────────────
+log "Compa install complete"
+cat <<EOF
+
+  Repo:    ${COMPA_DIR}
+  User:    ${COMPA_USER}
+  Service: compa.service
+
+  Manual controls:
+    sudo systemctl status compa
+    journalctl -u compa -f
+    sudo systemctl restart compa
+
+  If you just installed for the first time, REBOOT now so the
+  GPU memory split + onboard audio + screen blanking changes
+  take effect:
+
+    sudo reboot
+
+EOF
