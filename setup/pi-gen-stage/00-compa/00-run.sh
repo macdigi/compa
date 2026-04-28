@@ -28,6 +28,9 @@ install -m 0755 -o root -g root \
 install -m 0644 -o root -g root \
     "${BASE_DIR}/setup/50-ableton-push-2.rules" \
     "${ROOTFS_DIR}/opt/compa-installer/50-ableton-push-2.rules"
+install -d "${ROOTFS_DIR}/opt/compa-installer/source"
+cp -a "${BASE_DIR}/setup/compa-src/." \
+    "${ROOTFS_DIR}/opt/compa-installer/source/"
 
 echo "=== rootfs /opt/compa-installer after staging ==="
 ls -la "${ROOTFS_DIR}/opt/compa-installer/"
@@ -39,6 +42,7 @@ ls -la /opt/compa-installer/
 
 export COMPA_IN_CHROOT=1
 export COMPA_BRANCH=${COMPA_BRANCH:-main}
+export COMPA_SOURCE_DIR=/opt/compa-installer/source
 bash /opt/compa-installer/install.sh
 rm -rf /opt/compa-installer
 EOF

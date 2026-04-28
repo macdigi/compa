@@ -25,6 +25,7 @@ COMPA_REPO="${COMPA_REPO:-https://github.com/macdigi/compa.git}"
 COMPA_BRANCH="${COMPA_BRANCH:-main}"
 COMPA_USER="${COMPA_USER:-pi}"
 COMPA_DIR="${COMPA_DIR:-/home/${COMPA_USER}/compa}"
+COMPA_SOURCE_DIR="${COMPA_SOURCE_DIR:-}"
 
 # Chroot mode — when set to 1 we skip every "live" systemd action
 # (start/restart, udevadm trigger, systemctl is-active checks).
@@ -90,7 +91,13 @@ ok "System packages installed"
 
 # ── Phase 2: Repo clone or pull ─────────────────────────────────────
 log "Setting up repository at ${COMPA_DIR}"
-if [[ -d "${COMPA_DIR}/.git" ]]; then
+if [[ -n "${COMPA_SOURCE_DIR}" && -d "${COMPA_SOURCE_DIR}" ]]; then
+    rm -rf "${COMPA_DIR}"
+    mkdir -p "${COMPA_DIR}"
+    cp -a "${COMPA_SOURCE_DIR}/." "${COMPA_DIR}/"
+    rm -rf "${COMPA_DIR}/.git" "${COMPA_DIR}/venv"
+    ok "Copied staged source tree → ${COMPA_DIR}"
+elif [[ -d "${COMPA_DIR}/.git" ]]; then
     sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" fetch --quiet origin
     sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" reset --hard "origin/${COMPA_BRANCH}" >/dev/null
     ok "Updated existing checkout to origin/${COMPA_BRANCH}"
