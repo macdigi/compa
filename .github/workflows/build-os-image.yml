@@ -165,6 +165,9 @@ jobs:
       - name: Find image artifact
         id: artifact
         run: |
+          # pi-gen runs in docker as root, so deploy/ artifacts are
+          # root-owned. Reclaim ownership before mv/sha256sum/etc.
+          sudo chown -R $USER:$USER pi-gen/deploy
           IMG=$(find pi-gen/deploy -name '*.img.xz' | head -1)
           if [[ -z "$IMG" ]]; then
             echo "No image produced. Contents of pi-gen/deploy:"
