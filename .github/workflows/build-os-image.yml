@@ -1,7 +1,7 @@
 name: Build Compa OS image
 
-# Build the bootable Compa OS .img.xz and publish it to the
-# compa-os-downloads B2 bucket + a GitHub Release.
+# Build the bootable Compa OS .img.xz directly via pi-gen and publish
+# it to the compa-os-downloads B2 bucket + a GitHub Release.
 #
 # Trigger manually from the Actions tab (Run workflow), OR push a
 # git tag like `v1.0` and the build kicks off automatically.
@@ -25,7 +25,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -42,38 +42,83 @@ jobs:
             echo "version=${{ github.event.inputs.version || 'dev' }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build Compa OS image (pi-gen)
-        uses: usimd/pi-gen-action@v1
-        with:
-          # Fork-and-customize Pi OS Lite 64-bit (stages 0+1+2). Stage
-          # 3+ are desktop, we don't need them.
-          stage-list: stage0 stage1 stage2 ${{ github.workspace }}/compa-src/setup/pi-gen-stage
-          image-name: compa-os-${{ steps.ver.outputs.version }}
-          enable-ssh: '1'
-          username: pi
-          # We don't bake a default password into the image — first-
-          # boot wizard prompts for one. Use 'compa' as a placeholder
-          # so pi-gen passes its required-field check.
-          password: compa
-          hostname: compa
-          locale: en_US.UTF-8
-          timezone: Etc/UTC
-          keyboard-keymap: us
-          release: bookworm
-          compression: xz
-          compression-level: '6'
-          verbose-output: 'false'
+      - name: Free runner disk space
+        # Default GitHub runner has ~14 GB free; pi-gen wants 25-30 GB.
+        # Strip out toolchains and SDKs we won't touch during this run.
+        run: |
+          df -h /
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo apt-get clean
+          df -h /
+
+      - name: Install pi-gen build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            coreutils quilt parted qemu-user-static \
+            debootstrap zerofree zip dosfstools libcap2-bin \
+            grep rsync xz-utils file git curl bc qemu-utils \
+            kpartx gpg pigz arch-test \
+            >/dev/null
+
+      - name: Clone pi-gen (arm64 branch)
+        run: |
+          git clone --depth 1 -b arm64 \
+            https://github.com/RPi-Distro/pi-gen.git pi-gen
+
+      - name: Trim unwanted stages (we only want Pi OS Lite + Compa)
+        run: |
+          rm -rf pi-gen/stage3 pi-gen/stage4 pi-gen/stage5
+          # Don't let stage2 export an image — only our final stage
+          rm -f pi-gen/stage2/EXPORT_IMAGE pi-gen/stage2/EXPORT_NOOBS
+
+      - name: Stage Compa layer
+        run: |
+          cp -r compa-src/setup/pi-gen-stage pi-gen/stage-compa
+          chmod +x pi-gen/stage-compa/prerun.sh \
+                   pi-gen/stage-compa/00-compa/00-run.sh
+          ls -la pi-gen/stage-compa/
+
+      - name: Write pi-gen config
+        run: |
+          cat > pi-gen/config <<EOF
+          IMG_NAME=compa-os-${{ steps.ver.outputs.version }}
+          DEPLOY_COMPRESSION=xz
+          COMPRESSION_LEVEL=6
+          LOCALE_DEFAULT=en_US.UTF-8
+          TARGET_HOSTNAME=compa
+          KEYBOARD_KEYMAP=us
+          KEYBOARD_LAYOUT="English (US)"
+          TIMEZONE_DEFAULT=Etc/UTC
+          FIRST_USER_NAME=pi
+          FIRST_USER_PASS=compa
+          DISABLE_FIRST_BOOT_USER_RENAME=1
+          ENABLE_SSH=1
+          STAGE_LIST="stage0 stage1 stage2 stage-compa"
+          PI_GEN=pi-gen
+          PI_GEN_RELEASE="Compa OS"
+          EOF
+          echo '── config ──'
+          cat pi-gen/config
+
+      - name: Build with pi-gen
+        run: |
+          cd pi-gen
+          sudo ./build-docker.sh
 
       - name: Find image artifact
         id: artifact
         run: |
-          IMG=$(find . -name 'image_*-compa-os-*.img.xz' | head -1)
+          IMG=$(find pi-gen/deploy -name '*.img.xz' | head -1)
           if [[ -z "$IMG" ]]; then
-            echo "No image produced — check pi-gen logs above" >&2
+            echo "No image produced. Contents of pi-gen/deploy:"
+            ls -la pi-gen/deploy/ || true
             exit 1
           fi
-          NAME=$(basename "$IMG")
-          # Friendly name — drop the pi-gen image_ prefix.
           FRIENDLY="compa-os-${{ steps.ver.outputs.version }}.img.xz"
           mv "$IMG" "./${FRIENDLY}"
           sha256sum "./${FRIENDLY}" > "./${FRIENDLY}.sha256"
@@ -88,7 +133,6 @@ jobs:
         run: |
           if [[ -z "${B2_KEY_ID}" || -z "${B2_APP_KEY}" ]]; then
             echo "::error::B2_KEY_ID / B2_APP_KEY secrets are not configured."
-            echo "Set them in Settings → Secrets and variables → Actions."
             exit 1
           fi
           pip install --quiet b2
@@ -101,8 +145,7 @@ jobs:
           b2 file upload --no-progress compa-os-downloads \
             "${{ steps.artifact.outputs.sha256_filename }}" \
             "${{ steps.artifact.outputs.sha256_filename }}"
-          # Upload again as `compa-os-latest.img.xz` so the README's
-          # "latest" link always works without needing to update.
+          # Always-current copies under the "latest" name.
           b2 file upload --no-progress compa-os-downloads \
             "${{ steps.artifact.outputs.filename }}" \
             "compa-os-latest.img.xz"
