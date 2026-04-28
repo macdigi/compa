@@ -764,57 +764,10 @@ class Push2Renderer:
             surf.blit(psurf, (14, y))
             return
         if mode_now == "pattern":
-            cur_pat = 0
-            try:
-                p6 = self.app.p6
-                if p6 is not None:
-                    cur_pat = int(p6.state.active_pattern) + 1
-            except Exception:
-                cur_pat = 0
-            try:
-                total = int(self.app.push2_max_patterns())
-            except Exception:
-                total = 64
-            try:
-                lp = int(self.app.push2_pattern_launch_page)
-                lpc = int(self.app.push2_pattern_launch_page_count())
-            except Exception:
-                lp, lpc = 0, 1
-            try:
-                offset = int(self.app.push2_pattern_step_offset)
-            except Exception:
-                offset = 0
-            launch_first = lp * 8 + 1
-            launch_last = min(launch_first + 7, total)
-            page_seg = f"  ·  {lp + 1}/{lpc}" if lpc > 1 else ""
-            seq = getattr(self.app, "_push2_pattern_sequencer",
-                          lambda: None)()
-            num_steps = (int(getattr(seq, "num_steps", 16))
-                         if seq is not None else 16)
-            num_pads = (int(getattr(seq, "num_pads", 6))
-                        if seq is not None else 6)
-            try:
-                pad_off = int(self.app.push2_pattern_pad_offset)
-            except Exception:
-                pad_off = 0
-            try:
-                act_bank = int(self.app.push2_active_bank())
-            except Exception:
-                act_bank = 0
-            playing = bool(getattr(seq, "playing", False)) if seq else False
-            play_glyph = "▶" if playing else " "
-            pad_seg = (f"  pads {pad_off + 1}-{min(pad_off + 6, num_pads)}/{num_pads}"
-                       if num_pads > 6 else "")
-            seq_text = (f"{play_glyph} steps {offset + 1}-"
-                        f"{min(offset + 8, num_steps)}/{num_steps}{pad_seg}")
-            # Bank letter in the device color so it reads as part of
-            # the same theme as the active bank/pattern pads.
-            bank_letter = chr(ord("A") + act_bank)
-            txt = (f"BANK {bank_letter}  ·  PAT {cur_pat}/{total}  "
-                   f"launch {launch_first}-{launch_last}{page_seg}  ·  "
-                   f"{seq_text}")
-            psurf = self._font_tiny.render(txt, True, dev_color)
-            surf.blit(psurf, (14, y))
+            # Pattern mode header status is now drawn at the bottom of
+            # the sequencer overview body (Bank · Pat · Step · note ·
+            # Pads · Sw). Skip the legacy header status line so we
+            # don't double up.
             return
 
         if mode_now == "keys":
