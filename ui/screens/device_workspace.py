@@ -358,6 +358,15 @@ class DeviceWorkspaceScreen:
                             self.app.chromatic_kb.enabled = True
                             # Retarget to THIS workspace's device
                             self._retarget_keys_for_device()
+                            # Sync the Push 2 keys-mode layout to the
+                            # currently-selected SP/P-6 pad so the
+                            # bottom-left of the grid lines up with
+                            # what's playable. Without this, the
+                            # default base_note (36) leaves the SP's
+                            # bend window 2 octaves off the grid's
+                            # zero point.
+                            self._select_chromatic_pad(
+                                self._keys_bank, self._keys_pad)
                         elif old_tab == "keys" and not self._keys_persistent:
                             # Only disable if the user hasn't marked it persistent
                             self.app.chromatic_kb.enabled = False
@@ -2168,6 +2177,30 @@ class DeviceWorkspaceScreen:
                 midi.send_note_off(note, channel=channel)
             threading.Thread(target=_off, daemon=True).start()
 
+            # ── Sync the Push 2 keys layout to the SP pad ──────────
+            # The chromatic_kb's _pad_note is used to compute the
+            # playable bend window (pad_note ± bend_range) shown on
+            # the Push 2 grid. Without updating it, the grid stays
+            # anchored at its default (MIDI 36) regardless of which
+            # SP pad you're playing chromatically — that's the
+            # "keybed is 2 octaves off" symptom.
+            #
+            # Bottom-left of the Push 2 grid (base_note) lines up
+            # with the LOW end of the SP's bend window so the entire
+            # playable range starts at row 0 col 0 and goes up. User
+            # can still octave-shift from there with the Push 2
+            # octave buttons.
+            try:
+                kb._pad_note = note
+                kb._pad_channel = channel
+            except Exception:
+                pass
+            try:
+                bend = int(getattr(kb, "_bend_range", 12) or 12)
+                self.app.push2_keys_base_note = max(0, note - bend)
+            except Exception:
+                pass
+
             # Reset chromatic-ready flag — user needs to SHIFT+CHROMATIC
             # on the SP-404 after selecting a new pad
             self._sp404_chromatic_ready = False
@@ -2175,7 +2208,8 @@ class DeviceWorkspaceScreen:
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
             print(f"KEYS: SP-404 preview {bank_letter}-{pad_idx + 1} "
-                  f"(Ch{channel + 1} note {note})", flush=True)
+                  f"(Ch{channel + 1} note {note}); push2_keys_base_note="
+                  f"{self.app.push2_keys_base_note}", flush=True)
 
         elif self._device_key == "P-6":
             # P-6: trigger the pad on the sampler channel
