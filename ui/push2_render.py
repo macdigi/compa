@@ -252,18 +252,39 @@ class Push2Renderer:
             mode_top = "control"
         top_colors = [0] * 8
         if mode_top == "keys":
-            # Buttons 1-7 = scale shortcuts. Active scale lit bright;
-            # inactive options dim. Button 8 is currently free
-            # (layout cycle moved to the dedicated Layout button).
-            from engine.push2 import KEYS_TOP_BUTTON_SCALES
-            try:
-                cur_scale = int(self.app.push2_keys_scale)
-            except Exception:
-                cur_scale = 0
-            for i in range(7):
-                scale_idx = KEYS_TOP_BUTTON_SCALES[i]
-                top_colors[i] = 122 if scale_idx == cur_scale else 8
-            top_colors[7] = 0  # reserved — off
+            chord_mode = bool(
+                getattr(self.app, "push2_keys_chord_mode", False))
+            if chord_mode:
+                # Chord-mode top row = arp pattern shortcuts +
+                # RESTART + HOLD. LED indicates which pattern is
+                # active and whether HOLD is engaged.
+                from engine.arpeggiator import PATTERNS
+                arp_params = getattr(self.app, "arp_params", None)
+                cur_pattern = (arp_params.pattern if arp_params is not None
+                               else "off")
+                hold = bool(arp_params.hold) if arp_params else False
+                # Buttons 1-6 → up, down, up_down, down_up, random, off.
+                BUTTON_PATTERNS = ("up", "down", "up_down", "down_up",
+                                   "random", "off")
+                for i in range(6):
+                    pat = BUTTON_PATTERNS[i]
+                    if pat == cur_pattern:
+                        top_colors[i] = 122  # bright — active
+                    else:
+                        top_colors[i] = 8    # dim — available
+                top_colors[6] = 50  # RESTART — cyan, dim till pressed
+                top_colors[7] = 126 if hold else 8  # HOLD — green when on
+            else:
+                # Chromatic / in-key top row = scale shortcuts.
+                from engine.push2 import KEYS_TOP_BUTTON_SCALES
+                try:
+                    cur_scale = int(self.app.push2_keys_scale)
+                except Exception:
+                    cur_scale = 0
+                for i in range(7):
+                    scale_idx = KEYS_TOP_BUTTON_SCALES[i]
+                    top_colors[i] = 122 if scale_idx == cur_scale else 8
+                top_colors[7] = 0  # reserved — off
         elif mode_top == "pattern":
             try:
                 base = int(self.app.push2_pattern_launch_page) * 8
@@ -795,6 +816,12 @@ class Push2Renderer:
                 getattr(self.app, "_push2_chord_active", None) or {})
             for chord_notes in chord_active.values():
                 held_notes.update(chord_notes)
+            arp = getattr(self.app, "arp_scheduler", None)
+            if arp is not None:
+                try:
+                    held_notes.update(arp.all_active_notes())
+                except Exception:
+                    pass
 
         # Special-encoder popup beats BPM but loses to held notes.
         encoder_overlay = (
@@ -1268,11 +1295,13 @@ class Push2Renderer:
         body_rect = pygame.Rect(
             pad_x, top, SURF_W - pad_x * 2, height)
 
-        # Held notes — same merge as device_workspace's controls row.
-        # Single-note layouts (chromatic / in-key) push into
-        # _push2_keys_active; chord layout pushes lists into
-        # _push2_chord_active. Combined here so the keyboard +
-        # rolling roll show every held note regardless of layout.
+        # Held notes — combined across all input + playback sources
+        # so the keyboard + rolling roll show every currently-sounding
+        # note regardless of which layout / pad mode produced it:
+        #   - chromatic_kb.active_notes  (USB MIDI keyboard)
+        #   - _push2_keys_active         (single-note layouts)
+        #   - _push2_chord_active        (chord block layout)
+        #   - arp_scheduler.all_active_notes() (live arp notes)
         held: set[int] = set()
         kb = getattr(self.app, "chromatic_kb", None)
         if kb is not None:
@@ -1285,6 +1314,12 @@ class Push2Renderer:
         chord_active = getattr(self.app, "_push2_chord_active", {}) or {}
         for chord_notes in chord_active.values():
             held.update(chord_notes)
+        arp = getattr(self.app, "arp_scheduler", None)
+        if arp is not None:
+            try:
+                held.update(arp.all_active_notes())
+            except Exception:
+                pass
 
         # Update the rolling history so the piano roll has data.
         now = time.monotonic()
@@ -1516,30 +1551,81 @@ class Push2Renderer:
             layout = "CHROMATIC"
         else:
             layout = "IN-KEY"
-        # Octave shift comes from the chromatic-keyboard helper.
-        kb = getattr(self.app, "chromatic_kb", None)
-        oct_shift = (
-            int(getattr(kb, "octave_shift", 0)) if kb is not None else 0)
-
         # Background
         pygame.draw.rect(surf, BG_SCOPE, rect, border_radius=3)
 
-        # Left side: ROOT  SCALE · LAYOUT
-        left_text = (
-            f"{ROOT_NAMES[root_pc]}  {scale_name.upper()}  ·  {layout}"
-        )
-        ls = self._font_small.render(left_text, True, dev_color)
-        ly = rect.y + (rect.height - ls.get_height()) // 2
-        surf.blit(ls, (rect.x + 8, ly))
+        if not chord_mode:
+            # ── Simple strip (chromatic / in-key): scale + octave ──
+            kb = getattr(self.app, "chromatic_kb", None)
+            oct_shift = (
+                int(getattr(kb, "octave_shift", 0))
+                if kb is not None else 0)
+            left_text = (
+                f"{ROOT_NAMES[root_pc]}  {scale_name.upper()}  ·  "
+                f"{layout}")
+            ls = self._font_small.render(left_text, True, dev_color)
+            ly = rect.y + (rect.height - ls.get_height()) // 2
+            surf.blit(ls, (rect.x + 8, ly))
+            if oct_shift != 0:
+                oct_text = f"OCT {oct_shift:+d}"
+                os_surf = self._font_small.render(oct_text, True, DIM)
+                surf.blit(
+                    os_surf,
+                    (rect.right - os_surf.get_width() - 10,
+                     rect.y + (rect.height - os_surf.get_height()) // 2))
+            return
 
-        # Right side: OCT shift (only when non-zero, to keep clean).
-        if oct_shift != 0:
-            oct_text = f"OCT {oct_shift:+d}"
-            os_surf = self._font_small.render(oct_text, True, DIM)
+        # ── Chord-mode strip: scale label + arp params ──────────
+        # Read live from arp_params so encoder turns / button presses
+        # show up on the next frame.
+        params = getattr(self.app, "arp_params", None)
+        if params is None:
+            return
+
+        # Compact scale label on the far left.
+        scale_text = f"{ROOT_NAMES[root_pc]} {scale_name.upper()}"
+        ss = self._font_small.render(scale_text, True, dev_color)
+        sy = rect.y + (rect.height - ss.get_height()) // 2
+        surf.blit(ss, (rect.x + 8, sy))
+
+        # Right side — arp params spread evenly. Each segment shows
+        # its label + value; the value is tinted in the device color
+        # whenever the user has nudged it off the default (so a
+        # glance shows what's "active" without reading every value).
+        segments: list[tuple[str, str, bool]] = [
+            ("PAT",  params.pattern.replace("_", "-").upper(),
+             params.pattern != "off"),
+            ("RATE", params.rate, params.rate != "1/16"),
+            ("OCT",  str(params.octaves), params.octaves != 1),
+            ("STAB", params.stab[:4].upper(), params.stab != "normal"),
+            ("SWG",  str(params.swing), params.swing != 50),
+            ("DENS", str(params.density), params.density != 3),
+            ("INV",  str(params.inversion), params.inversion != 0),
+            ("HUM",  str(params.humanize), params.humanize != 0),
+        ]
+
+        # Reserve ~150px on the left for the scale text; the 8 segments
+        # fill the rest evenly.
+        segs_x = rect.x + 150
+        segs_w = max(60, rect.right - segs_x - 60)
+        seg_w = segs_w // len(segments)
+        cy = rect.y + rect.height // 2
+        for i, (label, value, active) in enumerate(segments):
+            seg_x = segs_x + i * seg_w
+            color = dev_color if active else DIM
+            text = f"{label} {value}"
+            ts = self._font_tiny.render(text, True, color)
+            surf.blit(ts, (seg_x, cy - ts.get_height() // 2))
+
+        # HOLD indicator on the far right (it's a button toggle, not
+        # an encoder param, so it gets its own slot).
+        if params.hold:
+            hold_surf = self._font_tiny.render(
+                "HOLD", True, dev_color)
             surf.blit(
-                os_surf,
-                (rect.right - os_surf.get_width() - 10,
-                 rect.y + (rect.height - os_surf.get_height()) // 2))
+                hold_surf,
+                (rect.right - hold_surf.get_width() - 6,
+                 rect.y + (rect.height - hold_surf.get_height()) // 2))
 
     def _draw_new_confirm_overlay(self, surf, top: int, height: int,
                                     pending_until: float) -> None:

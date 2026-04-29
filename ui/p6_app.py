@@ -343,6 +343,18 @@ class P6App:
         # Pad → list of held MIDI notes when in chord mode. Released
         # together on note-off so all chord notes drop cleanly.
         self._push2_chord_active: dict[int, list[int]] = {}
+
+        # Arpeggiator. ArpParams holds the live config (mutated by
+        # encoder turns + top-row button presses); ArpScheduler runs a
+        # daemon tick thread that drives any number of ArpInstances
+        # (one per held chord-pad). When arp_params.pattern != "off"
+        # AND chord_mode is on, chord-pad presses route through the
+        # scheduler instead of sending the chord as a block.
+        from engine.arpeggiator import ArpParams, ArpScheduler
+        self.arp_params: ArpParams = ArpParams()
+        self.arp_scheduler: ArpScheduler = ArpScheduler(
+            get_bpm=self._get_global_bpm)
+        self.arp_scheduler.start()
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -1393,6 +1405,15 @@ class P6App:
             "push2": bool(push2),
         }
 
+    def _get_global_bpm(self) -> float:
+        """Best-effort global tempo for the arpeggiator. Reads from
+        the P-6 state when available (live transport BPM); falls back
+        to 120 if no source is connected."""
+        try:
+            return float(self.p6.state.bpm)
+        except Exception:
+            return 120.0
+
     def _maybe_fire_screenshot(self) -> None:
         """Fire any pending screenshot whose scheduled time has passed.
         Called once per main-loop frame from `_draw` (after the UI is
@@ -1503,6 +1524,44 @@ class P6App:
             return path
         return None
 
+    def _on_push2_keys_encoder(self, idx: int, delta: int) -> None:
+        """Map Push 2 encoders 1-8 to arpeggiator parameters.
+
+          1 RATE       1/4 → 1/32 (cycles through RATE_ORDER)
+          2 OCTAVES    1..4
+          3 STAB       staccato / normal / sustained / legato
+          4 SWING      50..75 (% — straight to triplet feel)
+          5 DENSITY    triad / +7 / +9 / +11
+          6 INVERSION  root / 1st / 2nd
+          7 HUMANIZE   0..100 (vel variation in ±)
+          8 ACCENT     off / every-2 / every-3 / every-4
+
+        delta is +1/-1 ticks per detent; we accumulate inside the
+        ArpParams cycle helpers so multi-step turns work naturally.
+        """
+        p = self.arp_params
+        sign = 1 if delta > 0 else -1 if delta < 0 else 0
+        if sign == 0:
+            return
+        if idx == 0:
+            p.cycle_rate(sign)
+        elif idx == 1:
+            p.adjust_octaves(sign)
+        elif idx == 2:
+            p.cycle_stab(sign)
+        elif idx == 3:
+            # Swing in 5% steps for tactile detents.
+            p.adjust_swing(sign * 5)
+        elif idx == 4:
+            p.cycle_density(sign)
+        elif idx == 5:
+            p.cycle_inversion(sign)
+        elif idx == 6:
+            # Humanize in 10% steps.
+            p.adjust_humanize(sign * 10)
+        elif idx == 7:
+            p.cycle_accent(sign)
+
     def _on_push2_keys_pad(self, idx: int, velocity: int):
         """Keys-mode pad → forward note(s) to the focused device.
 
@@ -1538,6 +1597,9 @@ class P6App:
                 # Promote to major silently. The LAYOUT-cycle path
                 # already does this, but be defensive.
                 _, scale_offsets = SCALES[1]  # major
+
+            # Compute the chord notes for this pad (used by both
+            # the block path and the arp path).
             if velocity > 0:
                 notes = Push2.chord_pad_to_notes(
                     idx, scale_offsets,
@@ -1546,6 +1608,48 @@ class P6App:
                 )
                 if not notes:
                     return
+
+            arp_active = (self.arp_params.pattern != "off")
+
+            if arp_active:
+                # ── ARP path ────────────────────────────────────────
+                # Pad-down: start an arp on this pad. If HOLD is on
+                # and the same pad already has an arp running, treat
+                # the second press as a release (toggle off).
+                if velocity > 0:
+                    if (self.arp_params.hold
+                            and self.arp_scheduler.has(idx)):
+                        self.arp_scheduler.remove(idx)
+                        return
+                    # Fresh press: start the arp. send_note callbacks
+                    # close over `kb` so each tick reaches the
+                    # focused device's MIDI channel.
+                    def _send_on(note: int, vel: int,
+                                 _kb=kb) -> None:
+                        try:
+                            _kb._forward_note_on(note, vel)
+                        except Exception:
+                            pass
+
+                    def _send_off(note: int, _kb=kb) -> None:
+                        try:
+                            _kb._forward_note_off(note)
+                        except Exception:
+                            pass
+
+                    self.arp_scheduler.add(
+                        idx, notes, self.arp_params,
+                        _send_on, _send_off,
+                    )
+                else:
+                    # Pad-up: stop the arp UNLESS hold is on (then
+                    # leave it running until the user toggles).
+                    if not self.arp_params.hold:
+                        self.arp_scheduler.remove(idx)
+                return
+
+            # ── BLOCK path (no arp) ─────────────────────────────────
+            if velocity > 0:
                 self._push2_chord_active[idx] = notes
                 for note in notes:
                     try:
@@ -2431,8 +2535,8 @@ class P6App:
                     self.push2_keys_root = KEYS_BOT_BUTTON_ROOTS[idx]
             elif idx == 7:
                 # PANIC — release everything currently held across
-                # both single-note and chord-mode pad state, plus
-                # whatever the USB MIDI keyboard is tracking.
+                # single-note + chord-mode pad state, the USB MIDI
+                # keyboard, AND any running arps.
                 kb = getattr(self, "chromatic_kb", None)
                 if kb is not None and kb._target_midi:
                     for note in list(self._push2_keys_active.values()):
@@ -2454,6 +2558,11 @@ class P6App:
                     kb.active_notes.clear()
                 self._push2_keys_active.clear()
                 self._push2_chord_active.clear()
+                # Stop any running arps.
+                try:
+                    self.arp_scheduler.shutdown_all()
+                except Exception:
+                    pass
         elif name == "layout" and self.push2_mode == "keys":
             # Dedicated "Layout" button on Push 2 (a labeled key on the
             # control panel, NOT one of the unlabeled top-row select
@@ -2481,17 +2590,54 @@ class P6App:
                 flush=True,
             )
         elif name.startswith("top_select_") and self.push2_mode == "keys":
-            # Top-row in keys mode = scale shortcuts.
-            #   1-7 → major, minor, min pent, maj pent, blues, dorian,
-            #         mixolydian (sets scale; preserves chord-mode
-            #         flag so you can scale-shop within chord mode).
-            #   8   → reserved (was LAYOUT, moved to the dedicated
-            #         labeled "Layout" button on Push 2).
+            # Top-row in keys mode is mode-aware:
+            #
+            #   chromatic / in-key:
+            #     1-7 → major, minor, min pent, maj pent, blues, dorian,
+            #           mixolydian (sets scale)
+            #     8   → reserved
+            #
+            #   chord:
+            #     1-6 → arp pattern shortcuts (UP, DOWN, UP-DN, DN-UP,
+            #            RAND, OFF) — direct-access so producers don't
+            #            have to twist the rate knob through 6 states
+            #     7   → RESTART (reset all running arps to step 0)
+            #     8   → HOLD toggle (latch arp on/off)
             from engine.push2 import KEYS_TOP_BUTTON_SCALES, SCALES
+            from engine.arpeggiator import PATTERNS
             try:
                 idx = int(name.rsplit("_", 1)[1]) - 1
             except Exception:
                 return
+
+            if self.push2_keys_chord_mode:
+                # Chord-mode mapping.
+                #   buttons 1..6 → patterns up, down, up_down, down_up,
+                #                  random, off (in that order)
+                BUTTON_PATTERNS = ("up", "down", "up_down", "down_up",
+                                   "random", "off")
+                if 0 <= idx < 6:
+                    self.arp_params.pattern = BUTTON_PATTERNS[idx]
+                    # Stop any running arps when switching to OFF, so
+                    # block-mode chords play correctly on next press.
+                    if self.arp_params.pattern == "off":
+                        self.arp_scheduler.shutdown_all()
+                elif idx == 6:
+                    # RESTART — reset step counters on all running arps.
+                    for pad_idx in self.arp_scheduler.active_pads():
+                        inst = self.arp_scheduler._instances.get(pad_idx)
+                        if inst is not None:
+                            inst._step = 0
+                            inst._next_tick_at = 0  # fire on next tick
+                elif idx == 7:
+                    # HOLD toggle — flips arp_params.hold.
+                    self.arp_params.hold = not self.arp_params.hold
+                    if not self.arp_params.hold:
+                        # Releasing hold also kills any latched arps.
+                        self.arp_scheduler.shutdown_all()
+                return
+
+            # Chromatic / in-key — original scale-shortcut behavior.
             if 0 <= idx < 7:
                 scale_idx = KEYS_TOP_BUTTON_SCALES[idx]
                 self.push2_keys_scale = scale_idx
@@ -2677,12 +2823,19 @@ class P6App:
         velocities of active steps within a spread. Encoders 3-8
         fall through to the device-specific control mapping below.
 
+        Keys mode: encoders 1-8 control the arpeggiator params
+        (rate, octaves, stab, swing, density, inversion, humanize,
+        accent). See _on_push2_keys_encoder.
+
         P-6 control: nudge the CC of the Twister slot at the current
         encoder page's offset (8 params per page, 4 pages).
         SP-404 control:
           - encoders 1-6 adjust Ctrl 1-6 of the active bus
           - encoder 7 reserved
           - encoder 8 cycles the active effect (CC#83)."""
+        if self.push2_mode == "keys":
+            self._on_push2_keys_encoder(idx, delta)
+            return
         if self.push2_mode == "pattern":
             seq = self._push2_pattern_sequencer()
             if seq is None:
