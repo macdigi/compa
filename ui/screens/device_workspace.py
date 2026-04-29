@@ -1516,9 +1516,16 @@ class DeviceWorkspaceScreen:
         name_surf = f_tiny.render(name, True, self._device_color)
         surface.blit(name_surf, (10, top + 6))
 
-        # Active notes text (center-left)
-        if kb and kb.active_notes:
-            note_strs = [note_name(n) for n in sorted(kb.active_notes.keys())]
+        # Active notes text (center-left) — merge USB MIDI kb +
+        # Push 2 keys-mode pads, so the readout reflects whichever
+        # input source the player is using (or both at once).
+        held: set[int] = set()
+        if kb:
+            held.update(kb.active_notes.keys())
+        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
+        held.update(push2_active.values())
+        if held:
+            note_strs = [note_name(n) for n in sorted(held)]
             notes_text = "  ".join(note_strs[:6])
             nt_surf = f_small.render(notes_text, True, self._device_color)
             surface.blit(nt_surf, (160, top + 4))
@@ -1621,8 +1628,17 @@ class DeviceWorkspaceScreen:
                                     theme.SCREEN_WIDTH - 20, piano_h)
             if self._piano_display.rect != new_rect:
                 self._piano_display.set_rect(new_rect)
+            # Merge active notes from BOTH input sources so the piano
+            # lights up whether the player is hitting USB-MIDI keys
+            # OR Push 2 keys-mode pads. Previously only kb.active_notes
+            # was rendered, so Push 2 plays produced no visual feedback.
+            combined: dict[int, int] = {}
             if kb:
-                self._piano_display._active_notes = dict(kb.active_notes)
+                combined.update(kb.active_notes)
+            push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
+            for note in push2_active.values():
+                combined.setdefault(note, 100)
+            self._piano_display._active_notes = combined
             self._piano_display.draw(surface)
 
         # Channel info + workflow hint (bottom)
