@@ -3815,44 +3815,11 @@ class P6App:
             surf = f_tiny.render("SET", True, theme.TEXT_DIM)
         self.screen.blit(surf, surf.get_rect(center=settings_rect.center))
 
-        # ── Update indicator pill ───────────────────────────────────
-        # Only drawn when an update is pending. Sits immediately to
-        # the right of the SET button so it's always findable. Tap
-        # opens the UpdatesScreen with the changelog. The hit-test
-        # for this rect lives in the MOUSEBUTTONDOWN handler nearby
-        # (uses the same rect math).
-        try:
-            updater = self.updater
-            update_pending = bool(updater.update_available)
-            update_count = int(updater.commits_behind)
-        except Exception:
-            update_pending = False
-            update_count = 0
-        if update_pending:
-            update_rect = pygame.Rect(
-                settings_rect.right + 6, settings_rect.y, 60, 26)
-            updates_active = self.current_screen_name == "updates"
-            # Pulse slightly so it draws the eye — alpha cycles via
-            # frame counter (cheap; uses pygame.time).
-            pulse = (pygame.time.get_ticks() // 500) % 2
-            if updates_active:
-                bg = theme.ACCENT
-                tc = theme.BG
-            else:
-                # Pulse between accent and accent-bright so the pill
-                # gently catches the eye without strobing distractingly.
-                bg = theme.ACCENT_BRIGHT if pulse else theme.ACCENT
-                tc = theme.BG
-            pygame.draw.rect(
-                self.screen, bg, update_rect, border_radius=13)
-            label = (f"UPDATE ({update_count})"
-                     if update_count <= 9 else "UPDATE")
-            us = f_tiny.render(label, True, tc)
-            self.screen.blit(
-                us, us.get_rect(center=update_rect.center))
-            self._update_pill_rect = update_rect
-        else:
-            self._update_pill_rect = None
+        # The nav-bar update pill was removed — it overlaid the
+        # session UI and felt naggy. Update access lives entirely on
+        # the Settings screen now: a labeled button in the top-right
+        # (next to HELP) plus the "Updates & changelog" row.
+        self._update_pill_rect = None
 
         # ── Status bar (bottom of nav) ───────────────────────────────
         status_y = self._nav_rect.y + 35

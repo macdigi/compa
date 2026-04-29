@@ -11,6 +11,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 class P6SettingsScreen:
     """Scrollable settings list with toggles, adjustments, and action buttons."""
 
+    # Pixels of motion (between mouse-down and -up) under which a
+    # press counts as a tap; over this it's a drag/scroll and the
+    # tap-action is suppressed. Tuned so resting-finger jitter
+    # doesn't trip it but a deliberate drag-to-scroll does.
+    TAP_DRAG_THRESHOLD = 8
+
     def __init__(self, app):
         self.app = app
         self._scroll_y = 0
@@ -19,9 +25,21 @@ class P6SettingsScreen:
         self._content_height = 0
         self._update_status = ""
         self._button_flash: dict | None = None
+        # Drag-vs-tap state for the touchscreen scroll/tap fix.
+        # _press_pos: where MOUSEBUTTONDOWN landed (None when no press).
+        # _press_scroll_y: scroll offset at press time, so we can
+        #                  compute how far the user has dragged.
+        # _is_dragging: latches True as soon as the user moves past
+        #               TAP_DRAG_THRESHOLD; subsequent MOUSEBUTTONUP
+        #               then suppresses the tap-action firing.
+        self._press_pos: tuple[int, int] | None = None
+        self._press_scroll_y: int = 0
+        self._is_dragging: bool = False
 
     def on_enter(self):
         self._scroll_y = 0
+        self._press_pos = None
+        self._is_dragging = False
 
     def on_exit(self):
         pass
@@ -635,87 +653,149 @@ class P6SettingsScreen:
                 self._scroll_y += 40
                 return
 
+        # ── Mouse-wheel scroll (still on MOUSEBUTTONDOWN — wheel
+        # has no concept of drag) ──────────────────────────────────
         if event.type == pygame.MOUSEBUTTONDOWN:
-            mx, my = event.pos if hasattr(event, "pos") else (0, 0)
-
-            # Scroll via mouse wheel
             if event.button == 4:
                 self._scroll_y = max(0, self._scroll_y - 30)
                 return
-            elif event.button == 5:
+            if event.button == 5:
                 self._scroll_y += 30
                 return
 
-            if event.button != 1:
+        # ── Tap / drag tracking for the touchscreen ────────────────
+        # Press: record where the press landed + the current scroll
+        # offset. Don't fire any action yet — we'll wait until the
+        # user releases (or starts dragging).
+        if (event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1):
+            self._press_pos = event.pos if hasattr(event, "pos") else (0, 0)
+            self._press_scroll_y = self._scroll_y
+            self._is_dragging = False
+            return
+
+        # Motion while pressed: if we've moved past the threshold,
+        # latch into drag mode and start scrolling instead.
+        if (event.type == pygame.MOUSEMOTION
+                and self._press_pos is not None):
+            dx = event.pos[0] - self._press_pos[0]
+            dy = event.pos[1] - self._press_pos[1]
+            if (not self._is_dragging
+                    and (abs(dx) + abs(dy)) >= self.TAP_DRAG_THRESHOLD):
+                self._is_dragging = True
+            if self._is_dragging:
+                # Scroll inversely to vertical drag — pulling down
+                # reveals content above.
+                self._scroll_y = max(0, self._press_scroll_y - dy)
+            return
+
+        # Release: if no drag started, this was a tap — fire the
+        # action that lives at the press position.
+        if (event.type == pygame.MOUSEBUTTONUP
+                and event.button == 1
+                and self._press_pos is not None):
+            mx, my = self._press_pos
+            was_dragging = self._is_dragging
+            self._press_pos = None
+            self._is_dragging = False
+            if was_dragging:
+                # Drag ended — scroll already updated, no action.
                 return
 
-            # HELP button (top-right)
-            help_rect = pygame.Rect(theme.SCREEN_WIDTH - 80, 6, 70, 28)
-            if help_rect.collidepoint(mx, my):
-                self.app.switch_screen("help")
+            # ── Treat as tap. Fire the appropriate action. ──────────
+            self._dispatch_tap(mx, my)
+            return
+
+    def _dispatch_tap(self, mx: int, my: int) -> None:
+        """Tap-action dispatch shared by MOUSEBUTTONUP. Same logic
+        the press-handler used to do, just gated on no-drag."""
+        # HELP + UPDATES buttons (top-right). Geometry must match
+        # the draw side below.
+        help_rect = pygame.Rect(theme.SCREEN_WIDTH - 80, 6, 70, 28)
+        update_rect = pygame.Rect(
+            theme.SCREEN_WIDTH - 80 - 76, 6, 70, 28)
+        if help_rect.collidepoint(mx, my):
+            self.app.switch_screen("help")
+            return
+        if update_rect.collidepoint(mx, my):
+            self.app.switch_screen("updates")
+            return
+
+        # Row interactions
+        content_y = 46
+        row_h = self._row_height
+        self._build_rows()
+
+        for i, row in enumerate(self._rows):
+            ry = content_y + i * row_h - self._scroll_y
+            if (ry < content_y - row_h
+                    or ry > theme.SCREEN_HEIGHT - theme.NAV_HEIGHT):
+                continue
+
+            row_rect = pygame.Rect(0, ry, theme.SCREEN_WIDTH, row_h)
+            if not row_rect.collidepoint(mx, my):
+                continue
+
+            rtype = row["type"]
+            ctrl_x = theme.SCREEN_WIDTH - 160
+
+            if rtype == "toggle":
+                toggle_rect = pygame.Rect(
+                    ctrl_x, ry + 4, 60, row_h - 8)
+                if toggle_rect.collidepoint(mx, my):
+                    row["action"]()
                 return
 
-            # Check row interactions
-            content_y = 46
-            row_h = self._row_height
-            self._build_rows()
+            elif rtype == "adjust":
+                dec_rect = pygame.Rect(ctrl_x, ry + 4, 32, row_h - 8)
+                inc_rect = pygame.Rect(
+                    ctrl_x + 80, ry + 4, 32, row_h - 8)
+                if dec_rect.collidepoint(mx, my):
+                    row["action_dec"]()
+                elif inc_rect.collidepoint(mx, my):
+                    row["action_inc"]()
+                return
 
-            for i, row in enumerate(self._rows):
-                ry = content_y + i * row_h - self._scroll_y
-                if ry < content_y - row_h or ry > theme.SCREEN_HEIGHT - theme.NAV_HEIGHT:
-                    continue
+            elif rtype == "color_picker":
+                swatches = list(theme.COLOR_SWATCHES.items())
+                sw_size = min(
+                    26,
+                    (theme.SCREEN_WIDTH - 120) // len(swatches) - 2)
+                sx = 100
+                for j, (swatch_name, rgb) in enumerate(swatches):
+                    sr = pygame.Rect(
+                        sx + j * (sw_size + 2), ry + 4,
+                        sw_size, row_h - 8)
+                    if sr.collidepoint(mx, my):
+                        dev = row["device"]
+                        theme.set_device_color(dev, swatch_name)
+                        theme.apply_theme_for_device(dev)
+                        from ui.p6_app import save_config_key
+                        save_config_key(
+                            f"COLOR_{dev}", swatch_name)
+                        print(
+                            f"Device color: {dev} → {swatch_name}",
+                            flush=True,
+                        )
+                        return
+                return
 
-                row_rect = pygame.Rect(0, ry, theme.SCREEN_WIDTH, row_h)
-                if not row_rect.collidepoint(mx, my):
-                    continue
-
-                rtype = row["type"]
-                ctrl_x = theme.SCREEN_WIDTH - 160
-
-                if rtype == "toggle":
-                    # Toggle button area (right side)
-                    toggle_rect = pygame.Rect(ctrl_x, ry + 4, 60, row_h - 8)
-                    if toggle_rect.collidepoint(mx, my):
-                        row["action"]()
-                    return
-
-                elif rtype == "adjust":
-                    # [-] button
-                    dec_rect = pygame.Rect(ctrl_x, ry + 4, 32, row_h - 8)
-                    # [+] button
-                    inc_rect = pygame.Rect(ctrl_x + 80, ry + 4, 32, row_h - 8)
-                    if dec_rect.collidepoint(mx, my):
-                        row["action_dec"]()
-                    elif inc_rect.collidepoint(mx, my):
-                        row["action_inc"]()
-                    return
-
-                elif rtype == "color_picker":
-                    # Color swatch blocks
-                    swatches = list(theme.COLOR_SWATCHES.items())
-                    sw_size = min(26, (theme.SCREEN_WIDTH - 120) // len(swatches) - 2)
-                    sx = 100
-                    for j, (swatch_name, rgb) in enumerate(swatches):
-                        sr = pygame.Rect(sx + j * (sw_size + 2), ry + 4, sw_size, row_h - 8)
-                        if sr.collidepoint(mx, my):
-                            dev = row["device"]
-                            theme.set_device_color(dev, swatch_name)
-                            theme.apply_theme_for_device(dev)
-                            # Save preference
-                            from ui.p6_app import save_config_key
-                            save_config_key(f"COLOR_{dev}", swatch_name)
-                            print(f"Device color: {dev} → {swatch_name}", flush=True)
-                            return
-                    return
-
-                elif rtype == "button":
-                    # Whole-row clickable for accessibility (touchscreen friendly)
-                    try:
-                        row["action"]()
-                        self._button_flash = {"idx": i, "until": pygame.time.get_ticks() + 150}
-                    except Exception as e:
-                        print(f"Settings button action error: {e}", flush=True)
-                    return
+            elif rtype == "button":
+                # Whole-row clickable for accessibility — only
+                # fires when no drag occurred (the caller already
+                # gated on this).
+                try:
+                    row["action"]()
+                    self._button_flash = {
+                        "idx": i,
+                        "until": pygame.time.get_ticks() + 150,
+                    }
+                except Exception as e:
+                    print(
+                        f"Settings button action error: {e}",
+                        flush=True,
+                    )
+                return
 
     def update(self):
         pass
@@ -736,6 +816,36 @@ class P6SettingsScreen:
         pygame.draw.rect(surface, theme.BORDER, help_rect, 1, border_radius=6)
         surf = f_small.render("HELP", True, theme.TEXT)
         surface.blit(surf, surf.get_rect(center=help_rect.center))
+
+        # UPDATE button (immediately to the left of HELP). Lights in
+        # accent color when an update is pending so it reads as
+        # "something to do" without being noisy. Tap → Updates
+        # screen.
+        update_rect = pygame.Rect(
+            theme.SCREEN_WIDTH - 80 - 76, 6, 70, 28)
+        try:
+            update_pending = bool(
+                getattr(self.app.updater, "update_available", False))
+            commits_behind = int(
+                getattr(self.app.updater, "commits_behind", 0))
+        except Exception:
+            update_pending = False
+            commits_behind = 0
+        if update_pending:
+            pygame.draw.rect(
+                surface, theme.ACCENT, update_rect, border_radius=6)
+            label = (f"UPDATE ({commits_behind})"
+                     if commits_behind <= 9 else "UPDATE")
+            tc = theme.BG
+        else:
+            pygame.draw.rect(
+                surface, theme.BUTTON_BG, update_rect, border_radius=6)
+            label = "UPDATES"
+            tc = theme.TEXT
+        pygame.draw.rect(
+            surface, theme.BORDER, update_rect, 1, border_radius=6)
+        us = f_small.render(label, True, tc)
+        surface.blit(us, us.get_rect(center=update_rect.center))
 
         # Build current row data
         self._build_rows()

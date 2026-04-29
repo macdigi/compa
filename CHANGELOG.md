@@ -12,11 +12,17 @@ affect what a user sees.
 
 ## Unreleased
 
+- Pulled the global update pill out of the nav bar — it overlapped
+  the Session UI and felt naggy. Update access now lives entirely
+  in Settings: a labeled UPDATES button in the top-right (next to
+  HELP) lights up in the accent color when something's pending.
+- Tap-vs-drag detection in the Settings menu — dragging anywhere
+  on a button row scrolls the menu instead of triggering the
+  button. The tap only fires if you release without moving.
 - Updates & changelog screen: a single place to read everything
   that's shipped, written in plain language. Pending changes stack
   at the top, full release history below. Reachable from the
-  Settings menu (top entry) or the pulsing nav-bar pill when an
-  update lands.
+  Settings menu (UPDATES button or the top row entry).
 - Auto-updater notifies you in the nav bar when new builds are out;
   one tap shows what changed and pulls the update with a restart.
 - Push 2 keys mode: full-screen LCD layout with a piano keyboard,
