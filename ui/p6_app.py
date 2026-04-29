@@ -23,6 +23,7 @@ from ui.screens.p6_sample_screen import P6SampleScreen
 from ui.screens.p6_help_screen import P6HelpScreen
 from ui.screens.p6_radio_screen import P6RadioScreen
 from ui.screens.p6_settings_screen import P6SettingsScreen
+from ui.screens.updates_screen import UpdatesScreen
 from ui.screens.kit_builder_screen import KitBuilderScreen
 from ui.screens.transfer_screen import TransferScreen
 from ui.screens.file_browser_screen import FileBrowserScreen
@@ -379,6 +380,12 @@ class P6App:
 
         # ── Auto updater ─────────────────────────────────────────────
         self.updater = Updater(PROJECT_ROOT)
+        # Background poll: every 30 min, with a 30s startup delay so
+        # the touchscreen + MIDI come up before we touch the network.
+        # The top-bar pill (drawn in _draw_nav_bar) and the
+        # UpdatesScreen read self.updater.update_available live.
+        self.updater.start_background_poll(
+            interval_sec=1800, initial_delay_sec=30)
 
         # ── Shared audio player modal ────────────────────────────────
         from ui.components.audio_player import AudioPlayer
@@ -481,6 +488,7 @@ class P6App:
             "radio":   P6RadioScreen(self),
             "help":    P6HelpScreen(self),
             "settings": P6SettingsScreen(self),
+            "updates": UpdatesScreen(self),
             "kit": KitBuilderScreen(self),
             "transfer": TransferScreen(self),
             "device_workspace": DeviceWorkspaceScreen(self),
@@ -3572,6 +3580,12 @@ class P6App:
                 if settings_rect.collidepoint(event.pos):
                     self.switch_screen("settings")
                     continue
+                # Update pill (only present when an update is pending —
+                # _update_pill_rect is set by the nav-bar render).
+                pill = getattr(self, "_update_pill_rect", None)
+                if pill is not None and pill.collidepoint(event.pos):
+                    self.switch_screen("updates")
+                    continue
 
                 # Device tap-to-switch (multi-device nav bar indicator)
                 if hasattr(self, "_device_tap_rects"):
@@ -3800,6 +3814,45 @@ class P6App:
             pygame.draw.rect(self.screen, theme.BORDER, settings_rect, 1, border_radius=13)
             surf = f_tiny.render("SET", True, theme.TEXT_DIM)
         self.screen.blit(surf, surf.get_rect(center=settings_rect.center))
+
+        # ── Update indicator pill ───────────────────────────────────
+        # Only drawn when an update is pending. Sits immediately to
+        # the right of the SET button so it's always findable. Tap
+        # opens the UpdatesScreen with the changelog. The hit-test
+        # for this rect lives in the MOUSEBUTTONDOWN handler nearby
+        # (uses the same rect math).
+        try:
+            updater = self.updater
+            update_pending = bool(updater.update_available)
+            update_count = int(updater.commits_behind)
+        except Exception:
+            update_pending = False
+            update_count = 0
+        if update_pending:
+            update_rect = pygame.Rect(
+                settings_rect.right + 6, settings_rect.y, 60, 26)
+            updates_active = self.current_screen_name == "updates"
+            # Pulse slightly so it draws the eye — alpha cycles via
+            # frame counter (cheap; uses pygame.time).
+            pulse = (pygame.time.get_ticks() // 500) % 2
+            if updates_active:
+                bg = theme.ACCENT
+                tc = theme.BG
+            else:
+                # Pulse between accent and accent-bright so the pill
+                # gently catches the eye without strobing distractingly.
+                bg = theme.ACCENT_BRIGHT if pulse else theme.ACCENT
+                tc = theme.BG
+            pygame.draw.rect(
+                self.screen, bg, update_rect, border_radius=13)
+            label = (f"UPDATE ({update_count})"
+                     if update_count <= 9 else "UPDATE")
+            us = f_tiny.render(label, True, tc)
+            self.screen.blit(
+                us, us.get_rect(center=update_rect.center))
+            self._update_pill_rect = update_rect
+        else:
+            self._update_pill_rect = None
 
         # ── Status bar (bottom of nav) ───────────────────────────────
         status_y = self._nav_rect.y + 35

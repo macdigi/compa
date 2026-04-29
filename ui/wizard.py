@@ -142,30 +142,118 @@ def run_wizard(screen: pygame.Surface, clock: pygame.time.Clock, app):
         return
 
     # ── Step 3: Input Mode ──────────────────────────────────────────
-    screen.fill(theme.BG)
-
-    surf = f_title.render("Input Mode", True, theme.ACCENT)
-    screen.blit(surf, (sw // 2 - surf.get_width() // 2, sh // 2 - 80))
-
-    surf = f_small.render("How will you control Compa?", True, theme.TEXT_DIM)
-    screen.blit(surf, (sw // 2 - surf.get_width() // 2, sh // 2 - 45))
-
+    # Picker auto-detects whichever input the user is actually
+    # using — moving the mouse picks MOUSE, tapping the screen
+    # picks TOUCHSCREEN, M/T keys pick explicitly. This handles the
+    # awkward case where you've set up a Pi with a mouse but no
+    # touchscreen yet (or vice versa) and would otherwise be unable
+    # to pick the option that matches your actual hardware.
     btn_w, btn_h = 180, 44
     gap = 20
-    touch_rect = pygame.Rect(sw // 2 - btn_w - gap // 2, sh // 2, btn_w, btn_h)
-    mouse_rect = pygame.Rect(sw // 2 + gap // 2, sh // 2, btn_w, btn_h)
 
-    theme.draw_button(screen, touch_rect, "TOUCHSCREEN", f_med, active=True)
-    theme.draw_button(screen, mouse_rect, "MOUSE", f_med, active=False)
+    def _draw_input_mode_picker(highlight: str):
+        """highlight ∈ {'touch', 'mouse', 'none'} — bumps that
+        button's active styling. Reused by the auto-detect loop
+        below to nudge the picker when the user moves the mouse
+        or taps the screen."""
+        screen.fill(theme.BG)
+        s = f_title.render("Input Mode", True, theme.ACCENT)
+        screen.blit(s, (sw // 2 - s.get_width() // 2, sh // 2 - 110))
+        s = f_small.render(
+            "How will you control Compa?", True, theme.TEXT_DIM)
+        screen.blit(s, (sw // 2 - s.get_width() // 2, sh // 2 - 80))
 
-    _draw_step_indicator(2, total_steps)
-    _draw_footer("Select your input method")
-    _flip(screen)
+        tr = pygame.Rect(
+            sw // 2 - btn_w - gap // 2, sh // 2 - 30, btn_w, btn_h)
+        mr = pygame.Rect(
+            sw // 2 + gap // 2, sh // 2 - 30, btn_w, btn_h)
+        theme.draw_button(
+            screen, tr, "TOUCHSCREEN  (T)", f_med,
+            active=(highlight == "touch"))
+        theme.draw_button(
+            screen, mr, "MOUSE  (M)", f_med,
+            active=(highlight == "mouse"))
 
-    choice = _wait_for_choice([touch_rect, mouse_rect])
-    if choice == -1:
-        return
-    use_mouse = (choice == 1)
+        # Auto-detect hint below the buttons.
+        s = f_small.render(
+            "Touch the screen, move the mouse, or press T / M",
+            True, theme.TEXT_DIM)
+        screen.blit(
+            s, (sw // 2 - s.get_width() // 2, sh // 2 + 30))
+
+        _draw_step_indicator(2, total_steps)
+        _draw_footer("First input wins — pick by using it")
+        _flip(screen)
+        return tr, mr
+
+    touch_rect, mouse_rect = _draw_input_mode_picker("none")
+
+    # Auto-detect loop. Watch for any of:
+    #   - mouse motion (more than ~5 pixels of travel from origin) → mouse
+    #   - mouse click on either button → that button's mode
+    #   - finger touch anywhere → touch
+    #   - M / T keys → mouse / touch
+    use_mouse = None
+    mouse_origin: tuple[int, int] | None = None
+    while use_mouse is None:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return
+            if event.type == pygame.FINGERDOWN:
+                # Finger event → definitely a touchscreen.
+                use_mouse = False
+                _draw_input_mode_picker("touch")
+                pygame.time.wait(180)
+                break
+            if event.type == pygame.MOUSEMOTION:
+                if mouse_origin is None:
+                    mouse_origin = event.pos
+                    continue
+                dx = abs(event.pos[0] - mouse_origin[0])
+                dy = abs(event.pos[1] - mouse_origin[1])
+                if dx + dy > 8:
+                    use_mouse = True
+                    _draw_input_mode_picker("mouse")
+                    pygame.time.wait(180)
+                    break
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                # Click is treated as a deliberate selection: which
+                # rect did they hit?
+                if touch_rect.collidepoint(event.pos):
+                    use_mouse = False
+                    _draw_input_mode_picker("touch")
+                    pygame.time.wait(180)
+                    break
+                if mouse_rect.collidepoint(event.pos):
+                    use_mouse = True
+                    _draw_input_mode_picker("mouse")
+                    pygame.time.wait(180)
+                    break
+                # Click outside both buttons but with a real cursor
+                # — treat as MOUSE selection.
+                use_mouse = True
+                _draw_input_mode_picker("mouse")
+                pygame.time.wait(180)
+                break
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_m:
+                    use_mouse = True
+                    _draw_input_mode_picker("mouse")
+                    pygame.time.wait(180)
+                    break
+                if event.key == pygame.K_t:
+                    use_mouse = False
+                    _draw_input_mode_picker("touch")
+                    pygame.time.wait(180)
+                    break
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    # Default = touchscreen (matches Compa OS image
+                    # primary use-case).
+                    use_mouse = False
+                    _draw_input_mode_picker("touch")
+                    pygame.time.wait(180)
+                    break
+        clock.tick(fps)
 
     # Apply mouse mode
     from ui.p6_app import save_config_key
