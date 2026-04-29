@@ -12,6 +12,11 @@ affect what a user sees.
 
 ## Unreleased
 
+- WiFi setup added to the first-boot wizard. Scans nearby networks,
+  shows them sorted by signal strength with a lock badge for
+  secured ones, and prompts for the password via the same
+  on-screen keyboard the rest of Compa uses. Skipping is always
+  available for users on Ethernet.
 - Pulled the global update pill out of the nav bar — it overlapped
   the Session UI and felt naggy. Update access now lives entirely
   in Settings: a labeled UPDATES button in the top-right (next to
