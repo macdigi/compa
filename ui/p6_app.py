@@ -2454,13 +2454,39 @@ class P6App:
                     kb.active_notes.clear()
                 self._push2_keys_active.clear()
                 self._push2_chord_active.clear()
+        elif name == "layout" and self.push2_mode == "keys":
+            # Dedicated "Layout" button on Push 2 (a labeled key on the
+            # control panel, NOT one of the unlabeled top-row select
+            # buttons). Cycles through 3 states:
+            #   A: chromatic         (scale=0, chord_mode=False)
+            #   B: in-key            (scale>0, chord_mode=False)
+            #   C: chord             (scale>0, chord_mode=True)
+            if self.push2_keys_scale == 0 and not self.push2_keys_chord_mode:
+                # A → B
+                self.push2_keys_scale = (
+                    self._push2_keys_last_scale or 1)
+            elif not self.push2_keys_chord_mode:
+                # B → C
+                self.push2_keys_chord_mode = True
+            else:
+                # C → A. Save current scale so the next entry
+                # to the cycle can pick up where we left off.
+                self._push2_keys_last_scale = (
+                    self.push2_keys_scale or self._push2_keys_last_scale or 1)
+                self.push2_keys_scale = 0
+                self.push2_keys_chord_mode = False
+            print(
+                f"PUSH2 LAYOUT: scale={self.push2_keys_scale} "
+                f"chord_mode={self.push2_keys_chord_mode}",
+                flush=True,
+            )
         elif name.startswith("top_select_") and self.push2_mode == "keys":
-            # Top-row in keys mode = scale shortcuts + LAYOUT cycle.
+            # Top-row in keys mode = scale shortcuts.
             #   1-7 → major, minor, min pent, maj pent, blues, dorian,
             #         mixolydian (sets scale; preserves chord-mode
             #         flag so you can scale-shop within chord mode).
-            #   8   → LAYOUT cycles through 3 states:
-            #           chromatic  →  in-key  →  chord  →  chromatic
+            #   8   → reserved (was LAYOUT, moved to the dedicated
+            #         labeled "Layout" button on Push 2).
             from engine.push2 import KEYS_TOP_BUTTON_SCALES, SCALES
             try:
                 idx = int(name.rsplit("_", 1)[1]) - 1
@@ -2470,25 +2496,6 @@ class P6App:
                 scale_idx = KEYS_TOP_BUTTON_SCALES[idx]
                 self.push2_keys_scale = scale_idx
                 self._push2_keys_last_scale = scale_idx
-            elif idx == 7:
-                # LAYOUT cycle. Three states:
-                #   A: chromatic         (scale=0, chord_mode=False)
-                #   B: in-key            (scale>0, chord_mode=False)
-                #   C: chord             (scale>0, chord_mode=True)
-                if self.push2_keys_scale == 0 and not self.push2_keys_chord_mode:
-                    # A → B
-                    self.push2_keys_scale = (
-                        self._push2_keys_last_scale or 1)
-                elif not self.push2_keys_chord_mode:
-                    # B → C
-                    self.push2_keys_chord_mode = True
-                else:
-                    # C → A. Save current scale so the next entry
-                    # to the cycle can pick up where we left off.
-                    self._push2_keys_last_scale = (
-                        self.push2_keys_scale or self._push2_keys_last_scale or 1)
-                    self.push2_keys_scale = 0
-                    self.push2_keys_chord_mode = False
         elif name == "nav_up":
             if self.push2_mode == "keys":
                 from engine.push2 import SCALES

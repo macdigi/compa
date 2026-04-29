@@ -783,47 +783,64 @@ class Push2:
                             root_pc: int = 0, base_note: int = 36,
                             min_note: int | None = None,
                             max_note: int | None = None) -> None:
-        """Paint the chord layout: each column is a scale degree
-        (highlighted by row 0 = bottom row in device color), and
-        higher rows show variation labels (7th, 1st inv, 2nd inv,
-        upper octave). Column 7 (octave-up I) draws in root color so
-        the player sees the wraparound.
+        """Paint the chord layout — each pad gets a color based on its
+        column's scale-function (which chord it plays).
 
-        Coloring:
-          - row 0 + 4 (triads): full bright in device-ish color
-          - row 1 + 5 (7ths):   slightly darker
-          - row 2 + 3 + 6 + 7 (inversions): darker still
-          - column 0 + 7 highlighted as roots (column tint)
+        Music-theory color code (diatonic 7-note scales):
+
+          col 0 (I)    = blue        — tonic, home base
+          col 1 (ii)   = teal        — supertonic
+          col 2 (iii)  = green       — mediant
+          col 3 (IV)   = yellow      — subdominant
+          col 4 (V)    = orange      — dominant
+          col 5 (vi)   = red         — submediant
+          col 6 (vii°) = magenta     — leading tone (most tense)
+          col 7 (I')   = blue dim    — tonic, octave up
+
+        Row 0 is the brightest (root-position triad). Rows 1+ get
+        progressively dimmer to indicate the row variation
+        (7th / 1st inv / 2nd inv) without losing the chord-function
+        color identity. The grid reads as 8 vertical "chord
+        columns" — instantly distinct from the chromatic/in-key
+        layouts which are uniform white.
+
+        Out-of-range chords stay visible at dim-1 brightness so
+        the layout shape remains apparent.
         """
         lo = 0 if min_note is None else min_note
         hi = 127 if max_note is None else max_note
         n = len(scale_offsets)
 
+        # Column → base color. Designed for 7-note diatonic scales
+        # (major/minor/dorian/etc.) — for shorter scales (pentatonic,
+        # blues) the same palette wraps gracefully.
+        COLUMN_COLORS = (
+            125,  # I    blue
+            36,   # ii   teal
+            122,  # iii  white-ish green
+            13,   # IV   yellow
+            9,    # V    orange
+            127,  # vi   red
+            53,   # vii° magenta
+            116,  # I'   pale blue (octave-up tonic, distinct shade)
+        )
+
         for idx in range(64):
             row = idx // 8
             col = idx % 8
-
-            # Color based on row variation.
             row_in_block = row % 4
-            row_oct = row // 4
-            if row_in_block == 0:
-                base_color = 122    # bright white — root-position triad
-            elif row_in_block == 1:
-                base_color = 11     # warm — has the 7th
-            elif row_in_block == 2:
-                base_color = 26     # cooler — 1st inversion
-            else:
-                base_color = 47     # purple-ish — 2nd inversion
-            if row_oct >= 1:
-                # Slight dim for upper octave block.
-                base_color = max(1, base_color - 4)
 
-            # Column = scale degree. Tonic columns (0, 7) get blue tint.
-            is_tonic_col = (col == 0) or (col == 7 and (8 % n == 1))
-            if is_tonic_col and row_in_block == 0:
-                color = 125  # blue — root chord
-            else:
+            base_color = COLUMN_COLORS[col % len(COLUMN_COLORS)]
+            # Variation dim — row 0 brightest, deeper rows darker but
+            # still recognisable by their column color.
+            if row_in_block == 0:
                 color = base_color
+            elif row_in_block == 1:
+                color = base_color - 4 if base_color > 5 else base_color
+            elif row_in_block == 2:
+                color = base_color - 8 if base_color > 9 else base_color
+            else:
+                color = base_color - 12 if base_color > 13 else 1
 
             # Range check — same dim treatment as the other layouts.
             chord_notes = Push2.chord_pad_to_notes(
@@ -835,7 +852,7 @@ class Push2:
                 # Some chord notes fall outside playable range — dim
                 # so the player knows but the pad still reads.
                 color = 1
-            self.set_pad_color(idx, color)
+            self.set_pad_color(idx, max(1, min(127, color)))
 
     # ── DJ mode layout ──────────────────────────────────────────────
 

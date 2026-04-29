@@ -253,28 +253,17 @@ class Push2Renderer:
         top_colors = [0] * 8
         if mode_top == "keys":
             # Buttons 1-7 = scale shortcuts. Active scale lit bright;
-            # inactive options dim. Button 8 = LAYOUT cycle —
-            # 3 states colored to match the layout the next press
-            # will land on:
-            #   chromatic now  → dim white (next: in-key)
-            #   in-key now     → green     (next: chord)
-            #   chord now      → magenta   (next: chromatic)
+            # inactive options dim. Button 8 is currently free
+            # (layout cycle moved to the dedicated Layout button).
             from engine.push2 import KEYS_TOP_BUTTON_SCALES
             try:
                 cur_scale = int(self.app.push2_keys_scale)
             except Exception:
                 cur_scale = 0
-            chord_mode = bool(
-                getattr(self.app, "push2_keys_chord_mode", False))
             for i in range(7):
                 scale_idx = KEYS_TOP_BUTTON_SCALES[i]
                 top_colors[i] = 122 if scale_idx == cur_scale else 8
-            if chord_mode:
-                top_colors[7] = 53     # magenta — chord layout
-            elif cur_scale != 0:
-                top_colors[7] = 126    # green   — in-key layout
-            else:
-                top_colors[7] = 1      # dim     — chromatic
+            top_colors[7] = 0  # reserved — off
         elif mode_top == "pattern":
             try:
                 base = int(self.app.push2_pattern_launch_page) * 8
@@ -429,12 +418,24 @@ class Push2Renderer:
             push2.set_button("undo", undo_color)
             self._last_undo_led = undo_color
 
-        # Layout LED — bright white in control mode when the focused
-        # device exposes more than one pad layout (cycled by tapping
-        # the button). Dim everywhere else so the legend is still
-        # visible in a dark room.
+        # Layout LED. Indicates the current keys-mode layout state
+        # (chromatic / in-key / chord) when in keys mode; otherwise
+        # reflects whether the control-mode pad layout is cyclable.
         layout_color = 3
-        if mode_for_oct == "control":
+        if mode_for_oct == "keys":
+            chord_mode = bool(
+                getattr(self.app, "push2_keys_chord_mode", False))
+            try:
+                cur_scale = int(self.app.push2_keys_scale)
+            except Exception:
+                cur_scale = 0
+            if chord_mode:
+                layout_color = 53     # magenta — CHORD layout
+            elif cur_scale != 0:
+                layout_color = 122    # bright white — IN-KEY
+            else:
+                layout_color = 8      # dim amber — chromatic
+        elif mode_for_oct == "control":
             try:
                 if int(self.app._push2_control_layout_count()) > 1:
                     layout_color = 122
