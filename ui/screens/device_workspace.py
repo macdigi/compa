@@ -73,6 +73,25 @@ class DeviceWorkspaceScreen:
         # while still playing notes through a connected MIDI keyboard.
         self._keys_persistent = False
 
+        # KEYS-tab view mode toggle:
+        #   "perform" — Layout C: huge now-playing readout + rolling
+        #               piano roll (last few seconds of notes).
+        #               Optimized for live performance / feedback.
+        #   "twin"    — Layout A: pad selector + Push 2 hardware grid
+        #               mirror + piano widget. Optimized for learning
+        #               the layout / dashboard glance.
+        self._keys_view_mode: str = "perform"
+
+        # Rolling note history for the perform view's piano roll.
+        # Each entry: {"note": int, "on": float, "off": float | None}
+        # Entries with off=None are still being held. Pruned to
+        # _keys_history_window seconds in _draw_keyboard_tab.
+        self._keys_note_history: list[dict] = []
+        self._keys_history_window: float = 4.0  # seconds shown on roll
+        # Set of notes that were held last frame — used to detect
+        # on / off transitions when polling the merged active set.
+        self._keys_prev_active: set[int] = set()
+
     # ── Layout helpers (adapt to screen size) ────────────────────────
 
     @property
@@ -1503,11 +1522,103 @@ class DeviceWorkspaceScreen:
     # ── KEYS tab (chromatic keyboard) ────────────────────────────────
 
     def _draw_keyboard_tab(self, surface, f_med, f_small, f_tiny):
-        """Draw the chromatic keyboard tab: header + pad selector + piano."""
-        kb = getattr(self.app, 'chromatic_kb', None)
-        top = self._controls_top + 2
+        """Draw the chromatic keyboard tab.
 
-        # ── Row 1: controls bar ──────────────────────────────────────
+        Two view modes (toggled via the VIEW button on the controls
+        row, persisted via self._keys_view_mode):
+
+          - "perform": Big now-playing readout + a rolling piano-roll
+            visualization showing the last few seconds of notes.
+            Live-performance / improv focused.
+
+          - "twin":    Pad selector + Push 2 hardware grid mirror +
+            piano keyboard widget. Hardware-glance / learning focused.
+
+        Both views share a top controls row (KEEP / LATCH / OCT-/0/+
+        / VIEW) and a bottom workflow hint, so toggling between them
+        feels like a layout swap rather than a screen change.
+        """
+        import time
+        kb = getattr(self.app, "chromatic_kb", None)
+        top = self._controls_top + 2
+        now = time.monotonic()
+
+        # ── Compute merged held-notes set ───────────────────────────
+        # Union of USB MIDI keyboard input and Push 2 keys-mode pads.
+        # Used by:
+        #   - controls-row "active notes" readout
+        #   - the piano widget in twin view
+        #   - the rolling piano-roll in perform view
+        #   - the note-history poll for piano-roll persistence
+        held: set[int] = set()
+        if kb:
+            held.update(kb.active_notes.keys())
+        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
+        held.update(push2_active.values())
+
+        # Update the rolling note history (drives the perform view's
+        # piano roll). Polled every frame — cheap, set-diff based.
+        self._update_keys_note_history(held, now)
+
+        # ── ROW 1: controls (always shown) ──────────────────────────
+        self._draw_keys_controls_row(
+            surface, top, kb, held, f_small, f_tiny)
+
+        # ── BODY: dispatch based on view mode ───────────────────────
+        body_top = top + 28 + 6
+        body_h = self._controls_top + self._controls_h - body_top - 18
+        body_rect = pygame.Rect(
+            10, body_top, theme.SCREEN_WIDTH - 20, body_h)
+
+        if self._keys_view_mode == "perform":
+            self._draw_keys_perform_body(
+                surface, body_rect, held, now, f_med, f_small, f_tiny)
+        else:
+            self._draw_keys_twin_body(
+                surface, body_rect, kb, held,
+                f_med, f_small, f_tiny)
+
+        # ── BOTTOM: workflow hint (always shown) ────────────────────
+        self._draw_keys_workflow_hint(surface, kb, f_tiny)
+
+    # ── Helpers: merged note history ─────────────────────────────────
+
+    def _update_keys_note_history(
+        self, held: set[int], now: float
+    ) -> None:
+        """Poll-driven note-history updater.
+
+        Detects note-on / note-off transitions by diffing this frame's
+        held-set against the previous frame's, then prunes entries
+        that have completely fallen off the history window. Each
+        history entry is a dict {note, on, off} where off=None means
+        the note is still being held.
+        """
+        # Detect new notes — append entries with off=None (held).
+        for note in held - self._keys_prev_active:
+            self._keys_note_history.append(
+                {"note": note, "on": now, "off": None})
+        # Detect releases — finalize the most recent unfinished entry
+        # for each released note.
+        for note in self._keys_prev_active - held:
+            for entry in reversed(self._keys_note_history):
+                if entry["note"] == note and entry["off"] is None:
+                    entry["off"] = now
+                    break
+        # Prune entries fully outside the visible window.
+        cutoff = now - self._keys_history_window
+        self._keys_note_history = [
+            e for e in self._keys_note_history
+            if (e["off"] if e["off"] is not None else now) > cutoff
+        ]
+        self._keys_prev_active = held.copy()
+
+    # ── Helpers: shared controls row ─────────────────────────────────
+
+    def _draw_keys_controls_row(
+        self, surface, top, kb, held, f_small, f_tiny
+    ) -> None:
+        """Top strip — always rendered. KEEP / LATCH / OCT± + VIEW."""
         # Keyboard name (left)
         if kb and kb.connected:
             name = kb.device_name[:20]
@@ -1516,80 +1627,275 @@ class DeviceWorkspaceScreen:
         name_surf = f_tiny.render(name, True, self._device_color)
         surface.blit(name_surf, (10, top + 6))
 
-        # Active notes text (center-left) — merge USB MIDI kb +
-        # Push 2 keys-mode pads, so the readout reflects whichever
-        # input source the player is using (or both at once).
-        held: set[int] = set()
-        if kb:
-            held.update(kb.active_notes.keys())
-        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
-        held.update(push2_active.values())
+        # Active-notes readout (center-left)
         if held:
             note_strs = [note_name(n) for n in sorted(held)]
             notes_text = "  ".join(note_strs[:6])
-            nt_surf = f_small.render(notes_text, True, self._device_color)
+            nt_surf = f_small.render(
+                notes_text, True, self._device_color)
             surface.blit(nt_surf, (160, top + 4))
 
-        # KEEP button — if ON, keyboard keeps playing when you leave KEYS tab
-        keep_rect = pygame.Rect(theme.SCREEN_WIDTH - 365, top, 60, 24)
+        # KEEP button
+        keep_rect = self._keys_keep_rect(top)
         keep_bg = theme.GREEN if self._keys_persistent else theme.BUTTON_BG
         keep_tc = theme.BG if self._keys_persistent else theme.TEXT
         pygame.draw.rect(surface, keep_bg, keep_rect, border_radius=5)
-        surface.blit(f_tiny.render("KEEP", True, keep_tc),
-                     f_tiny.render("KEEP", True, keep_tc).get_rect(
-                         center=keep_rect.center))
+        keep_lbl = f_tiny.render("KEEP", True, keep_tc)
+        surface.blit(keep_lbl, keep_lbl.get_rect(center=keep_rect.center))
 
         # LATCH button
-        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 300, top, 60, 24)
+        latch_rect = self._keys_latch_rect(top)
         latch_bg = theme.YELLOW if self._keys_latch else theme.BUTTON_BG
         latch_tc = theme.BG if self._keys_latch else theme.TEXT
         pygame.draw.rect(surface, latch_bg, latch_rect, border_radius=5)
-        surface.blit(f_tiny.render("LATCH", True, latch_tc),
-                     f_tiny.render("LATCH", True, latch_tc).get_rect(
-                         center=latch_rect.center))
+        latch_lbl = f_tiny.render("LATCH", True, latch_tc)
+        surface.blit(
+            latch_lbl, latch_lbl.get_rect(center=latch_rect.center))
 
         # Octave shift
         oct_val = kb.octave_shift if kb else 0
         oct_label = f"OCT {oct_val:+d}" if oct_val != 0 else "OCT 0"
-        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 210, top, 40, 24)
-        oct_rect = pygame.Rect(theme.SCREEN_WIDTH - 166, top, 56, 24)
-        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 106, top, 40, 24)
+        minus_rect = self._keys_oct_minus_rect(top)
+        oct_rect = self._keys_oct_label_rect(top)
+        plus_rect = self._keys_oct_plus_rect(top)
         for r in (minus_rect, plus_rect):
             pygame.draw.rect(surface, theme.BUTTON_BG, r, border_radius=5)
-        pygame.draw.rect(surface, theme.BG_LIGHTER, oct_rect, border_radius=5)
-        surface.blit(f_small.render("-", True, theme.TEXT),
-                     f_small.render("-", True, theme.TEXT).get_rect(
-                         center=minus_rect.center))
-        surface.blit(f_tiny.render(oct_label, True, theme.TEXT_DIM),
-                     f_tiny.render(oct_label, True, theme.TEXT_DIM).get_rect(
-                         center=oct_rect.center))
-        surface.blit(f_small.render("+", True, theme.TEXT),
-                     f_small.render("+", True, theme.TEXT).get_rect(
-                         center=plus_rect.center))
+        pygame.draw.rect(
+            surface, theme.BG_LIGHTER, oct_rect, border_radius=5)
+        m_lbl = f_small.render("-", True, theme.TEXT)
+        p_lbl = f_small.render("+", True, theme.TEXT)
+        ol_lbl = f_tiny.render(oct_label, True, theme.TEXT_DIM)
+        surface.blit(m_lbl, m_lbl.get_rect(center=minus_rect.center))
+        surface.blit(ol_lbl, ol_lbl.get_rect(center=oct_rect.center))
+        surface.blit(p_lbl, p_lbl.get_rect(center=plus_rect.center))
 
-        # ── Row 2: Pad selector — bank buttons + pad grid ───────────
-        pad_row_y = top + 28
+        # VIEW toggle — flips between perform / twin layouts.
+        view_rect = self._keys_view_rect(top)
+        view_label = (
+            "PERF" if self._keys_view_mode == "perform" else "TWIN")
+        # Always lit — it's a state indicator, not a momentary action.
+        pygame.draw.rect(
+            surface, self._device_color, view_rect, border_radius=5)
+        v_lbl = f_tiny.render(view_label, True, theme.BG)
+        surface.blit(v_lbl, v_lbl.get_rect(center=view_rect.center))
+
+    # Geometry helpers — single source of truth for hit-testing in
+    # _handle_keys_clicks. SCREEN_WIDTH is dynamic so we compute on
+    # demand rather than caching.
+
+    def _keys_keep_rect(self, top: int) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 420, top, 60, 24)
+
+    def _keys_latch_rect(self, top: int) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 355, top, 60, 24)
+
+    def _keys_oct_minus_rect(self, top: int) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 270, top, 40, 24)
+
+    def _keys_oct_label_rect(self, top: int) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 226, top, 56, 24)
+
+    def _keys_oct_plus_rect(self, top: int) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 166, top, 40, 24)
+
+    def _keys_view_rect(self, top: int) -> pygame.Rect:
+        return pygame.Rect(theme.SCREEN_WIDTH - 120, top, 56, 24)
+
+    # ── Helpers: bottom workflow hint ────────────────────────────────
+
+    def _draw_keys_workflow_hint(self, surface, kb, f_tiny) -> None:
+        """One-line workflow tip pinned to the bottom of the body."""
+        bottom_y = self._controls_top + self._controls_h - 14
+        if self._device_key == "SP-404MKII":
+            line = ("On SP: select pad > SHIFT + PAD 4 (CHROMATIC) > "
+                    "play keys here")
+        elif self._device_key == "P-6":
+            line = ("On P-6: hold PATTERN + GRANULAR > select pad > "
+                    "play keys here")
+        elif kb and kb._target_midi:
+            ch_text = f"MIDI Ch {kb._target_channel + 1}"
+            if kb.enabled:
+                ch_text += " · ACTIVE"
+            else:
+                ch_text += " · TAP KEY TO ENABLE"
+            line = ch_text
+        else:
+            line = "No MIDI output target"
+        surface.blit(f_tiny.render(line, True, theme.TEXT_DIM),
+                     (10, bottom_y))
+
+    # ── Helpers: PERFORM view (Layout C) ────────────────────────────
+
+    def _draw_keys_perform_body(
+        self, surface, body_rect, held, now,
+        f_med, f_small, f_tiny
+    ) -> None:
+        """Layout C — huge now-playing readout + rolling piano roll.
+
+        The rolling piano roll is sourced from
+        ``self._keys_note_history``: it draws a horizontal bar for
+        each entry, with x-position derived from time-since-on.
+        Currently-held notes are drawn in the device color and grow
+        rightward toward the "now" line; finished notes fade to
+        TEXT_DIM and scroll left until they fall off the window.
+        """
+        # ── Now-playing panel (top ~70px) — HERO font for impact ────
+        np_h = 70
+        np_rect = pygame.Rect(
+            body_rect.x, body_rect.y, body_rect.width, np_h)
+        pygame.draw.rect(
+            surface, theme.BG_PANEL, np_rect, border_radius=8)
+        pygame.draw.rect(
+            surface, theme.BORDER, np_rect, 1, border_radius=8)
+
+        f_hero = theme.font("hero")
+        if held:
+            notes_text = "  ".join(
+                note_name(n) for n in sorted(held)[:6])
+            np_surf = f_hero.render(
+                notes_text, True, self._device_color)
+            # Truncate gracefully if too wide for the panel.
+            max_w = np_rect.width - 36
+            if np_surf.get_width() > max_w:
+                # Fall back to f_med if hero overflows (lots of held notes).
+                np_surf = f_med.render(
+                    notes_text, True, self._device_color)
+            np_y = np_rect.y + (np_h - np_surf.get_height()) // 2
+            surface.blit(np_surf, (np_rect.x + 18, np_y))
+        else:
+            idle = f_small.render(
+                "play to begin", True, theme.TEXT_DIM)
+            idle_y = np_rect.y + (np_h - idle.get_height()) // 2
+            surface.blit(idle, (np_rect.x + 18, idle_y))
+
+        # Window-length indicator (top-right of the panel)
+        win_lbl = f_tiny.render(
+            f"{self._keys_history_window:.0f}s",
+            True, theme.TEXT_DIM)
+        surface.blit(
+            win_lbl, (np_rect.right - win_lbl.get_width() - 12,
+                      np_rect.y + 8))
+
+        # ── Piano roll (rest of body) ───────────────────────────────
+        roll_rect = pygame.Rect(
+            body_rect.x,
+            np_rect.bottom + 8,
+            body_rect.width,
+            body_rect.bottom - np_rect.bottom - 8,
+        )
+        if roll_rect.height < 60:
+            return  # extreme small-screen guard
+        pygame.draw.rect(
+            surface, theme.BG, roll_rect, border_radius=8)
+        pygame.draw.rect(
+            surface, theme.BORDER, roll_rect, 1, border_radius=8)
+
+        self._draw_keys_piano_roll(
+            surface, roll_rect, now, f_tiny)
+
+    def _draw_keys_piano_roll(
+        self, surface, rect, now, f_tiny
+    ) -> None:
+        """Draw the rolling piano-roll inside `rect`."""
+        # Note range — 4 octaves centered on the Push 2 base note.
+        # Falls back to C2 (36) if Push 2 hasn't been initialized.
+        base = getattr(self.app, "push2_keys_base_note", 36)
+        low_note = max(0, base - 12)
+        high_note = min(127, base + 36)
+        note_count = max(1, high_note - low_note + 1)
+        px_per_note = rect.height / note_count
+        window = self._keys_history_window
+
+        # Octave grid lines + C labels — gives the piano roll a
+        # readable spatial reference.
+        for n in range(low_note, high_note + 1):
+            if n % 12 == 0:  # C
+                y = (rect.bottom
+                     - (n - low_note + 1) * px_per_note
+                     + px_per_note / 2)
+                pygame.draw.line(
+                    surface, theme.BG_LIGHTER,
+                    (rect.x + 1, int(y)),
+                    (rect.right - 1, int(y)), 1)
+                lbl = f_tiny.render(
+                    f"C{n // 12 - 1}", True, theme.TEXT_DIM)
+                surface.blit(lbl, (rect.x + 4, int(y) - 9))
+
+        # "Now" line on the right edge — currently-held notes grow
+        # toward this line.
+        pygame.draw.line(
+            surface, self._device_color,
+            (rect.right - 1, rect.y + 1),
+            (rect.right - 1, rect.bottom - 1), 2)
+
+        # Reserve a sliver on the left for the C labels.
+        roll_x_start = rect.x + 28
+        roll_x_end = rect.right - 1
+        roll_w = roll_x_end - roll_x_start
+
+        # Note bars
+        for entry in self._keys_note_history:
+            note = entry["note"]
+            if note < low_note or note > high_note:
+                continue
+            on_time = entry["on"]
+            off_time = entry["off"] if entry["off"] is not None else now
+            x_on = roll_x_end - (now - on_time) / window * roll_w
+            x_off = roll_x_end - (now - off_time) / window * roll_w
+            x_start = max(roll_x_start, x_on)
+            x_end = min(roll_x_end, x_off)
+            if x_end <= x_start:
+                continue
+            y = (rect.bottom
+                 - (note - low_note) * px_per_note
+                 - max(2, px_per_note - 1))
+            h = max(2, int(px_per_note - 1))
+            active = entry["off"] is None
+            color = self._device_color if active else theme.TEXT_DIM
+            bar = pygame.Rect(
+                int(x_start), int(y),
+                max(2, int(x_end - x_start)), h)
+            pygame.draw.rect(surface, color, bar, border_radius=2)
+
+    # ── Helpers: TWIN view (Layout A) ───────────────────────────────
+
+    def _draw_keys_twin_body(
+        self, surface, body_rect, kb, held,
+        f_med, f_small, f_tiny
+    ) -> None:
+        """Layout A — pad selector + Push 2 grid mirror + piano.
+
+        Top of body is the pad selector (existing — picks which
+        device pad gets played chromatically). Below that, the body
+        is split horizontally:
+
+           LEFT  : 8x8 Push 2 hardware-grid mirror with note labels.
+                   Lit cells = currently held pads.
+           RIGHT : the existing piano-keyboard widget, now narrower.
+
+        The pad selector and piano widget keep their existing
+        behavior — this is the same surface as before with the
+        Push 2 mirror added on the left half.
+        """
+        # ── Pad selector (existing layout) ──────────────────────────
+        pad_row_y = body_rect.y - 6  # tighter against controls row
         pad_row_h = 28
 
-        # Device-specific bank/pad counts
         if self._device_key == "SP-404MKII":
-            bank_count = 10
-            pads_per_bank = 16
+            bank_count, pads_per_bank = 10, 16
             bank_labels = [chr(ord("A") + i) for i in range(10)]
         elif self._device_key == "P-6":
-            bank_count = 8
-            pads_per_bank = 6
+            bank_count, pads_per_bank = 8, 6
             bank_labels = [chr(ord("A") + i) for i in range(8)]
         else:
-            bank_count = 4
-            pads_per_bank = 16
+            bank_count, pads_per_bank = 4, 16
             bank_labels = [chr(ord("A") + i) for i in range(4)]
 
-        # Bank selector buttons (left side)
         bank_btn_w = min(28, (theme.SCREEN_WIDTH // 3) // bank_count)
         for bi in range(bank_count):
-            r = pygame.Rect(10 + bi * (bank_btn_w + 2), pad_row_y,
-                            bank_btn_w, pad_row_h)
+            r = pygame.Rect(
+                10 + bi * (bank_btn_w + 2), pad_row_y,
+                bank_btn_w, pad_row_h)
             active = (bi == self._keys_bank)
             bg = self._device_color if active else theme.BG_LIGHTER
             tc = theme.BG if active else theme.TEXT_DIM
@@ -1597,14 +1903,16 @@ class DeviceWorkspaceScreen:
             lbl = f_tiny.render(bank_labels[bi], True, tc)
             surface.blit(lbl, lbl.get_rect(center=r.center))
 
-        # Pad buttons (right side, filling remaining width)
         pad_start_x = 10 + bank_count * (bank_btn_w + 2) + 8
         pad_avail_w = theme.SCREEN_WIDTH - pad_start_x - 10
-        pad_btn_w = min(36, (pad_avail_w - (pads_per_bank - 1) * 2) // pads_per_bank)
+        pad_btn_w = min(
+            36,
+            (pad_avail_w - (pads_per_bank - 1) * 2) // pads_per_bank)
         for pi in range(pads_per_bank):
-            r = pygame.Rect(pad_start_x + pi * (pad_btn_w + 2), pad_row_y,
-                            pad_btn_w, pad_row_h)
-            active = (pi == self._keys_pad and self._keys_bank == self._keys_bank)
+            r = pygame.Rect(
+                pad_start_x + pi * (pad_btn_w + 2), pad_row_y,
+                pad_btn_w, pad_row_h)
+            active = (pi == self._keys_pad)
             bg = self._device_color if active else theme.PAD_OFF
             tc = theme.BG if active else theme.TEXT
             pygame.draw.rect(surface, bg, r, border_radius=4)
@@ -1612,75 +1920,167 @@ class DeviceWorkspaceScreen:
             lbl = f_tiny.render(str(pi + 1), True, tc)
             surface.blit(lbl, lbl.get_rect(center=r.center))
 
-        # Selected pad label
-        bank_letter = bank_labels[self._keys_bank] if self._keys_bank < bank_count else "?"
+        bank_letter = (
+            bank_labels[self._keys_bank]
+            if self._keys_bank < bank_count else "?")
         sel_text = f"{bank_letter}-{self._keys_pad + 1}"
         if self._keys_selected_name:
             sel_text += f"  {self._keys_selected_name}"
-        sel_surf = f_tiny.render(sel_text, True, self._device_color)
-        surface.blit(sel_surf, (pad_start_x, pad_row_y - 12))
+        surface.blit(
+            f_tiny.render(sel_text, True, self._device_color),
+            (pad_start_x, pad_row_y - 12))
 
-        # ── Piano display (below pad selector) ──────────────────────
-        piano_top = pad_row_y + pad_row_h + 6
-        piano_h = self._controls_top + self._controls_h - piano_top - 18
+        # ── Split below pad selector: Push 2 grid | Piano ───────────
+        split_top = pad_row_y + pad_row_h + 8
+        split_h = body_rect.bottom - split_top
+        if split_h < 80:
+            return
+
+        # Left: Push 2 8x8 hardware mirror
+        grid_w = min(int(body_rect.width * 0.42), 320)
+        grid_rect = pygame.Rect(
+            body_rect.x, split_top, grid_w, split_h)
+        self._draw_keys_push2_mirror(surface, grid_rect, f_tiny)
+
+        # Right: piano keyboard widget
+        piano_rect = pygame.Rect(
+            grid_rect.right + 8, split_top,
+            body_rect.right - grid_rect.right - 8, split_h)
         if self._piano_display:
-            new_rect = pygame.Rect(10, piano_top,
-                                    theme.SCREEN_WIDTH - 20, piano_h)
-            if self._piano_display.rect != new_rect:
-                self._piano_display.set_rect(new_rect)
-            # Merge active notes from BOTH input sources so the piano
-            # lights up whether the player is hitting USB-MIDI keys
-            # OR Push 2 keys-mode pads. Previously only kb.active_notes
-            # was rendered, so Push 2 plays produced no visual feedback.
+            if self._piano_display.rect != piano_rect:
+                self._piano_display.set_rect(piano_rect)
             combined: dict[int, int] = {}
             if kb:
                 combined.update(kb.active_notes)
-            push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
+            push2_active = (
+                getattr(self.app, "_push2_keys_active", {}) or {})
             for note in push2_active.values():
                 combined.setdefault(note, 100)
             self._piano_display._active_notes = combined
             self._piano_display.draw(surface)
 
-        # Channel info + workflow hint (bottom)
-        bottom_y = self._controls_top + self._controls_h - 14
-        if self._device_key == "SP-404MKII":
-            line1 = "On SP: select pad > SHIFT + PAD 4 (CHROMATIC) > play keys here"
-            surface.blit(f_tiny.render(line1, True, theme.TEXT_DIM),
-                         (10, bottom_y))
-        elif self._device_key == "P-6":
-            line1 = "On P-6: hold PATTERN + GRANULAR > select pad > play keys here"
-            surface.blit(f_tiny.render(line1, True, theme.TEXT_DIM),
-                         (10, bottom_y))
-        elif kb and kb._target_midi:
-            ch_text = f"MIDI Ch {kb._target_channel + 1}"
-            if kb.enabled:
-                ch_text += " · ACTIVE"
-            else:
-                ch_text += " · TAP KEY TO ENABLE"
-            surface.blit(f_tiny.render(ch_text, True, theme.TEXT_DIM),
-                         (10, bottom_y))
-        else:
-            surface.blit(f_tiny.render("No MIDI output target",
-                                        True, theme.TEXT_DIM), (10, bottom_y))
+    def _draw_keys_push2_mirror(
+        self, surface, rect, f_tiny
+    ) -> None:
+        """8x8 hardware-mirror of the Push 2 pad grid.
+
+        Pad 0 is bottom-left (matches the physical hardware), so we
+        invert the row index when laying out cells. Each cell shows
+        the note name it would play given the current scale / root /
+        base-note, using the same mapping as the Push 2 keys-mode
+        pad handler.
+        """
+        # Border / background.
+        pygame.draw.rect(surface, theme.BG_PANEL, rect, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
+
+        # Caption.
+        cap = f_tiny.render("PUSH 2", True, theme.TEXT_DIM)
+        surface.blit(cap, (rect.x + 8, rect.y + 6))
+
+        # Compute the resolver lazily — `engine.push2` may not be
+        # imported yet on the first draw.
+        try:
+            from engine.push2 import Push2, SCALES
+        except Exception:
+            return
+
+        scale_idx = getattr(self.app, "push2_keys_scale", 0) or 0
+        scale_name, scale_offsets = SCALES[scale_idx % len(SCALES)]
+        base = getattr(self.app, "push2_keys_base_note", 36)
+        root_pc = getattr(self.app, "push2_keys_root", 0) or 0
+
+        def pad_to_note(idx: int) -> int:
+            if scale_name == "chromatic":
+                return Push2.keys_pad_to_note(idx, base_note=base)
+            return Push2.in_key_pad_to_note(
+                idx, scale_offsets, root_pc=root_pc, base_note=base)
+
+        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
+
+        # 8x8 grid centered in the panel.
+        cols = rows = 8
+        cap_h = 22  # space for the caption
+        avail_w = rect.width - 12
+        avail_h = rect.height - 12 - cap_h
+        cell_size = max(
+            12,
+            min(avail_w // cols, avail_h // rows) - 3)
+        grid_w = cols * (cell_size + 2)
+        grid_h = rows * (cell_size + 2)
+        grid_x = rect.x + (rect.width - grid_w) // 2
+        grid_y = rect.y + cap_h + (avail_h - grid_h) // 2 + 6
+
+        for row in range(rows):
+            # Visual top→bottom is row 7 → 0 so pad 0 ends up on the
+            # bottom row, matching Push 2 hardware orientation.
+            visual_row = (rows - 1) - row
+            for col in range(cols):
+                pad_idx = row * cols + col
+                try:
+                    note = pad_to_note(pad_idx)
+                except Exception:
+                    note = -1
+                cell = pygame.Rect(
+                    grid_x + col * (cell_size + 2),
+                    grid_y + visual_row * (cell_size + 2),
+                    cell_size, cell_size)
+                is_active = pad_idx in push2_active
+                # In-scale / root highlighting (subtle background tint
+                # so the ear-friendly notes pop visually too).
+                in_scale = scale_name == "chromatic"
+                is_root = False
+                if not in_scale and note >= 0:
+                    pc = note % 12
+                    in_scale = ((pc - root_pc) % 12) in scale_offsets
+                    is_root = (pc == root_pc)
+                if is_active:
+                    bg = self._device_color
+                    tc = theme.BG
+                elif is_root:
+                    bg = theme.BG_LIGHTER
+                    tc = self._device_color
+                elif in_scale:
+                    bg = theme.PAD_OFF
+                    tc = theme.TEXT
+                else:
+                    bg = theme.BG
+                    tc = theme.TEXT_DIM
+                pygame.draw.rect(
+                    surface, bg, cell, border_radius=3)
+                pygame.draw.rect(
+                    surface, theme.BORDER, cell, 1, border_radius=3)
+                if note >= 0 and cell_size >= 18:
+                    try:
+                        label = note_name(note)
+                    except Exception:
+                        label = ""
+                    if label:
+                        ls = f_tiny.render(label, True, tc)
+                        surface.blit(
+                            ls, ls.get_rect(center=cell.center))
 
     def _handle_keys_clicks(self, mx, my):
-        """Handle clicks within the KEYS tab."""
+        """Handle clicks within the KEYS tab.
+
+        Geometry rects come from the same helpers the draw code uses
+        (_keys_keep_rect, etc.) so layout changes only need to touch
+        one place. Pad-selector and piano-keyboard hits are gated on
+        view mode — they don't render in perform view, so they can't
+        be hit there either.
+        """
         kb = getattr(self.app, 'chromatic_kb', None)
         if kb is None:
             return
         top = self._controls_top + 2
 
-        # ── Row 1 controls ───────────────────────────────────────────
+        # ── Row 1 controls — always live, regardless of view mode ───
 
-        # KEEP button
-        keep_rect = pygame.Rect(theme.SCREEN_WIDTH - 365, top, 60, 24)
-        if keep_rect.collidepoint(mx, my):
+        if self._keys_keep_rect(top).collidepoint(mx, my):
             self._keys_persistent = not self._keys_persistent
             return
 
-        # LATCH button
-        latch_rect = pygame.Rect(theme.SCREEN_WIDTH - 300, top, 60, 24)
-        if latch_rect.collidepoint(mx, my):
+        if self._keys_latch_rect(top).collidepoint(mx, my):
             self._keys_latch = not self._keys_latch
             if not self._keys_latch:
                 for note in list(self._latched_notes):
@@ -1690,21 +2090,32 @@ class DeviceWorkspaceScreen:
                 self._latched_notes.clear()
             return
 
-        # Octave shift buttons
-        minus_rect = pygame.Rect(theme.SCREEN_WIDTH - 210, top, 40, 24)
-        plus_rect = pygame.Rect(theme.SCREEN_WIDTH - 106, top, 40, 24)
-        if minus_rect.collidepoint(mx, my):
+        if self._keys_oct_minus_rect(top).collidepoint(mx, my):
             kb.octave_shift = max(-3, kb.octave_shift - 1)
             if self._piano_display:
                 self._piano_display.shift_octave(-1)
             return
-        if plus_rect.collidepoint(mx, my):
+        if self._keys_oct_plus_rect(top).collidepoint(mx, my):
             kb.octave_shift = min(3, kb.octave_shift + 1)
             if self._piano_display:
                 self._piano_display.shift_octave(1)
             return
 
+        # VIEW toggle — flip between perform / twin layouts.
+        if self._keys_view_rect(top).collidepoint(mx, my):
+            self._keys_view_mode = (
+                "twin" if self._keys_view_mode == "perform" else "perform")
+            return
+
+        # ── The rest only matters in twin view ──────────────────────
+        # Perform view has no pad selector and no piano keyboard,
+        # just the rolling roll. Skip those hit-tests cleanly.
+        if self._keys_view_mode != "twin":
+            return
+
         # ── Row 2: pad selector ──────────────────────────────────────
+        # Twin body uses (body_rect.y - 6) as pad_row_y — body_rect.y
+        # is computed from top + 28 + 6, so pad_row_y = top + 28.
         pad_row_y = top + 28
         pad_row_h = 28
 
@@ -1717,31 +2128,34 @@ class DeviceWorkspaceScreen:
 
         bank_btn_w = min(28, (theme.SCREEN_WIDTH // 3) // bank_count)
 
-        # Bank buttons
         for bi in range(bank_count):
             r = pygame.Rect(10 + bi * (bank_btn_w + 2), pad_row_y,
                             bank_btn_w, pad_row_h)
             if r.collidepoint(mx, my):
                 self._keys_bank = bi
                 # Sync to app-level state so external MIDI controllers
-                # (Spectra etc) that use pad.trigger.* hit the right bank
+                # (Spectra etc.) that use pad.trigger.* hit the right
+                # bank.
                 if hasattr(self.app, "current_bank"):
                     self.app.current_bank[self._device_key] = bi
                 return
 
-        # Pad buttons
         pad_start_x = 10 + bank_count * (bank_btn_w + 2) + 8
         pad_avail_w = theme.SCREEN_WIDTH - pad_start_x - 10
-        pad_btn_w = min(36, (pad_avail_w - (pads_per_bank - 1) * 2) // pads_per_bank)
+        pad_btn_w = min(
+            36, (pad_avail_w - (pads_per_bank - 1) * 2) // pads_per_bank)
         for pi in range(pads_per_bank):
-            r = pygame.Rect(pad_start_x + pi * (pad_btn_w + 2), pad_row_y,
-                            pad_btn_w, pad_row_h)
+            r = pygame.Rect(
+                pad_start_x + pi * (pad_btn_w + 2), pad_row_y,
+                pad_btn_w, pad_row_h)
             if r.collidepoint(mx, my):
                 self._keys_pad = pi
                 self._select_chromatic_pad(self._keys_bank, pi)
                 return
 
         # ── Piano touch-to-play ──────────────────────────────────────
+        # Only available in twin view — perform view's piano-roll is
+        # display-only.
         if self._piano_display:
             note = self._piano_display.handle_event_at(mx, my)
             if note >= 0:
