@@ -721,6 +721,9 @@ class Push2Renderer:
         if held:
             # Replace BPM with the currently-held note(s) so the user
             # can see exactly which key is sounding without guessing.
+            # When 3+ notes form a recognized chord, append the chord
+            # label as a small kicker beneath the note names.
+            from engine.chord_recognition import recognize_chord
             notes_sorted = sorted(set(held.values()))
             names = "  ".join(self._note_name(n) for n in notes_sorted)
             font = self._font_hero if len(notes_sorted) == 1 else self._font_big
@@ -729,8 +732,18 @@ class Push2Renderer:
             max_w = SURF_W - 280
             if ns.get_width() > max_w:
                 ns = self._font_big.render(names, True, dev_color)
-            cx = SURF_W // 2 - ns.get_width() // 2
-            surf.blit(ns, (cx, 4))
+            chord_label = recognize_chord(notes_sorted)
+            if chord_label:
+                # Two-line layout: names on top, chord underneath.
+                cx = SURF_W // 2 - ns.get_width() // 2
+                surf.blit(ns, (cx, 0))
+                cs = self._font_small.render(
+                    chord_label.upper(), True, dev_color)
+                csx = SURF_W // 2 - cs.get_width() // 2
+                surf.blit(cs, (csx, ns.get_height() + 1))
+            else:
+                cx = SURF_W // 2 - ns.get_width() // 2
+                surf.blit(ns, (cx, 4))
         elif encoder_overlay is not None:
             label, value, sub = encoder_overlay
             big = self._font_hero.render(value, True, dev_color)

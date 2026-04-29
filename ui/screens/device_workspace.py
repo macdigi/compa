@@ -13,6 +13,7 @@ Layout (top to bottom):
 
 import numpy as np
 import pygame
+from engine.chord_recognition import recognize_chord
 from ui.components.piano_display import PianoDisplay, note_name
 from .. import theme
 from ..components.knob import Knob
@@ -1740,6 +1741,10 @@ class DeviceWorkspaceScreen:
         TEXT_DIM and scroll left until they fall off the window.
         """
         # ── Now-playing panel (top ~70px) — HERO font for impact ────
+        # Layout when notes are held:
+        #   row 1 (hero):  "C  E  G"          — actual held notes
+        #   row 2 (small): "Cmaj"              — chord-recognition kicker
+        # Idle state shows "play to begin" centered.
         np_h = 70
         np_rect = pygame.Rect(
             body_rect.x, body_rect.y, body_rect.width, np_h)
@@ -1760,8 +1765,21 @@ class DeviceWorkspaceScreen:
                 # Fall back to f_med if hero overflows (lots of held notes).
                 np_surf = f_med.render(
                     notes_text, True, self._device_color)
-            np_y = np_rect.y + (np_h - np_surf.get_height()) // 2
-            surface.blit(np_surf, (np_rect.x + 18, np_y))
+            chord_label = recognize_chord(held)
+            if chord_label:
+                # Two-line layout: notes top, chord kicker bottom.
+                top_h = np_surf.get_height()
+                top_y = np_rect.y + 8
+                surface.blit(np_surf, (np_rect.x + 18, top_y))
+                chord_surf = f_small.render(
+                    chord_label.upper(), True, theme.TEXT_DIM)
+                surface.blit(
+                    chord_surf,
+                    (np_rect.x + 18, top_y + top_h + 2))
+            else:
+                # Single-line: notes vertically centered.
+                np_y = np_rect.y + (np_h - np_surf.get_height()) // 2
+                surface.blit(np_surf, (np_rect.x + 18, np_y))
         else:
             idle = f_small.render(
                 "play to begin", True, theme.TEXT_DIM)
