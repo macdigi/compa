@@ -117,6 +117,18 @@ class Push2Renderer:
         # cleared after the save. None when no screenshot is pending.
         self._screenshot_pending: str | None = None
 
+        # Keys-mode rolling note history — drives the piano roll
+        # under the keyboard in _draw_keys_body. Each entry:
+        #   {"note": int, "on": float, "off": float | None}
+        # off=None means the note is still being held. Pruned to
+        # _keys_history_window seconds. Lives on the renderer
+        # instance (separate from device_workspace's identical
+        # state) so the LCD render thread doesn't have to reach
+        # across to UI-thread state.
+        self._keys_history: list[dict] = []
+        self._keys_prev_active: set[int] = set()
+        self._keys_history_window: float = 4.0
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -666,6 +678,16 @@ class Push2Renderer:
                                           top=50, height=110)
             return
 
+        # In keys mode swap the scope for a piano keyboard with held
+        # notes lit + a rolling piano-roll showing the last few
+        # seconds of activity. Same header (which already shows the
+        # held note name(s) center-stage), no encoder labels — the
+        # keyboard + roll fills the full 110px body for readability.
+        if mode == "keys":
+            self._draw_header(surf, dev_color)
+            self._draw_keys_body(surf, dev_color, top=50, height=110)
+            return
+
         self._draw_header(surf, dev_color)
         self._draw_scope(surf, dev_color, top=50, height=78)
         self._draw_encoder_labels(surf, top=130, height=28)
@@ -1127,6 +1149,226 @@ class Push2Renderer:
             pending = 0.0
         if pending and time.monotonic() < pending:
             self._draw_new_confirm_overlay(surf, top, height, pending)
+
+    # ── Keys-mode body ────────────────────────────────────────────
+
+    def _draw_keys_body(self, surf, dev_color, top: int,
+                          height: int) -> None:
+        """Keys-mode body: piano keyboard top, rolling note roll bottom.
+
+        Replaces the scope when Push 2 is in keys mode. Body is
+        SURF_W (960) x ``height`` (typically 110px), split:
+
+          ┌──────────────────────────────────────────────┐
+          │  Piano keyboard (~60% of height)             │  ~64px
+          ├──────────────────────────────────────────────┤
+          │  Rolling note roll (last 4s, scrolling left) │  ~40px
+          └──────────────────────────────────────────────┘
+
+        Held notes are sourced from chromatic_kb.active_notes ∪
+        app._push2_keys_active so the keyboard reflects whichever
+        input is active (USB MIDI keys, Push 2 pads, or both).
+        """
+        pad_x = 14
+        body_rect = pygame.Rect(
+            pad_x, top, SURF_W - pad_x * 2, height)
+
+        # Held notes — same merge as device_workspace's controls row.
+        held: set[int] = set()
+        kb = getattr(self.app, "chromatic_kb", None)
+        if kb is not None:
+            try:
+                held.update(kb.active_notes.keys())
+            except Exception:
+                pass
+        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
+        held.update(push2_active.values())
+
+        # Update the rolling history so the piano roll has data.
+        now = time.monotonic()
+        self._update_keys_history(held, now)
+
+        # Split: keyboard above, roll below.
+        kb_h = max(48, int(height * 0.58))
+        roll_h = height - kb_h - 4
+        kb_rect = pygame.Rect(
+            body_rect.x, body_rect.y, body_rect.width, kb_h)
+        roll_rect = pygame.Rect(
+            body_rect.x, body_rect.y + kb_h + 4,
+            body_rect.width, max(20, roll_h))
+
+        self._draw_keys_piano_keyboard(
+            surf, kb_rect, held, dev_color)
+        self._draw_keys_piano_roll(
+            surf, roll_rect, held, now, dev_color)
+
+    def _update_keys_history(self, held: set[int],
+                               now: float) -> None:
+        """Diff held vs prev to record on/off transitions."""
+        for note in held - self._keys_prev_active:
+            self._keys_history.append(
+                {"note": note, "on": now, "off": None})
+        for note in self._keys_prev_active - held:
+            for entry in reversed(self._keys_history):
+                if entry["note"] == note and entry["off"] is None:
+                    entry["off"] = now
+                    break
+        cutoff = now - self._keys_history_window
+        self._keys_history = [
+            e for e in self._keys_history
+            if (e["off"] if e["off"] is not None else now) > cutoff
+        ]
+        self._keys_prev_active = set(held)
+
+    def _draw_keys_piano_keyboard(
+        self, surf, rect: pygame.Rect, held: set[int],
+        dev_color
+    ) -> None:
+        """Draw a piano keyboard sized to fit `rect`.
+
+        Range adapts to the Push 2 keys-mode base note + ~3 octaves
+        of headroom in either direction (we want the held notes to
+        fall in the visible window). Black keys are drawn over white
+        keys after all whites are rendered, then held notes get a
+        glow overlay so it reads at a glance even on the small LCD.
+        """
+        pygame.draw.rect(surf, BG_SCOPE, rect, border_radius=5)
+        pygame.draw.rect(surf, GRID, rect, 1, border_radius=5)
+
+        # Window: 4 octaves centered on the base note. Falls back to
+        # C2 (36) → C6 (84) when push2_keys_base_note isn't set yet.
+        base = getattr(self.app, "push2_keys_base_note", 36)
+        low_pc = max(0, (base // 12 - 1) * 12)
+        high_pc = min(127, low_pc + 48)  # 4 octaves
+        # Round to whole octaves so the rightmost key is always a B.
+        low_pc -= low_pc % 12
+        high_pc = low_pc + 48
+
+        # White-key count in the window.
+        white_keys = [n for n in range(low_pc, high_pc + 1)
+                      if (n % 12) in (0, 2, 4, 5, 7, 9, 11)]
+        if not white_keys:
+            return
+        wk_w = (rect.width - 4) / max(1, len(white_keys))
+        wk_h = rect.height - 4
+
+        # White-key x positions (note → x).
+        x_for: dict[int, float] = {}
+        for i, n in enumerate(white_keys):
+            x_for[n] = rect.x + 2 + i * wk_w
+
+        # Pass 1: draw all white keys.
+        WHITE = (235, 235, 235)
+        WHITE_SHADOW = (180, 180, 180)
+        for n in white_keys:
+            x = x_for[n]
+            kr = pygame.Rect(int(x), rect.y + 2,
+                             max(1, int(wk_w) - 1), int(wk_h))
+            held_now = n in held
+            color = dev_color if held_now else WHITE
+            pygame.draw.rect(surf, color, kr, border_radius=2)
+            pygame.draw.rect(
+                surf, WHITE_SHADOW, kr, 1, border_radius=2)
+            if held_now:
+                # Note-name overlay on held white keys.
+                lbl = self._note_name(n)
+                ts = self._font_tiny.render(lbl, True, BG_SCOPE)
+                surf.blit(
+                    ts, ts.get_rect(midbottom=(int(x + wk_w // 2),
+                                                rect.bottom - 4)))
+
+        # Pass 2: draw black keys over the gaps.
+        # Black-key map: each black key sits between two white keys.
+        # We attach a black key to the white key it sits AFTER (its
+        # left neighbor) using offsets for the standard layout.
+        black_set = (1, 3, 6, 8, 10)  # pitch classes of black keys
+        bk_w = wk_w * 0.62
+        bk_h = wk_h * 0.62
+        for n in range(low_pc, high_pc + 1):
+            if (n % 12) not in black_set:
+                continue
+            # Left white-key neighbor (one semitone below).
+            left_w = n - 1
+            if left_w not in x_for:
+                continue
+            x_left = x_for[left_w]
+            x = x_left + wk_w - bk_w / 2
+            kr = pygame.Rect(int(x), rect.y + 2,
+                             max(1, int(bk_w)), int(bk_h))
+            held_now = n in held
+            if held_now:
+                pygame.draw.rect(
+                    surf, dev_color, kr, border_radius=2)
+                lbl = self._note_name(n)
+                ts = self._font_tiny.render(lbl, True, BG_SCOPE)
+                surf.blit(
+                    ts, ts.get_rect(midbottom=(int(x + bk_w // 2),
+                                                kr.bottom - 2)))
+            else:
+                pygame.draw.rect(
+                    surf, (16, 16, 22), kr, border_radius=2)
+
+    def _draw_keys_piano_roll(
+        self, surf, rect: pygame.Rect, held: set[int],
+        now: float, dev_color
+    ) -> None:
+        """Rolling note-roll: notes scroll right-to-left, held notes
+        grow toward the "now" line on the right edge."""
+        if rect.height < 16:
+            return
+        pygame.draw.rect(surf, BG_SCOPE, rect, border_radius=4)
+
+        base = getattr(self.app, "push2_keys_base_note", 36)
+        low_pc = max(0, (base // 12 - 1) * 12)
+        high_pc = min(127, low_pc + 48)
+        low_pc -= low_pc % 12
+        high_pc = low_pc + 48
+        note_count = high_pc - low_pc + 1
+        if note_count <= 0:
+            return
+        px_per_note = rect.height / note_count
+        window = self._keys_history_window
+
+        # Octave grid lines.
+        for n in range(low_pc, high_pc + 1):
+            if n % 12 == 0:
+                y = (rect.bottom
+                     - (n - low_pc + 1) * px_per_note
+                     + px_per_note / 2)
+                pygame.draw.line(
+                    surf, GRID,
+                    (rect.x + 1, int(y)),
+                    (rect.right - 1, int(y)), 1)
+
+        # "Now" line on the right edge.
+        pygame.draw.line(
+            surf, dev_color,
+            (rect.right - 1, rect.y + 1),
+            (rect.right - 1, rect.bottom - 1), 2)
+
+        # Note bars.
+        for entry in self._keys_history:
+            note = entry["note"]
+            if note < low_pc or note > high_pc:
+                continue
+            on_t = entry["on"]
+            off_t = entry["off"] if entry["off"] is not None else now
+            x_on = rect.right - (now - on_t) / window * rect.width
+            x_off = rect.right - (now - off_t) / window * rect.width
+            x_start = max(rect.x + 1, x_on)
+            x_end = min(rect.right - 1, x_off)
+            if x_end <= x_start:
+                continue
+            y = (rect.bottom
+                 - (note - low_pc) * px_per_note
+                 - max(2, px_per_note - 1))
+            h = max(2, int(px_per_note - 1))
+            active = entry["off"] is None
+            color = dev_color if active else DIM
+            bar = pygame.Rect(
+                int(x_start), int(y),
+                max(2, int(x_end - x_start)), h)
+            pygame.draw.rect(surf, color, bar, border_radius=1)
 
     def _draw_new_confirm_overlay(self, surf, top: int, height: int,
                                     pending_until: float) -> None:
