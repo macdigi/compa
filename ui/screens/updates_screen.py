@@ -1,21 +1,16 @@
 """Compa Updates screen.
 
-Shown when the user taps the update pill in the nav bar (or navigates
-manually via switch_screen("updates")). Surfaces what's coming in the
-pending update in plain English, plus an "Update now" button that
-pulls + restarts the service.
+Two views in one screen:
 
-Source of release notes (in priority order):
+  1. PENDING (top) — when the local is behind origin. Shows the new
+     entries about to land + an "Update now" action.
+  2. HISTORY (below, always shown) — the full CHANGELOG.md as it
+     exists on this device, so users have one place to scroll through
+     everything that's ever shipped, written in producer terms.
 
-  1. The "## Unreleased" section of CHANGELOG.md as it appears on
-     origin/<branch>. Producer-friendly bullet points authored by the
-     maintainer pre-push.
-  2. Falls back to commit subjects (one-liners) of the commits the
-     local is currently behind on.
-
-The screen is intentionally minimal: a header, a scrollable bullet
-list, and two actions at the bottom (Update Now / Later). No
-toggling, no settings — those live in the Settings screen.
+Reachable two ways:
+  - Tap the pulsing "UPDATE" pill in the nav bar (only when pending).
+  - From Settings → Updates (always).
 """
 
 from __future__ import annotations
@@ -27,42 +22,60 @@ from .. import theme
 
 
 class UpdatesScreen:
-    """Shows pending update info + an Update Now action."""
-
     HEADER_H = 36
 
     def __init__(self, app) -> None:
         self.app = app
-        self._scroll = 0  # vertical scroll offset for the bullet list
-        self._status = ""  # transient status string ("Updating...", etc.)
+        self._scroll = 0
+        self._status = ""
         self._is_applying = False
-        self._cached_bullets: list[str] | None = None
+        self._cached_pending: list[str] | None = None
+        self._cached_history: list[tuple[str, list[str]]] | None = None
+        self._is_checking = False
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def on_enter(self) -> None:
         self._scroll = 0
-        self._cached_bullets = None
+        self._cached_pending = None
+        self._cached_history = None
         self._status = ""
-        # Kick off a fresh check so the screen reflects current state
-        # rather than whatever the background poller had last time.
-        try:
-            self.app.updater.check_async(self._on_check_done)
-        except Exception:
-            pass
+        self._kick_check()
 
     def on_exit(self) -> None:
         pass
 
-    def _on_check_done(self, _result: dict) -> None:
-        # Force re-render of cached bullets next draw.
-        self._cached_bullets = None
+    def _kick_check(self) -> None:
+        """Fire a fresh remote check so on-screen counts are live."""
+        if self._is_checking:
+            return
+        self._is_checking = True
+        self._status = "Checking..."
 
-    # ── Bullet content ───────────────────────────────────────────────
+        def _on_done(_result: dict) -> None:
+            self._cached_pending = None
+            self._is_checking = False
+            try:
+                if self.app.updater.update_available:
+                    n = self.app.updater.commits_behind
+                    self._status = (
+                        f"{n} new change{'s' if n != 1 else ''} ready")
+                else:
+                    self._status = "Up to date"
+            except Exception:
+                self._status = ""
 
-    def _resolve_bullets(self) -> list[str]:
-        if self._cached_bullets is not None:
-            return self._cached_bullets
+        try:
+            self.app.updater.check_async(_on_done)
+        except Exception:
+            self._is_checking = False
+            self._status = ""
+
+    # ── Content resolution ──────────────────────────────────────────
+
+    def _pending_bullets(self) -> list[str]:
+        if self._cached_pending is not None:
+            return self._cached_pending
         bullets: list[str] = []
         try:
             bullets = list(
@@ -75,29 +88,47 @@ class UpdatesScreen:
                     self.app.updater.commit_messages_behind() or [])
             except Exception:
                 msgs = []
-            # Strip conventional-commit prefixes for readability.
             cleaned = []
             for m in msgs:
+                # Strip "feat(scope):" / "fix:" prefixes.
                 if ":" in m and len(m.split(":", 1)[0]) <= 30:
                     cleaned.append(m.split(":", 1)[1].strip())
                 else:
                     cleaned.append(m)
             bullets = cleaned
-        self._cached_bullets = bullets
+        self._cached_pending = bullets
         return bullets
+
+    def _history(self) -> list[tuple[str, list[str]]]:
+        if self._cached_history is not None:
+            return self._cached_history
+        try:
+            sections = list(
+                self.app.updater.changelog_history(max_sections=20)
+                or [])
+        except Exception:
+            sections = []
+        # If the topmost is "Unreleased" but nothing's pending on the
+        # remote, drop it from history so we don't show "Unreleased"
+        # entries that have already been pulled.
+        self._cached_history = sections
+        return sections
 
     # ── Actions ──────────────────────────────────────────────────────
 
     def _apply(self) -> None:
         if self._is_applying:
             return
+        if not getattr(self.app.updater, "update_available", False):
+            return
         self._is_applying = True
         self._status = "Pulling latest..."
 
-        def _do():
+        def _do() -> None:
             try:
                 result = self.app.updater.apply(restart=True)
-                self._status = (result.get("message") or "Update done")[:80]
+                self._status = (
+                    result.get("message") or "Update done")[:80]
             except Exception as e:
                 self._status = f"Error: {e}"[:80]
             finally:
@@ -106,9 +137,6 @@ class UpdatesScreen:
         threading.Thread(target=_do, daemon=True).start()
 
     def _close(self) -> None:
-        # Return to settings — that's where Updates is conceptually
-        # parked. If the user came from the nav-bar pill we still
-        # land them in a sensible spot.
         try:
             self.app.switch_screen("settings")
         except Exception:
@@ -121,39 +149,45 @@ class UpdatesScreen:
             getattr(self.app, "_nav_rect", None).height
             if getattr(self.app, "_nav_rect", None) else theme.NAV_HEIGHT)
         return pygame.Rect(
-            0, self.HEADER_H,
-            theme.SCREEN_WIDTH,
-            theme.SCREEN_HEIGHT - self.HEADER_H - nav_h - 60,
+            12, self.HEADER_H + 8,
+            theme.SCREEN_WIDTH - 24,
+            theme.SCREEN_HEIGHT - self.HEADER_H - nav_h - 70,
         )
 
-    def _action_buttons(self) -> tuple[pygame.Rect, pygame.Rect]:
+    def _action_buttons(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
+        """Returns (update_rect, check_rect, close_rect)."""
         nav_h = (
             getattr(self.app, "_nav_rect", None).height
             if getattr(self.app, "_nav_rect", None) else theme.NAV_HEIGHT)
         bot_y = theme.SCREEN_HEIGHT - nav_h - 50
         update_rect = pygame.Rect(
-            theme.SCREEN_WIDTH // 2 - 220, bot_y, 200, 40)
-        later_rect = pygame.Rect(
-            theme.SCREEN_WIDTH // 2 + 20, bot_y, 200, 40)
-        return update_rect, later_rect
+            theme.SCREEN_WIDTH // 2 - 280, bot_y, 180, 40)
+        check_rect = pygame.Rect(
+            theme.SCREEN_WIDTH // 2 - 90, bot_y, 180, 40)
+        close_rect = pygame.Rect(
+            theme.SCREEN_WIDTH // 2 + 100, bot_y, 180, 40)
+        return update_rect, check_rect, close_rect
 
     # ── Event handling ───────────────────────────────────────────────
 
     def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.MOUSEBUTTONDOWN:
             if event.button in (4, 5):
-                # Wheel scroll
                 self._scroll = max(
                     0,
                     self._scroll + (-30 if event.button == 4 else 30),
                 )
                 return True
             if event.button == 1:
-                update_rect, later_rect = self._action_buttons()
+                update_rect, check_rect, close_rect = (
+                    self._action_buttons())
                 if update_rect.collidepoint(event.pos):
                     self._apply()
                     return True
-                if later_rect.collidepoint(event.pos):
+                if check_rect.collidepoint(event.pos):
+                    self._kick_check()
+                    return True
+                if close_rect.collidepoint(event.pos):
                     self._close()
                     return True
         elif event.type == pygame.KEYDOWN:
@@ -182,20 +216,19 @@ class UpdatesScreen:
             surface, theme.BORDER,
             (0, self.HEADER_H), (theme.SCREEN_WIDTH, self.HEADER_H), 1)
 
-        title = "Compa updates"
-        title_surf = f_title.render(title, True, theme.TEXT_BRIGHT)
+        title_surf = f_title.render(
+            "Compa updates", True, theme.TEXT_BRIGHT)
         surface.blit(title_surf, (16, 4))
 
-        # Update-meta line on the right of the header.
         try:
             updater = self.app.updater
             cur = updater.current_commit()
             behind = updater.commits_behind
             if behind > 0:
-                meta = f"{behind} new change{'s' if behind != 1 else ''} available"
+                meta = (f"{behind} pending  ·  current @ {cur}")
                 meta_color = theme.ACCENT
             else:
-                meta = f"Up to date · @ {cur}"
+                meta = f"Current @ {cur}"
                 meta_color = theme.TEXT_DIM
         except Exception:
             meta = ""
@@ -207,21 +240,59 @@ class UpdatesScreen:
                 (theme.SCREEN_WIDTH - ms.get_width() - 16,
                  self.HEADER_H // 2 - ms.get_height() // 2))
 
-        # ── Content area ────────────────────────────────────────────
+        # ── Content panel ───────────────────────────────────────────
         content = self._content_rect()
         pygame.draw.rect(surface, theme.BG_PANEL, content, border_radius=6)
         pygame.draw.rect(
             surface, theme.BORDER, content, 1, border_radius=6)
 
-        bullets = self._resolve_bullets()
-        if not bullets:
-            self._draw_empty_state(surface, content, f_med, f_small)
-        else:
-            self._draw_bullets(
-                surface, content, bullets, f_med, f_small)
+        # Build the rendered "doc" — pending block (if any) + every
+        # history section. Each section has a sub-header + bullets.
+        # Drawn into a clipped area with vertical scroll.
+        clip_rect = content.inflate(-12, -12)
+        surface.set_clip(clip_rect)
 
-        # ── Status line + action buttons ────────────────────────────
-        update_rect, later_rect = self._action_buttons()
+        cursor_y = clip_rect.y - self._scroll
+        text_x = clip_rect.x + 6
+        text_w = clip_rect.width - 12
+
+        pending = self._pending_bullets()
+        update_pending = bool(
+            getattr(self.app.updater, "update_available", False))
+        if update_pending and pending:
+            cursor_y = self._draw_section(
+                surface, text_x, cursor_y, text_w,
+                title="Coming up",
+                title_color=theme.ACCENT,
+                bullets=pending,
+                f_med=f_med, f_small=f_small,
+            ) + 8
+
+        history = self._history()
+        if not history and not (update_pending and pending):
+            self._draw_empty_state(
+                surface, clip_rect, f_med, f_small)
+            cursor_y = clip_rect.bottom
+
+        for title, bullets in history:
+            cursor_y = self._draw_section(
+                surface, text_x, cursor_y, text_w,
+                title=title,
+                title_color=theme.TEXT_BRIGHT,
+                bullets=bullets,
+                f_med=f_med, f_small=f_small,
+            ) + 14
+
+        # Compute scroll bounds.
+        total_height = cursor_y + self._scroll - clip_rect.y
+        max_scroll = max(0, total_height - clip_rect.height)
+        if self._scroll > max_scroll:
+            self._scroll = max_scroll
+
+        surface.set_clip(None)
+
+        # ── Status line + actions ───────────────────────────────────
+        update_rect, check_rect, close_rect = self._action_buttons()
 
         if self._status:
             ss = f_small.render(self._status, True, theme.ACCENT)
@@ -230,10 +301,8 @@ class UpdatesScreen:
                 (theme.SCREEN_WIDTH // 2 - ss.get_width() // 2,
                  update_rect.y - 22))
 
-        # Update Now button — primary, accent color.
-        can_update = (
-            getattr(self.app.updater, "update_available", False)
-            and not self._is_applying)
+        # Update Now (primary, only enabled when pending)
+        can_update = update_pending and not self._is_applying
         if can_update:
             pygame.draw.rect(
                 surface, theme.ACCENT, update_rect, border_radius=8)
@@ -242,117 +311,64 @@ class UpdatesScreen:
         else:
             pygame.draw.rect(
                 surface, theme.BG_LIGHTER, update_rect, border_radius=8)
-            label = "Updating..." if self._is_applying else "Up to date"
+            label = "Updating..." if self._is_applying else "Update now"
             tc = theme.TEXT_DIM
-        ls = f_med.render(label, True, tc)
-        surface.blit(ls, ls.get_rect(center=update_rect.center))
-
-        # Later button — secondary outline.
-        pygame.draw.rect(
-            surface, theme.BG_PANEL, later_rect, border_radius=8)
-        pygame.draw.rect(
-            surface, theme.BORDER, later_rect, 1, border_radius=8)
-        ls = f_med.render("Later", True, theme.TEXT)
-        surface.blit(ls, ls.get_rect(center=later_rect.center))
-
-    # ── Draw helpers ─────────────────────────────────────────────────
-
-    def _draw_empty_state(
-        self, surface, rect, f_med, f_small
-    ) -> None:
-        try:
-            cur = self.app.updater.current_commit()
-            behind = self.app.updater.commits_behind
-        except Exception:
-            cur = ""
-            behind = 0
-
-        if behind > 0:
-            line1 = "Update ready"
-            line2 = (f"{behind} new change"
-                     f"{'s' if behind != 1 else ''} are pending — release "
-                     f"notes weren't found, but you can update now.")
-        else:
-            line1 = "You're up to date"
-            line2 = (f"Compa is at the latest commit ({cur}). "
-                     "We'll notify you when an update lands.")
-
-        l1 = f_med.render(line1, True, theme.TEXT_BRIGHT)
-        l2 = f_small.render(line2, True, theme.TEXT_DIM)
-        cy = rect.centery
         surface.blit(
-            l1, (rect.centerx - l1.get_width() // 2,
-                 cy - l1.get_height() - 4))
-        # word-wrap line 2 if needed
-        if l2.get_width() > rect.width - 32:
-            self._draw_wrapped(
-                surface, line2, f_small, theme.TEXT_DIM,
-                pygame.Rect(rect.x + 16, cy + 2, rect.width - 32, 60))
-        else:
-            surface.blit(
-                l2, (rect.centerx - l2.get_width() // 2, cy + 2))
+            f_med.render(label, True, tc),
+            f_med.render(label, True, tc).get_rect(
+                center=update_rect.center))
 
-    def _draw_bullets(
-        self, surface, rect, bullets, f_med, f_small
-    ) -> None:
-        # Sub-header inside the panel.
-        sub = f_small.render("What's new", True, theme.TEXT_DIM)
-        surface.blit(sub, (rect.x + 16, rect.y + 12))
+        # Check now (secondary)
+        check_label = "Checking..." if self._is_checking else "Check now"
+        pygame.draw.rect(
+            surface, theme.BG_PANEL, check_rect, border_radius=8)
+        pygame.draw.rect(
+            surface, theme.BORDER, check_rect, 1, border_radius=8)
+        cs = f_med.render(check_label, True, theme.TEXT)
+        surface.blit(cs, cs.get_rect(center=check_rect.center))
 
-        list_top = rect.y + 36
-        list_bottom = rect.bottom - 12
-        avail_h = list_bottom - list_top
-        line_h = f_med.get_linesize() + 6
+        # Close (back to settings)
+        pygame.draw.rect(
+            surface, theme.BG_PANEL, close_rect, border_radius=8)
+        pygame.draw.rect(
+            surface, theme.BORDER, close_rect, 1, border_radius=8)
+        ls = f_med.render("Back", True, theme.TEXT)
+        surface.blit(ls, ls.get_rect(center=close_rect.center))
 
-        # Apply scroll offset.
-        max_scroll = max(0, len(bullets) * line_h - avail_h)
-        self._scroll = max(0, min(self._scroll, max_scroll))
+    # ── Section drawing helpers ──────────────────────────────────────
 
-        # Clip to the list area so text doesn't overflow the panel.
-        clip_rect = pygame.Rect(
-            rect.x + 8, list_top, rect.width - 16, avail_h)
-        surface.set_clip(clip_rect)
+    def _draw_section(
+        self, surface, x, y, w, title, title_color,
+        bullets, f_med, f_small,
+    ) -> int:
+        """Draw a single section (title + bullets). Returns the next
+        y position so the caller can stack sections vertically."""
+        ts = f_med.render(title, True, title_color)
+        surface.blit(ts, (x, y))
+        y += ts.get_height() + 4
 
-        x = rect.x + 18
-        y = list_top - self._scroll
+        if not bullets:
+            empty = f_small.render(
+                "(no entries)", True, theme.TEXT_DIM)
+            surface.blit(empty, (x + 14, y))
+            y += empty.get_height()
+            return y
+
         for bullet in bullets:
-            if y > list_bottom:
-                break
-            if y + line_h >= list_top:
-                # Bullet marker
-                pygame.draw.circle(
-                    surface, theme.ACCENT, (x, y + line_h // 2 - 1), 3)
-                # Wrap the text within the available width.
-                text_x = x + 12
-                text_w = rect.right - text_x - 16
-                self._draw_wrapped_clipped(
-                    surface, bullet, f_med, theme.TEXT,
-                    text_x, y, text_w)
-            y += self._wrapped_height(bullet, f_med, rect.width - 50) + 6
+            # Bullet glyph
+            pygame.draw.circle(
+                surface, theme.ACCENT,
+                (x + 4, y + f_small.get_linesize() // 2 + 1), 2)
+            # Wrapped text
+            consumed = self._draw_wrapped(
+                surface, bullet, f_small, theme.TEXT,
+                x + 14, y, w - 14)
+            y += consumed + 4
+        return y
 
-        surface.set_clip(None)
-
-    def _draw_wrapped(self, surface, text, font, color, rect) -> None:
-        words = text.split()
-        line = ""
-        y = rect.y
-        for w in words:
-            test = (line + " " + w).strip()
-            if font.size(test)[0] > rect.width:
-                if line:
-                    surface.blit(
-                        font.render(line, True, color), (rect.x, y))
-                    y += font.get_linesize()
-                line = w
-            else:
-                line = test
-        if line:
-            surface.blit(
-                font.render(line, True, color), (rect.x, y))
-
-    def _draw_wrapped_clipped(
+    def _draw_wrapped(
         self, surface, text, font, color, x, y, max_w
-    ) -> None:
+    ) -> int:
         words = text.split()
         line = ""
         cy = y
@@ -367,19 +383,38 @@ class UpdatesScreen:
                 line = test
         if line:
             surface.blit(font.render(line, True, color), (x, cy))
+            cy += font.get_linesize()
+        return cy - y
 
-    def _wrapped_height(self, text, font, max_w) -> int:
-        words = text.split()
+    def _draw_empty_state(
+        self, surface, rect, f_med, f_small
+    ) -> None:
+        line1 = "No changelog entries yet"
+        line2 = (
+            "When updates ship, release notes will appear here in "
+            "plain language. You can pull the latest at any time "
+            "with the Check now button below.")
+        l1 = f_med.render(line1, True, theme.TEXT_BRIGHT)
+        cy = rect.centery
+        surface.blit(
+            l1, (rect.centerx - l1.get_width() // 2,
+                 cy - l1.get_height() - 6))
+        # word-wrap line 2
+        words = line2.split()
         line = ""
-        lines = 0
+        y = cy + 4
         for w in words:
             test = (line + " " + w).strip()
-            if font.size(test)[0] > max_w:
+            if f_small.size(test)[0] > rect.width - 32:
                 if line:
-                    lines += 1
+                    s = f_small.render(line, True, theme.TEXT_DIM)
+                    surface.blit(
+                        s, (rect.centerx - s.get_width() // 2, y))
+                    y += f_small.get_linesize()
                 line = w
             else:
                 line = test
         if line:
-            lines += 1
-        return max(1, lines) * font.get_linesize()
+            s = f_small.render(line, True, theme.TEXT_DIM)
+            surface.blit(
+                s, (rect.centerx - s.get_width() // 2, y))

@@ -249,33 +249,98 @@ class Updater:
         section. Caller falls back to commit_messages_behind() in
         that case.
         """
+        return self._parse_changelog_topmost(remote=True)
+
+    def changelog_history(
+        self, max_sections: int = 12
+    ) -> list[tuple[str, list[str]]]:
+        """Return a list of (section_title, bullets) tuples for the
+        full changelog history — used by the Updates screen as the
+        "everything we've shipped" log so users have one place to
+        see every release without rooting through git.
+
+        Reads from the **local** HEAD's CHANGELOG.md (i.e. what
+        actually got pulled / installed) so the history reflects
+        what this device has actually received.
+        """
         if not self.is_git_repo:
             return []
-        branch = self.current_branch()
-        if not branch or branch == "?":
-            return []
-        # Read the CHANGELOG.md as it exists on origin.
-        code, content = self._run(
-            "show", f"origin/{branch}:CHANGELOG.md", timeout=10)
-        if code != 0:
-            return []
+        # Try the local working tree first (faster than git show).
+        try:
+            with open(
+                f"{self._repo_dir}/CHANGELOG.md",
+                "r", encoding="utf-8",
+            ) as f:
+                content = f.read()
+        except Exception:
+            content = ""
+        if not content:
+            code, content = self._run(
+                "show", "HEAD:CHANGELOG.md", timeout=10)
+            if code != 0:
+                return []
+        return self._parse_changelog_sections(content, max_sections)
 
-        # Parse: take everything from the first '## ' header to the
-        # next '## ' header. Within that, collect '- ' bullet lines.
-        lines = content.split("\n")
+    def _parse_changelog_topmost(self, remote: bool) -> list[str]:
+        """Return bullets of the topmost `## ` section."""
+        if not self.is_git_repo:
+            return []
+        if remote:
+            branch = self.current_branch()
+            if not branch or branch == "?":
+                return []
+            code, content = self._run(
+                "show", f"origin/{branch}:CHANGELOG.md", timeout=10)
+            if code != 0:
+                return []
+        else:
+            try:
+                with open(
+                    f"{self._repo_dir}/CHANGELOG.md",
+                    "r", encoding="utf-8",
+                ) as f:
+                    content = f.read()
+            except Exception:
+                return []
+
         in_section = False
         bullets: list[str] = []
-        for raw in lines:
+        for raw in content.split("\n"):
             line = raw.rstrip()
             if line.startswith("## "):
                 if in_section:
-                    break  # next section reached
+                    break
                 in_section = True
                 continue
             if in_section:
                 stripped = line.lstrip()
-                if stripped.startswith("- "):
-                    bullets.append(stripped[2:].strip())
-                elif stripped.startswith("* "):
+                if stripped.startswith("- ") or stripped.startswith("* "):
                     bullets.append(stripped[2:].strip())
         return bullets
+
+    def _parse_changelog_sections(
+        self, content: str, max_sections: int
+    ) -> list[tuple[str, list[str]]]:
+        """Parse all `## ` sections into (title, bullets) tuples.
+        Stops after `max_sections` to keep the screen render cheap."""
+        sections: list[tuple[str, list[str]]] = []
+        cur_title: str | None = None
+        cur_bullets: list[str] = []
+        for raw in content.split("\n"):
+            line = raw.rstrip()
+            if line.startswith("## "):
+                if cur_title is not None:
+                    sections.append((cur_title, cur_bullets))
+                    if len(sections) >= max_sections:
+                        cur_title = None
+                        break
+                cur_title = line[3:].strip()
+                cur_bullets = []
+                continue
+            if cur_title is not None:
+                stripped = line.lstrip()
+                if stripped.startswith("- ") or stripped.startswith("* "):
+                    cur_bullets.append(stripped[2:].strip())
+        if cur_title is not None and len(sections) < max_sections:
+            sections.append((cur_title, cur_bullets))
+        return sections

@@ -12,6 +12,11 @@ affect what a user sees.
 
 ## Unreleased
 
+- Updates & changelog screen: a single place to read everything
+  that's shipped, written in plain language. Pending changes stack
+  at the top, full release history below. Reachable from the
+  Settings menu (top entry) or the pulsing nav-bar pill when an
+  update lands.
 - Auto-updater notifies you in the nav bar when new builds are out;
   one tap shows what changed and pulls the update with a restart.
 - Push 2 keys mode: full-screen LCD layout with a piano keyboard,

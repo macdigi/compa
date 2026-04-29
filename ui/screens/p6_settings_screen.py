@@ -185,6 +185,13 @@ class P6SettingsScreen:
         self.app.schedule_screenshot(delay_s=5.0, compa=True, push2=True)
         self.app.push_hud("Compa + Push 2 in 5s — navigate now", None)
 
+    def _open_updates_screen(self):
+        """Jump to the rich Updates screen (changelog + apply flow)."""
+        try:
+            self.app.switch_screen("updates")
+        except Exception:
+            pass
+
     def _check_updates(self):
         """Check for Compa updates in the background."""
         if not hasattr(self.app, 'updater'):
@@ -264,7 +271,36 @@ class P6SettingsScreen:
         threshold = self._get_threshold()
         splash_off = self.app.config.get("SKIP_SPLASH", "0") == "1"
 
-        self._rows = [
+        self._rows = []
+
+        # ── Compa updates row at the top (prominent placement) ─────
+        # The full update flow + changelog history lives in the
+        # dedicated UpdatesScreen — this row is the discoverable
+        # entry point. Shows a badge on the right when updates are
+        # pending so a glance at Settings tells you something's
+        # available.
+        if hasattr(self.app, 'updater') and self.app.updater.is_git_repo:
+            try:
+                pending = self.app.updater.update_available
+                behind = self.app.updater.commits_behind
+            except Exception:
+                pending = False
+                behind = 0
+            if pending and behind > 0:
+                badge = (f"{behind} new change"
+                         f"{'s' if behind != 1 else ''} available")
+            else:
+                cur = self.app.updater.current_commit()
+                badge = f"@ {cur}"
+            self._rows.append({
+                "label": "Updates & changelog",
+                "type": "button",
+                "btn_label": ("REVIEW" if pending else "OPEN"),
+                "value": badge,
+                "action": self._open_updates_screen,
+            })
+
+        self._rows.extend([
             {"label": "Mouse Mode", "type": "toggle", "value": self.app.mouse_mode,
              "action": self._toggle_mouse_mode},
             {"label": "Auto-Record", "type": "toggle", "value": self.app.auto_record,
@@ -278,7 +314,7 @@ class P6SettingsScreen:
              "btn_label": theme.active_theme_name().upper(),
              "action": self._cycle_theme},
             {"label": "", "type": "section", "value": "CONNECTED DEVICES"},
-        ]
+        ])
 
         # Dynamic device rows
         connected = self.app.device_manager.connected
