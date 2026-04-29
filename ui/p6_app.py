@@ -334,6 +334,15 @@ class P6App:
         # restore this scale; otherwise we save the current scale
         # here and switch to chromatic. Default to major.
         self._push2_keys_last_scale: int = 1
+        # CHORD layout: each pad triggers a full chord (triad / 7th /
+        # inversions) drawn from the current scale + root. Toggled by
+        # the LAYOUT button (top-button 8). When entering chord mode
+        # while currently chromatic we silently force scale to major
+        # so the chord generator has a key to work in.
+        self.push2_keys_chord_mode: bool = False
+        # Pad → list of held MIDI notes when in chord mode. Released
+        # together on note-off so all chord notes drop cleanly.
+        self._push2_chord_active: dict[int, list[int]] = {}
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -1495,11 +1504,25 @@ class P6App:
         return None
 
     def _on_push2_keys_pad(self, idx: int, velocity: int):
-        """Keys-mode pad — forward as a chromatic note to the focused
-        device. Pad-to-note mapping depends on the active scale:
-          - chromatic scale → chromatic layout (each pad = +1 semitone)
-          - any other scale → in-key layout (each pad = next scale
-            degree; every pad IS a scale note, no off-scale pads)."""
+        """Keys-mode pad → forward note(s) to the focused device.
+
+        Three pad-to-output mappings depending on the active layout:
+
+          chord_mode = True           → CHORD layout. Each pad plays
+                                        a full triad / 7th / inversion
+                                        from the active scale. All
+                                        chord notes go on together
+                                        and release together.
+
+          scale_name = "chromatic"    → chromatic layout, each pad =
+                                        +1 semitone (chromatic-keys
+                                        layout).
+
+          scale_name = anything else  → in-key layout, each pad = next
+                                        scale degree (every pad IS a
+                                        scale note, no off-scale dead
+                                        zones).
+        """
         from engine.push2 import Push2, SCALES
         kb = getattr(self, "chromatic_kb", None)
         if kb is None:
@@ -1507,6 +1530,40 @@ class P6App:
         scale_name, scale_offsets = SCALES[
             self.push2_keys_scale % len(SCALES)]
 
+        if self.push2_keys_chord_mode:
+            # ── CHORD layout ─────────────────────────────────────────
+            # Force a non-chromatic scale if we landed here while
+            # chromatic — chord generation needs a defined key.
+            if scale_name == "chromatic":
+                # Promote to major silently. The LAYOUT-cycle path
+                # already does this, but be defensive.
+                _, scale_offsets = SCALES[1]  # major
+            if velocity > 0:
+                notes = Push2.chord_pad_to_notes(
+                    idx, scale_offsets,
+                    root_pc=self.push2_keys_root,
+                    base_note=self.push2_keys_base_note,
+                )
+                if not notes:
+                    return
+                self._push2_chord_active[idx] = notes
+                for note in notes:
+                    try:
+                        kb._forward_note_on(note, velocity)
+                    except Exception:
+                        pass
+            else:
+                notes = self._push2_chord_active.pop(idx, None)
+                if not notes:
+                    return
+                for note in notes:
+                    try:
+                        kb._forward_note_off(note)
+                    except Exception:
+                        pass
+            return
+
+        # ── Single-note layouts (chromatic / in-key) ─────────────────
         if velocity > 0:
             if scale_name == "chromatic":
                 note = Push2.keys_pad_to_note(
@@ -2373,7 +2430,9 @@ class P6App:
                 else:
                     self.push2_keys_root = KEYS_BOT_BUTTON_ROOTS[idx]
             elif idx == 7:
-                # PANIC — release everything currently held.
+                # PANIC — release everything currently held across
+                # both single-note and chord-mode pad state, plus
+                # whatever the USB MIDI keyboard is tracking.
                 kb = getattr(self, "chromatic_kb", None)
                 if kb is not None and kb._target_midi:
                     for note in list(self._push2_keys_active.values()):
@@ -2381,6 +2440,12 @@ class P6App:
                             kb._forward_note_off(note)
                         except Exception:
                             pass
+                    for chord_notes in list(self._push2_chord_active.values()):
+                        for note in chord_notes:
+                            try:
+                                kb._forward_note_off(note)
+                            except Exception:
+                                pass
                     for note in list(kb.active_notes.keys()):
                         try:
                             kb._forward_note_off(note)
@@ -2388,12 +2453,14 @@ class P6App:
                             pass
                     kb.active_notes.clear()
                 self._push2_keys_active.clear()
+                self._push2_chord_active.clear()
         elif name.startswith("top_select_") and self.push2_mode == "keys":
-            # Top-row in keys mode = scale shortcuts + LAYOUT toggle.
+            # Top-row in keys mode = scale shortcuts + LAYOUT cycle.
             #   1-7 → major, minor, min pent, maj pent, blues, dorian,
-            #         mixolydian (selecting also flips us out of
-            #         chromatic if that's where we were).
-            #   8   → LAYOUT toggle: chromatic ↔ last non-chromatic.
+            #         mixolydian (sets scale; preserves chord-mode
+            #         flag so you can scale-shop within chord mode).
+            #   8   → LAYOUT cycles through 3 states:
+            #           chromatic  →  in-key  →  chord  →  chromatic
             from engine.push2 import KEYS_TOP_BUTTON_SCALES, SCALES
             try:
                 idx = int(name.rsplit("_", 1)[1]) - 1
@@ -2404,14 +2471,24 @@ class P6App:
                 self.push2_keys_scale = scale_idx
                 self._push2_keys_last_scale = scale_idx
             elif idx == 7:
-                if self.push2_keys_scale == 0:
-                    # Restore last non-chromatic. Default to major
-                    # if we somehow never had one stashed.
+                # LAYOUT cycle. Three states:
+                #   A: chromatic         (scale=0, chord_mode=False)
+                #   B: in-key            (scale>0, chord_mode=False)
+                #   C: chord             (scale>0, chord_mode=True)
+                if self.push2_keys_scale == 0 and not self.push2_keys_chord_mode:
+                    # A → B
                     self.push2_keys_scale = (
                         self._push2_keys_last_scale or 1)
+                elif not self.push2_keys_chord_mode:
+                    # B → C
+                    self.push2_keys_chord_mode = True
                 else:
-                    self._push2_keys_last_scale = self.push2_keys_scale
+                    # C → A. Save current scale so the next entry
+                    # to the cycle can pick up where we left off.
+                    self._push2_keys_last_scale = (
+                        self.push2_keys_scale or self._push2_keys_last_scale or 1)
                     self.push2_keys_scale = 0
+                    self.push2_keys_chord_mode = False
         elif name == "nav_up":
             if self.push2_mode == "keys":
                 from engine.push2 import SCALES

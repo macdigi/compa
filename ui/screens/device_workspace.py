@@ -1556,6 +1556,12 @@ class DeviceWorkspaceScreen:
             held.update(kb.active_notes.keys())
         push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
         held.update(push2_active.values())
+        # CHORD layout: each pad maps to multiple notes (triad / 7th /
+        # inversion). Add them all in so the readout, the piano widget,
+        # and the rolling roll show every note in the held chord.
+        chord_active = getattr(self.app, "_push2_chord_active", {}) or {}
+        for chord_notes in chord_active.values():
+            held.update(chord_notes)
 
         # Update the rolling note history (drives the perform view's
         # piano roll). Polled every frame — cheap, set-diff based.
@@ -1971,6 +1977,11 @@ class DeviceWorkspaceScreen:
                 getattr(self.app, "_push2_keys_active", {}) or {})
             for note in push2_active.values():
                 combined.setdefault(note, 100)
+            chord_active = (
+                getattr(self.app, "_push2_chord_active", {}) or {})
+            for chord_notes in chord_active.values():
+                for note in chord_notes:
+                    combined.setdefault(note, 100)
             self._piano_display._active_notes = combined
             self._piano_display.draw(surface)
 

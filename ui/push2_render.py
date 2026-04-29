@@ -253,18 +253,28 @@ class Push2Renderer:
         top_colors = [0] * 8
         if mode_top == "keys":
             # Buttons 1-7 = scale shortcuts. Active scale lit bright;
-            # inactive options dim. Button 8 = LAYOUT toggle: bright
-            # green when in-key (scale != chromatic), dim when
-            # chromatic.
+            # inactive options dim. Button 8 = LAYOUT cycle —
+            # 3 states colored to match the layout the next press
+            # will land on:
+            #   chromatic now  → dim white (next: in-key)
+            #   in-key now     → green     (next: chord)
+            #   chord now      → magenta   (next: chromatic)
             from engine.push2 import KEYS_TOP_BUTTON_SCALES
             try:
                 cur_scale = int(self.app.push2_keys_scale)
             except Exception:
                 cur_scale = 0
+            chord_mode = bool(
+                getattr(self.app, "push2_keys_chord_mode", False))
             for i in range(7):
                 scale_idx = KEYS_TOP_BUTTON_SCALES[i]
                 top_colors[i] = 122 if scale_idx == cur_scale else 8
-            top_colors[7] = 126 if cur_scale != 0 else 1
+            if chord_mode:
+                top_colors[7] = 53     # magenta — chord layout
+            elif cur_scale != 0:
+                top_colors[7] = 126    # green   — in-key layout
+            else:
+                top_colors[7] = 1      # dim     — chromatic
         elif mode_top == "pattern":
             try:
                 base = int(self.app.push2_pattern_launch_page) * 8
@@ -552,12 +562,15 @@ class Push2Renderer:
 
         # Keys-mode state contributes to the frame key so the grid
         # repaints when the user transposes, the SP-404 pad-note
-        # (and therefore playable range) shifts, or scale/root changes.
+        # (and therefore playable range) shifts, or scale/root/layout
+        # changes.
         keys_state: tuple = ()
         if mode == "keys":
             base_note = getattr(self.app, "push2_keys_base_note", 36)
             scale_idx = getattr(self.app, "push2_keys_scale", 0)
             root_pc = getattr(self.app, "push2_keys_root", 0)
+            chord_mode = bool(
+                getattr(self.app, "push2_keys_chord_mode", False))
             lo = hi = None
             if dev_key == "SP-404MKII":
                 kb = getattr(self.app, "chromatic_kb", None)
@@ -567,7 +580,8 @@ class Push2Renderer:
                     if pn > 0:
                         lo = pn - br
                         hi = pn + br
-            keys_state = (base_note, lo, hi, scale_idx, root_pc)
+            keys_state = (
+                base_note, lo, hi, scale_idx, root_pc, chord_mode)
 
         # Pattern-mode state — current active pattern + total + page +
         # step offset + a hash of the active sequencer's grid. Forces
@@ -659,8 +673,21 @@ class Push2Renderer:
             hi = keys_state[2] if len(keys_state) > 2 else None
             scale_idx = keys_state[3] if len(keys_state) > 3 else 0
             root_pc = keys_state[4] if len(keys_state) > 4 else 0
+            chord_mode = (
+                bool(keys_state[5]) if len(keys_state) > 5 else False)
             name, offsets = SCALES[scale_idx % len(SCALES)]
-            if name == "chromatic":
+            if chord_mode:
+                # In chord mode we always need a defined scale —
+                # promote chromatic to major silently to match the
+                # pad handler.
+                if name == "chromatic":
+                    name, offsets = SCALES[1]
+                push2.light_chord_layout(
+                    offsets, root_pc=root_pc,
+                    base_note=base_note,
+                    min_note=lo, max_note=hi,
+                )
+            elif name == "chromatic":
                 push2.light_keys_layout(
                     base_note=base_note, min_note=lo, max_note=hi,
                     scale=offsets, root_pc=root_pc,
@@ -759,19 +786,26 @@ class Push2Renderer:
             mode_now = self.app.push2_mode
         except Exception:
             mode_now = "control"
-        held = (getattr(self.app, "_push2_keys_active", None) or {}) \
-                if mode_now == "keys" else {}
+        held_notes: set[int] = set()
+        if mode_now == "keys":
+            single = getattr(self.app, "_push2_keys_active", None) or {}
+            held_notes.update(single.values())
+            chord_active = (
+                getattr(self.app, "_push2_chord_active", None) or {})
+            for chord_notes in chord_active.values():
+                held_notes.update(chord_notes)
 
         # Special-encoder popup beats BPM but loses to held notes.
-        encoder_overlay = self._special_encoder_overlay() if not held else None
+        encoder_overlay = (
+            self._special_encoder_overlay() if not held_notes else None)
 
-        if held:
+        if held_notes:
             # Replace BPM with the currently-held note(s) so the user
             # can see exactly which key is sounding without guessing.
             # When 3+ notes form a recognized chord, append the chord
             # label as a small kicker beneath the note names.
             from engine.chord_recognition import recognize_chord
-            notes_sorted = sorted(set(held.values()))
+            notes_sorted = sorted(held_notes)
             names = "  ".join(self._note_name(n) for n in notes_sorted)
             font = self._font_hero if len(notes_sorted) == 1 else self._font_big
             ns = font.render(names, True, dev_color)
@@ -1234,6 +1268,10 @@ class Push2Renderer:
             pad_x, top, SURF_W - pad_x * 2, height)
 
         # Held notes — same merge as device_workspace's controls row.
+        # Single-note layouts (chromatic / in-key) push into
+        # _push2_keys_active; chord layout pushes lists into
+        # _push2_chord_active. Combined here so the keyboard +
+        # rolling roll show every held note regardless of layout.
         held: set[int] = set()
         kb = getattr(self.app, "chromatic_kb", None)
         if kb is not None:
@@ -1243,6 +1281,9 @@ class Push2Renderer:
                 pass
         push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
         held.update(push2_active.values())
+        chord_active = getattr(self.app, "_push2_chord_active", {}) or {}
+        for chord_notes in chord_active.values():
+            held.update(chord_notes)
 
         # Update the rolling history so the piano roll has data.
         now = time.monotonic()
@@ -1458,11 +1499,22 @@ class Push2Renderer:
         except Exception:
             scale_idx = 0
             root_pc = 0
+        chord_mode = bool(
+            getattr(self.app, "push2_keys_chord_mode", False))
         scale_idx %= len(SCALES)
         root_pc %= 12
 
+        # In chord mode, the renderer falls back to major if scale is
+        # chromatic — mirror that here so the strip matches the pads.
+        if chord_mode and scale_idx == 0:
+            scale_idx = 1  # major
         scale_name, _ = SCALES[scale_idx]
-        layout = "CHROMATIC" if scale_idx == 0 else "IN-KEY"
+        if chord_mode:
+            layout = "CHORD"
+        elif scale_idx == 0:
+            layout = "CHROMATIC"
+        else:
+            layout = "IN-KEY"
         # Octave shift comes from the chromatic-keyboard helper.
         kb = getattr(self.app, "chromatic_kb", None)
         oct_shift = (

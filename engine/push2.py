@@ -636,13 +636,22 @@ class Push2:
             row = idx // 8
             col = idx % 8
             note = base_note + row * row_offset + col
-            if note > 127 or note < lo or note > hi:
+            if note > 127 or note < 0:
+                # Truly impossible MIDI note — leave pad dark.
                 self.set_pad_color(idx, COLOR_OFF)
                 continue
+            out_of_range = note < lo or note > hi
             pc_off = (note - root_pc) % 12
             is_root = pc_off == 0
             in_sc = all_pcs or (scale_set is not None and pc_off in scale_set)
-            if is_root:
+            if out_of_range:
+                # Out-of-range pads stay visible but very dim, so the
+                # producer sees the full grid layout rather than half
+                # of it going dark when an SP pad's bend window is
+                # narrow. They still won't sound (the pad handler
+                # gates on range), the LED is just for orientation.
+                color = 1
+            elif is_root:
                 color = 125          # blue root
             elif in_sc:
                 color = 122          # white in-scale
@@ -678,6 +687,155 @@ class Push2:
         pc_in = scale_offsets[degree % n]
         base_oct_midi = (base_note // 12) * 12
         return base_oct_midi + root_pc + oct_shift * 12 + pc_in
+
+    # ── Chord layout (each pad plays a full chord) ────────────────────
+
+    @staticmethod
+    def chord_pad_to_notes(pad_idx: int,
+                           scale_offsets: tuple[int, ...],
+                           root_pc: int = 0,
+                           base_note: int = 36) -> list[int]:
+        """Map a pad in CHORD layout to a list of MIDI notes.
+
+        Layout:
+
+          col   0    1    2    3    4    5    6    7
+                I   ii  iii   IV    V   vi  vii°   I'  ← scale degrees
+                                                     (col 7 = octave-up I)
+
+          row 0  triad (root pos)        ← bottom row, base octave
+          row 1  + 7th
+          row 2  1st inversion
+          row 3  2nd inversion
+          row 4  triad        ← +1 octave
+          row 5  + 7th        ← +1 octave
+          row 6  1st inversion ← +1 octave
+          row 7  2nd inversion ← +1 octave
+
+        For shorter scales (pent, blues), columns wrap and increment
+        the octave automatically — col 5 of pent = degree 0 + 1 octave.
+
+        Returns notes already clamped to valid MIDI range (0..127).
+        Returns an empty list for chromatic scale (chord mode is
+        meaningless without a defined diatonic key — caller should
+        handle this by forcing a scale before entering chord mode).
+        """
+        n = len(scale_offsets)
+        if n < 5:
+            # Too few scale notes for stacked diatonic chords (e.g.
+            # the chromatic scale falls through to here only if it
+            # reaches us by mistake — the dispatcher should prevent
+            # this).
+            return []
+
+        row = pad_idx // 8
+        col = pad_idx % 8
+
+        # Build a long enough scale-note ladder to cover every
+        # degree we might need (degree + 6 for 7th chords, plus
+        # column wrap into the next octave, plus row octave shift).
+        base_oct_midi = (base_note // 12) * 12
+        ladder: list[int] = []
+        for oct_i in range(0, 6):
+            for off in scale_offsets:
+                ladder.append(base_oct_midi + root_pc + off + oct_i * 12)
+        # Shift the ladder up to start at base_note.
+        while ladder and ladder[0] < base_note:
+            ladder = [x + 12 for x in ladder]
+
+        # Resolve column → degree index in the ladder.
+        col_degree_idx = col
+
+        def deg(offset: int) -> int | None:
+            i = col_degree_idx + offset
+            if 0 <= i < len(ladder):
+                return ladder[i]
+            return None
+
+        # Variation by row.
+        row_in_block = row % 4
+        row_oct_shift = row // 4
+
+        # Triad: degree, degree+2 (3rd), degree+4 (5th).
+        triad_degs = [deg(0), deg(2), deg(4)]
+        triad = [n for n in triad_degs if n is not None]
+
+        if row_in_block == 0:
+            notes = list(triad)
+        elif row_in_block == 1:
+            seventh = deg(6)
+            notes = list(triad) + ([seventh] if seventh is not None else [])
+        elif row_in_block == 2 and len(triad) == 3:
+            # 1st inversion: drop root up an octave so 3rd is on bottom
+            notes = [triad[1], triad[2], triad[0] + 12]
+        elif row_in_block == 3 and len(triad) == 3:
+            # 2nd inversion: 5th on bottom
+            notes = [triad[2], triad[0] + 12, triad[1] + 12]
+        else:
+            notes = list(triad)
+
+        # Apply row octave shift.
+        notes = [n + row_oct_shift * 12 for n in notes]
+        # Clamp to MIDI range.
+        return [n for n in notes if 0 <= n <= 127]
+
+    def light_chord_layout(self, scale_offsets: tuple[int, ...],
+                            root_pc: int = 0, base_note: int = 36,
+                            min_note: int | None = None,
+                            max_note: int | None = None) -> None:
+        """Paint the chord layout: each column is a scale degree
+        (highlighted by row 0 = bottom row in device color), and
+        higher rows show variation labels (7th, 1st inv, 2nd inv,
+        upper octave). Column 7 (octave-up I) draws in root color so
+        the player sees the wraparound.
+
+        Coloring:
+          - row 0 + 4 (triads): full bright in device-ish color
+          - row 1 + 5 (7ths):   slightly darker
+          - row 2 + 3 + 6 + 7 (inversions): darker still
+          - column 0 + 7 highlighted as roots (column tint)
+        """
+        lo = 0 if min_note is None else min_note
+        hi = 127 if max_note is None else max_note
+        n = len(scale_offsets)
+
+        for idx in range(64):
+            row = idx // 8
+            col = idx % 8
+
+            # Color based on row variation.
+            row_in_block = row % 4
+            row_oct = row // 4
+            if row_in_block == 0:
+                base_color = 122    # bright white — root-position triad
+            elif row_in_block == 1:
+                base_color = 11     # warm — has the 7th
+            elif row_in_block == 2:
+                base_color = 26     # cooler — 1st inversion
+            else:
+                base_color = 47     # purple-ish — 2nd inversion
+            if row_oct >= 1:
+                # Slight dim for upper octave block.
+                base_color = max(1, base_color - 4)
+
+            # Column = scale degree. Tonic columns (0, 7) get blue tint.
+            is_tonic_col = (col == 0) or (col == 7 and (8 % n == 1))
+            if is_tonic_col and row_in_block == 0:
+                color = 125  # blue — root chord
+            else:
+                color = base_color
+
+            # Range check — same dim treatment as the other layouts.
+            chord_notes = Push2.chord_pad_to_notes(
+                idx, scale_offsets, root_pc, base_note)
+            if not chord_notes:
+                self.set_pad_color(idx, COLOR_OFF)
+                continue
+            if any(note < lo or note > hi for note in chord_notes):
+                # Some chord notes fall outside playable range — dim
+                # so the player knows but the pad still reads.
+                color = 1
+            self.set_pad_color(idx, color)
 
     # ── DJ mode layout ──────────────────────────────────────────────
 
@@ -998,10 +1156,16 @@ class Push2:
         for idx in range(64):
             note = Push2.in_key_pad_to_note(
                 idx, scale_offsets, root_pc, base_note, row_offset_degrees)
-            if note > 127 or note < lo or note > hi:
+            if note > 127 or note < 0:
                 self.set_pad_color(idx, COLOR_OFF)
                 continue
-            if (note - root_pc) % 12 == 0:
+            out_of_range = note < lo or note > hi
+            if out_of_range:
+                # See light_keys_layout — keep the grid visually
+                # complete but dim out-of-range pads so the player
+                # sees the layout shape.
+                self.set_pad_color(idx, 1)
+            elif (note - root_pc) % 12 == 0:
                 self.set_pad_color(idx, 125)  # blue root
             else:
                 self.set_pad_color(idx, 122)  # white in-scale
