@@ -205,6 +205,52 @@ SCALES: list[tuple[str, tuple[int, ...]]] = [
 ROOT_NAMES = ["C", "C#", "D", "D#", "E", "F",
               "F#", "G", "G#", "A", "A#", "B"]
 
+# ── Push 2 hardware-button bindings for keys mode ──────────────────
+# These map the 8 top-row select buttons (above the LCD) and 8
+# bottom-row select buttons (below the LCD) onto scale + root
+# shortcuts. Both the input dispatcher (ui/p6_app.py) and the LED
+# renderer (ui/push2_render.py) import these so the LED highlight
+# stays in lock-step with what the dispatcher actually does.
+#
+# Top buttons 1-7: scales as indices into SCALES. Button 8 is a
+# special LAYOUT toggle handled by the dispatcher (chromatic ↔
+# last non-chromatic scale), so it doesn't get a SCALES index.
+KEYS_TOP_BUTTON_SCALES: tuple[int, ...] = (
+    1,  # major
+    2,  # minor
+    3,  # min pent
+    4,  # maj pent
+    5,  # blues
+    6,  # dorian
+    7,  # mixolydian
+)
+
+# Bottom buttons 1-7: roots, as MIDI pitch classes 0..11. Button 8
+# is PANIC (all notes off) and doesn't appear here.
+KEYS_BOT_BUTTON_ROOTS: tuple[int, ...] = (
+    0,   # C
+    2,   # D
+    4,   # E
+    5,   # F
+    7,   # G
+    9,   # A
+    11,  # B
+)
+
+# When SHIFT is held, bottom buttons map to the sharp variant of
+# the natural root (where one exists). E and B don't have sharps
+# in Western notation, so SHIFT+E and SHIFT+B are deliberate
+# no-ops (-1 sentinel).
+KEYS_BOT_BUTTON_ROOTS_SHIFT: tuple[int, ...] = (
+    1,   # C → C#
+    3,   # D → D#
+    -1,  # E → no-op (E#=F is already F-button territory)
+    6,   # F → F#
+    8,   # G → G#
+    10,  # A → A#
+    -1,  # B → no-op (B#=C is already C-button territory)
+)
+
 
 def in_scale(note: int, root_pc: int, offsets: tuple[int, ...]) -> bool:
     """True if `note` is a member of the scale rooted at `root_pc`."""

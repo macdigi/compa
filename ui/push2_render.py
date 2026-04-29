@@ -245,13 +245,27 @@ class Push2Renderer:
 
         # Top select buttons = direct encoder-page jumps.
         # Top-row select LEDs: pattern launchers in pattern mode,
-        # encoder-page jumps elsewhere.
+        # scale shortcuts in keys mode, encoder-page jumps elsewhere.
         try:
             mode_top = self.app.push2_mode
         except Exception:
             mode_top = "control"
         top_colors = [0] * 8
-        if mode_top == "pattern":
+        if mode_top == "keys":
+            # Buttons 1-7 = scale shortcuts. Active scale lit bright;
+            # inactive options dim. Button 8 = LAYOUT toggle: bright
+            # green when in-key (scale != chromatic), dim when
+            # chromatic.
+            from engine.push2 import KEYS_TOP_BUTTON_SCALES
+            try:
+                cur_scale = int(self.app.push2_keys_scale)
+            except Exception:
+                cur_scale = 0
+            for i in range(7):
+                scale_idx = KEYS_TOP_BUTTON_SCALES[i]
+                top_colors[i] = 122 if scale_idx == cur_scale else 8
+            top_colors[7] = 126 if cur_scale != 0 else 1
+        elif mode_top == "pattern":
             try:
                 base = int(self.app.push2_pattern_launch_page) * 8
                 total_pats = int(self.app.push2_max_patterns())
@@ -439,13 +453,46 @@ class Push2Renderer:
             self._last_nav_leds = nav_target
 
         # Bottom-row select buttons: SP-404 bus selector in control mode,
-        # bank selector in pattern mode, off otherwise.
+        # bank selector in pattern mode, root shortcuts in keys mode.
         try:
             dev_key_for_bot = self.app.device_manager.focus_key
         except Exception:
             dev_key_for_bot = None
         bot_colors = [-1] * 8
-        if mode_for_oct == "pattern":
+        if mode_for_oct == "keys":
+            # Buttons 1-7 = root shortcuts (C, D, E, F, G, A, B).
+            # Active root lit bright. With SHIFT held, lights shift
+            # to the sharp variant (so you see C# on the C button when
+            # SHIFT'd).  Buttons whose root has no sharp (E, B) stay
+            # dim under SHIFT to indicate "no-op". Button 8 = PANIC
+            # (very dim red — non-destructive look).
+            from engine.push2 import (
+                KEYS_BOT_BUTTON_ROOTS,
+                KEYS_BOT_BUTTON_ROOTS_SHIFT,
+            )
+            try:
+                cur_root = int(self.app.push2_keys_root)
+            except Exception:
+                cur_root = 0
+            shift_held = bool(getattr(self.app, "_push2_shift_held", False))
+            for i in range(7):
+                natural_pc = KEYS_BOT_BUTTON_ROOTS[i]
+                sharp_pc = KEYS_BOT_BUTTON_ROOTS_SHIFT[i]
+                if shift_held:
+                    if sharp_pc < 0:
+                        bot_colors[i] = 1     # E / B with SHIFT — no-op
+                    elif cur_root == sharp_pc:
+                        bot_colors[i] = 122   # active sharp
+                    else:
+                        bot_colors[i] = 8     # available sharp
+                else:
+                    if cur_root == natural_pc:
+                        bot_colors[i] = 122   # active natural
+                    else:
+                        bot_colors[i] = 8     # available natural
+            # PANIC — quiet red so it doesn't dominate the row.
+            bot_colors[7] = 5
+        elif mode_for_oct == "pattern":
             try:
                 from engine.push2 import SP_BANK_COLORS
                 active_bank = int(self.app.push2_active_bank())
@@ -1201,19 +1248,27 @@ class Push2Renderer:
         now = time.monotonic()
         self._update_keys_history(held, now)
 
-        # Split: keyboard above, roll below.
-        kb_h = max(48, int(height * 0.58))
-        roll_h = height - kb_h - 4
+        # Three-row split: keyboard (top), rolling roll (middle),
+        # scale-info strip (bottom). Strip is small but lets the
+        # producer see what scale + root + layout they're in.
+        strip_h = 16
+        avail = height - strip_h - 4
+        kb_h = max(48, int(avail * 0.62))
+        roll_h = avail - kb_h - 2
         kb_rect = pygame.Rect(
             body_rect.x, body_rect.y, body_rect.width, kb_h)
         roll_rect = pygame.Rect(
-            body_rect.x, body_rect.y + kb_h + 4,
+            body_rect.x, body_rect.y + kb_h + 2,
             body_rect.width, max(20, roll_h))
+        strip_rect = pygame.Rect(
+            body_rect.x, body_rect.y + kb_h + 2 + roll_h + 2,
+            body_rect.width, strip_h)
 
         self._draw_keys_piano_keyboard(
             surf, kb_rect, held, dev_color)
         self._draw_keys_piano_roll(
             surf, roll_rect, held, now, dev_color)
+        self._draw_keys_info_strip(surf, strip_rect, dev_color)
 
     def _update_keys_history(self, held: set[int],
                                now: float) -> None:
@@ -1382,6 +1437,56 @@ class Push2Renderer:
                 int(x_start), int(y),
                 max(2, int(x_end - x_start)), h)
             pygame.draw.rect(surf, color, bar, border_radius=1)
+
+    def _draw_keys_info_strip(
+        self, surf, rect: pygame.Rect, dev_color
+    ) -> None:
+        """Bottom-of-body strip: current root + scale + layout mode.
+
+        The hardware top buttons select the scale and the bottom
+        buttons select the root, but the user can't always see
+        which button they pressed (LEDs are out of their line of
+        sight when their hands are on the pads). This strip is the
+        single source of truth for "what am I in right now."
+
+        Format:  G MAJOR · IN-KEY            OCT 0
+        """
+        from engine.push2 import ROOT_NAMES, SCALES
+        try:
+            scale_idx = int(self.app.push2_keys_scale)
+            root_pc = int(self.app.push2_keys_root)
+        except Exception:
+            scale_idx = 0
+            root_pc = 0
+        scale_idx %= len(SCALES)
+        root_pc %= 12
+
+        scale_name, _ = SCALES[scale_idx]
+        layout = "CHROMATIC" if scale_idx == 0 else "IN-KEY"
+        # Octave shift comes from the chromatic-keyboard helper.
+        kb = getattr(self.app, "chromatic_kb", None)
+        oct_shift = (
+            int(getattr(kb, "octave_shift", 0)) if kb is not None else 0)
+
+        # Background
+        pygame.draw.rect(surf, BG_SCOPE, rect, border_radius=3)
+
+        # Left side: ROOT  SCALE · LAYOUT
+        left_text = (
+            f"{ROOT_NAMES[root_pc]}  {scale_name.upper()}  ·  {layout}"
+        )
+        ls = self._font_small.render(left_text, True, dev_color)
+        ly = rect.y + (rect.height - ls.get_height()) // 2
+        surf.blit(ls, (rect.x + 8, ly))
+
+        # Right side: OCT shift (only when non-zero, to keep clean).
+        if oct_shift != 0:
+            oct_text = f"OCT {oct_shift:+d}"
+            os_surf = self._font_small.render(oct_text, True, DIM)
+            surf.blit(
+                os_surf,
+                (rect.right - os_surf.get_width() - 10,
+                 rect.y + (rect.height - os_surf.get_height()) // 2))
 
     def _draw_new_confirm_overlay(self, surf, top: int, height: int,
                                     pending_until: float) -> None:

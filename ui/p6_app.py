@@ -325,8 +325,15 @@ class P6App:
         # pitch class (0=C..11=B). D-pad up/down cycles scale,
         # left/right cycles root. Scale-locked: off-scale pads silent
         # when scale != chromatic.
+        # Also bound to top/bot select buttons in keys mode — see
+        # engine.push2.KEYS_TOP_BUTTON_SCALES / KEYS_BOT_BUTTON_ROOTS.
         self.push2_keys_scale: int = 0   # 0 = chromatic
         self.push2_keys_root: int = 0    # 0 = C
+        # Remembered scale for the top-button-8 LAYOUT toggle: when
+        # the user presses LAYOUT and we're already in chromatic, we
+        # restore this scale; otherwise we save the current scale
+        # here and switch to chromatic. Default to major.
+        self._push2_keys_last_scale: int = 1
         self._midi_connections: dict[str, P6Midi] = {}  # short_name -> P6Midi
         self.router: MidiRouter | None = None
 
@@ -2345,6 +2352,66 @@ class P6App:
                     self.twister.active_bus = idx
                 elif idx == 7:
                     self._sp404_toggle_fx_onoff()
+        elif name.startswith("bot_select_") and self.push2_mode == "keys":
+            # Bottom-row in keys mode = root shortcuts.
+            #   1-7 → C, D, E, F, G, A, B
+            #   1-7 + SHIFT → C#, D#, no-op, F#, G#, A#, no-op
+            #   8 → PANIC (all-notes-off across both input sources)
+            from engine.push2 import (
+                KEYS_BOT_BUTTON_ROOTS,
+                KEYS_BOT_BUTTON_ROOTS_SHIFT,
+            )
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1
+            except Exception:
+                return
+            if 0 <= idx < 7:
+                if self._push2_shift_held:
+                    sharp_pc = KEYS_BOT_BUTTON_ROOTS_SHIFT[idx]
+                    if sharp_pc >= 0:
+                        self.push2_keys_root = sharp_pc
+                else:
+                    self.push2_keys_root = KEYS_BOT_BUTTON_ROOTS[idx]
+            elif idx == 7:
+                # PANIC — release everything currently held.
+                kb = getattr(self, "chromatic_kb", None)
+                if kb is not None and kb._target_midi:
+                    for note in list(self._push2_keys_active.values()):
+                        try:
+                            kb._forward_note_off(note)
+                        except Exception:
+                            pass
+                    for note in list(kb.active_notes.keys()):
+                        try:
+                            kb._forward_note_off(note)
+                        except Exception:
+                            pass
+                    kb.active_notes.clear()
+                self._push2_keys_active.clear()
+        elif name.startswith("top_select_") and self.push2_mode == "keys":
+            # Top-row in keys mode = scale shortcuts + LAYOUT toggle.
+            #   1-7 → major, minor, min pent, maj pent, blues, dorian,
+            #         mixolydian (selecting also flips us out of
+            #         chromatic if that's where we were).
+            #   8   → LAYOUT toggle: chromatic ↔ last non-chromatic.
+            from engine.push2 import KEYS_TOP_BUTTON_SCALES, SCALES
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1
+            except Exception:
+                return
+            if 0 <= idx < 7:
+                scale_idx = KEYS_TOP_BUTTON_SCALES[idx]
+                self.push2_keys_scale = scale_idx
+                self._push2_keys_last_scale = scale_idx
+            elif idx == 7:
+                if self.push2_keys_scale == 0:
+                    # Restore last non-chromatic. Default to major
+                    # if we somehow never had one stashed.
+                    self.push2_keys_scale = (
+                        self._push2_keys_last_scale or 1)
+                else:
+                    self._push2_keys_last_scale = self.push2_keys_scale
+                    self.push2_keys_scale = 0
         elif name == "nav_up":
             if self.push2_mode == "keys":
                 from engine.push2 import SCALES
