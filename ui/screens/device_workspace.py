@@ -1563,14 +1563,32 @@ class DeviceWorkspaceScreen:
         held: set[int] = set()
         if kb:
             held.update(kb.active_notes.keys())
-        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
-        held.update(push2_active.values())
-        # CHORD layout: each pad maps to multiple notes (triad / 7th /
-        # inversion). Add them all in so the readout, the piano widget,
-        # and the rolling roll show every note in the held chord.
-        chord_active = getattr(self.app, "_push2_chord_active", {}) or {}
-        for chord_notes in chord_active.values():
-            held.update(chord_notes)
+        # Source of "what's held" depends on arp state:
+        #   arp on  → arp_scheduler.all_active_notes() (the note(s)
+        #             the arp is currently sounding this instant —
+        #             the rolling roll then shows the arp PATTERN
+        #             playing out instead of a sustained bar at
+        #             whatever pad the user is physically holding)
+        #   arp off → _push2_keys_active + _push2_chord_active (the
+        #             notes the user's pad press(es) are directly
+        #             sounding right now)
+        arp = getattr(self.app, "arp_scheduler", None)
+        arp_params = getattr(self.app, "arp_params", None)
+        arp_active = (arp_params is not None
+                      and arp_params.pattern != "off")
+        if arp_active and arp is not None:
+            try:
+                held.update(arp.all_active_notes())
+            except Exception:
+                pass
+        else:
+            push2_active = (
+                getattr(self.app, "_push2_keys_active", {}) or {})
+            held.update(push2_active.values())
+            chord_active = (
+                getattr(self.app, "_push2_chord_active", {}) or {})
+            for chord_notes in chord_active.values():
+                held.update(chord_notes)
 
         # Update the rolling note history (drives the perform view's
         # piano roll). Polled every frame — cheap, set-diff based.
@@ -1979,18 +1997,27 @@ class DeviceWorkspaceScreen:
                 body_rect.x, piano_top, body_rect.width, piano_h)
             if self._piano_display.rect != piano_rect:
                 self._piano_display.set_rect(piano_rect)
+            # Same arp-aware merging logic as _draw_keyboard_tab.
             combined: dict[int, int] = {}
             if kb:
                 combined.update(kb.active_notes)
-            push2_active = (
-                getattr(self.app, "_push2_keys_active", {}) or {})
-            for note in push2_active.values():
-                combined.setdefault(note, 100)
-            chord_active = (
-                getattr(self.app, "_push2_chord_active", {}) or {})
-            for chord_notes in chord_active.values():
-                for note in chord_notes:
+            arp = getattr(self.app, "arp_scheduler", None)
+            arp_params = getattr(self.app, "arp_params", None)
+            arp_active = (arp_params is not None
+                          and arp_params.pattern != "off")
+            if arp_active and arp is not None:
+                for note in arp.all_active_notes():
                     combined.setdefault(note, 100)
+            else:
+                push2_active = (
+                    getattr(self.app, "_push2_keys_active", {}) or {})
+                for note in push2_active.values():
+                    combined.setdefault(note, 100)
+                chord_active = (
+                    getattr(self.app, "_push2_chord_active", {}) or {})
+                for chord_notes in chord_active.values():
+                    for note in chord_notes:
+                        combined.setdefault(note, 100)
             self._piano_display._active_notes = combined
             self._piano_display.draw(surface)
 

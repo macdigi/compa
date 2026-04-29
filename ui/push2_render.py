@@ -810,18 +810,26 @@ class Push2Renderer:
             mode_now = "control"
         held_notes: set[int] = set()
         if mode_now == "keys":
-            single = getattr(self.app, "_push2_keys_active", None) or {}
-            held_notes.update(single.values())
-            chord_active = (
-                getattr(self.app, "_push2_chord_active", None) or {})
-            for chord_notes in chord_active.values():
-                held_notes.update(chord_notes)
             arp = getattr(self.app, "arp_scheduler", None)
-            if arp is not None:
+            arp_params = getattr(self.app, "arp_params", None)
+            arp_active = (arp_params is not None
+                          and arp_params.pattern != "off")
+            if arp_active and arp is not None:
+                # Same logic as in _draw_keys_body: when arp's
+                # running, "held" is what the arp is currently
+                # sounding, not what the user is holding down.
                 try:
                     held_notes.update(arp.all_active_notes())
                 except Exception:
                     pass
+            else:
+                single = (getattr(self.app, "_push2_keys_active", None)
+                          or {})
+                held_notes.update(single.values())
+                chord_active = (
+                    getattr(self.app, "_push2_chord_active", None) or {})
+                for chord_notes in chord_active.values():
+                    held_notes.update(chord_notes)
 
         # Special-encoder popup beats BPM but loses to held notes.
         encoder_overlay = (
@@ -1297,11 +1305,19 @@ class Push2Renderer:
 
         # Held notes — combined across all input + playback sources
         # so the keyboard + rolling roll show every currently-sounding
-        # note regardless of which layout / pad mode produced it:
-        #   - chromatic_kb.active_notes  (USB MIDI keyboard)
-        #   - _push2_keys_active         (single-note layouts)
-        #   - _push2_chord_active        (chord block layout)
-        #   - arp_scheduler.all_active_notes() (live arp notes)
+        # note. When the arpeggiator is engaged, the pads the user is
+        # physically holding aren't sounding directly — they're just
+        # feeding the arp. So in arp mode we deliberately skip the
+        # _push2_keys_active / _push2_chord_active values and pull
+        # only from arp_scheduler.all_active_notes() (the notes
+        # actually being sounded by the arp this instant). That way
+        # the rolling roll shows the arp pattern as it plays out
+        # instead of a sustained "always held" bar at the pad note.
+        arp = getattr(self.app, "arp_scheduler", None)
+        arp_params = getattr(self.app, "arp_params", None)
+        arp_active = (arp_params is not None
+                      and arp_params.pattern != "off")
+
         held: set[int] = set()
         kb = getattr(self.app, "chromatic_kb", None)
         if kb is not None:
@@ -1309,17 +1325,19 @@ class Push2Renderer:
                 held.update(kb.active_notes.keys())
             except Exception:
                 pass
-        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
-        held.update(push2_active.values())
-        chord_active = getattr(self.app, "_push2_chord_active", {}) or {}
-        for chord_notes in chord_active.values():
-            held.update(chord_notes)
-        arp = getattr(self.app, "arp_scheduler", None)
-        if arp is not None:
+        if arp_active and arp is not None:
             try:
                 held.update(arp.all_active_notes())
             except Exception:
                 pass
+        else:
+            push2_active = (
+                getattr(self.app, "_push2_keys_active", {}) or {})
+            held.update(push2_active.values())
+            chord_active = (
+                getattr(self.app, "_push2_chord_active", {}) or {})
+            for chord_notes in chord_active.values():
+                held.update(chord_notes)
 
         # Update the rolling history so the piano roll has data.
         now = time.monotonic()
