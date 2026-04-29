@@ -357,6 +357,23 @@ class ArpScheduler:
         with self._lock:
             return pad_idx in self._instances
 
+    def update_chord(self, pad_idx: int, chord_notes: list[int]) -> bool:
+        """Swap the chord on an existing arp without restarting the
+        step counter. Used by the chromatic/in-key path where the
+        "chord" is whatever set of pads the user is currently holding —
+        we want the arp to keep tick'ing as the chord grows/shrinks.
+
+        Returns True if an instance was updated, False if there isn't
+        one for this pad_idx (caller can then decide whether to add()
+        or just no-op).
+        """
+        with self._lock:
+            inst = self._instances.get(pad_idx)
+        if inst is None:
+            return False
+        inst.set_chord(chord_notes)
+        return True
+
     def active_pads(self) -> list[int]:
         with self._lock:
             return list(self._instances.keys())

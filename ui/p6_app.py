@@ -1668,6 +1668,17 @@ class P6App:
             return
 
         # ── Single-note layouts (chromatic / in-key) ─────────────────
+        # When arp is engaged, the "chord" is whatever set of pads the
+        # user is currently holding — multiple pads merge into a
+        # single shared arp instance (keyed by SHARED_ARP_PAD = -1) so
+        # holding C+E+G across three pads gives one running arp
+        # cycling through the three notes. Pad-presses past the first
+        # update_chord() the live instance without restarting the
+        # step counter, so the arp stays in time as the chord grows
+        # and shrinks.
+        SHARED_ARP_PAD = -1
+        arp_active = (self.arp_params.pattern != "off")
+
         if velocity > 0:
             if scale_name == "chromatic":
                 note = Push2.keys_pad_to_note(
@@ -1679,6 +1690,32 @@ class P6App:
                     base_note=self.push2_keys_base_note,
                 )
             self._push2_keys_active[idx] = note
+            if arp_active:
+                # Build the live held-chord and push it to the
+                # shared arp. update_chord() does nothing if no
+                # instance exists yet — in that case spin one up.
+                live_chord = sorted(set(self._push2_keys_active.values()))
+
+                def _send_on(n: int, v: int, _kb=kb) -> None:
+                    try:
+                        _kb._forward_note_on(n, v)
+                    except Exception:
+                        pass
+
+                def _send_off(n: int, _kb=kb) -> None:
+                    try:
+                        _kb._forward_note_off(n)
+                    except Exception:
+                        pass
+
+                if not self.arp_scheduler.update_chord(
+                        SHARED_ARP_PAD, live_chord):
+                    self.arp_scheduler.add(
+                        SHARED_ARP_PAD, live_chord, self.arp_params,
+                        _send_on, _send_off,
+                    )
+                return
+
             try:
                 kb._forward_note_on(note, velocity)
             except Exception:
@@ -1686,6 +1723,18 @@ class P6App:
         else:
             note = self._push2_keys_active.pop(idx, None)
             if note is None:
+                return
+            if arp_active:
+                live_chord = sorted(set(self._push2_keys_active.values()))
+                if live_chord:
+                    self.arp_scheduler.update_chord(
+                        SHARED_ARP_PAD, live_chord)
+                else:
+                    # No pads held — release the shared arp unless
+                    # HOLD is on (in which case the last chord stays
+                    # latched until the user clears it).
+                    if not self.arp_params.hold:
+                        self.arp_scheduler.remove(SHARED_ARP_PAD)
                 return
             try:
                 kb._forward_note_off(note)
