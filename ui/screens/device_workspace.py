@@ -1930,23 +1930,20 @@ class DeviceWorkspaceScreen:
             f_tiny.render(sel_text, True, self._device_color),
             (pad_start_x, pad_row_y - 12))
 
-        # ── Split below pad selector: Push 2 grid | Piano ───────────
-        split_top = pad_row_y + pad_row_h + 8
-        split_h = body_rect.bottom - split_top
-        if split_h < 80:
+        # ── Piano keyboard fills the rest of the body ───────────────
+        # Earlier iterations split this row in half with a Push 2 pad
+        # mirror on the left, but the producer using the touchscreen
+        # is already looking at the Push 2 itself — duplicating the
+        # grid here just clutters. The piano widget is what people
+        # came to see.
+        piano_top = pad_row_y + pad_row_h + 8
+        piano_h = body_rect.bottom - piano_top
+        if piano_h < 60:
             return
 
-        # Left: Push 2 8x8 hardware mirror
-        grid_w = min(int(body_rect.width * 0.42), 320)
-        grid_rect = pygame.Rect(
-            body_rect.x, split_top, grid_w, split_h)
-        self._draw_keys_push2_mirror(surface, grid_rect, f_tiny)
-
-        # Right: piano keyboard widget
-        piano_rect = pygame.Rect(
-            grid_rect.right + 8, split_top,
-            body_rect.right - grid_rect.right - 8, split_h)
         if self._piano_display:
+            piano_rect = pygame.Rect(
+                body_rect.x, piano_top, body_rect.width, piano_h)
             if self._piano_display.rect != piano_rect:
                 self._piano_display.set_rect(piano_rect)
             combined: dict[int, int] = {}
@@ -1958,107 +1955,6 @@ class DeviceWorkspaceScreen:
                 combined.setdefault(note, 100)
             self._piano_display._active_notes = combined
             self._piano_display.draw(surface)
-
-    def _draw_keys_push2_mirror(
-        self, surface, rect, f_tiny
-    ) -> None:
-        """8x8 hardware-mirror of the Push 2 pad grid.
-
-        Pad 0 is bottom-left (matches the physical hardware), so we
-        invert the row index when laying out cells. Each cell shows
-        the note name it would play given the current scale / root /
-        base-note, using the same mapping as the Push 2 keys-mode
-        pad handler.
-        """
-        # Border / background.
-        pygame.draw.rect(surface, theme.BG_PANEL, rect, border_radius=8)
-        pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
-
-        # Caption.
-        cap = f_tiny.render("PUSH 2", True, theme.TEXT_DIM)
-        surface.blit(cap, (rect.x + 8, rect.y + 6))
-
-        # Compute the resolver lazily — `engine.push2` may not be
-        # imported yet on the first draw.
-        try:
-            from engine.push2 import Push2, SCALES
-        except Exception:
-            return
-
-        scale_idx = getattr(self.app, "push2_keys_scale", 0) or 0
-        scale_name, scale_offsets = SCALES[scale_idx % len(SCALES)]
-        base = getattr(self.app, "push2_keys_base_note", 36)
-        root_pc = getattr(self.app, "push2_keys_root", 0) or 0
-
-        def pad_to_note(idx: int) -> int:
-            if scale_name == "chromatic":
-                return Push2.keys_pad_to_note(idx, base_note=base)
-            return Push2.in_key_pad_to_note(
-                idx, scale_offsets, root_pc=root_pc, base_note=base)
-
-        push2_active = getattr(self.app, "_push2_keys_active", {}) or {}
-
-        # 8x8 grid centered in the panel.
-        cols = rows = 8
-        cap_h = 22  # space for the caption
-        avail_w = rect.width - 12
-        avail_h = rect.height - 12 - cap_h
-        cell_size = max(
-            12,
-            min(avail_w // cols, avail_h // rows) - 3)
-        grid_w = cols * (cell_size + 2)
-        grid_h = rows * (cell_size + 2)
-        grid_x = rect.x + (rect.width - grid_w) // 2
-        grid_y = rect.y + cap_h + (avail_h - grid_h) // 2 + 6
-
-        for row in range(rows):
-            # Visual top→bottom is row 7 → 0 so pad 0 ends up on the
-            # bottom row, matching Push 2 hardware orientation.
-            visual_row = (rows - 1) - row
-            for col in range(cols):
-                pad_idx = row * cols + col
-                try:
-                    note = pad_to_note(pad_idx)
-                except Exception:
-                    note = -1
-                cell = pygame.Rect(
-                    grid_x + col * (cell_size + 2),
-                    grid_y + visual_row * (cell_size + 2),
-                    cell_size, cell_size)
-                is_active = pad_idx in push2_active
-                # In-scale / root highlighting (subtle background tint
-                # so the ear-friendly notes pop visually too).
-                in_scale = scale_name == "chromatic"
-                is_root = False
-                if not in_scale and note >= 0:
-                    pc = note % 12
-                    in_scale = ((pc - root_pc) % 12) in scale_offsets
-                    is_root = (pc == root_pc)
-                if is_active:
-                    bg = self._device_color
-                    tc = theme.BG
-                elif is_root:
-                    bg = theme.BG_LIGHTER
-                    tc = self._device_color
-                elif in_scale:
-                    bg = theme.PAD_OFF
-                    tc = theme.TEXT
-                else:
-                    bg = theme.BG
-                    tc = theme.TEXT_DIM
-                pygame.draw.rect(
-                    surface, bg, cell, border_radius=3)
-                pygame.draw.rect(
-                    surface, theme.BORDER, cell, 1, border_radius=3)
-                if note >= 0 and cell_size >= 18:
-                    try:
-                        label = note_name(note)
-                    except Exception:
-                        label = ""
-                    if label:
-                        ls = f_tiny.render(label, True, tc)
-                        surface.blit(
-                            ls, ls.get_rect(center=cell.center))
 
     def _handle_keys_clicks(self, mx, my):
         """Handle clicks within the KEYS tab.
