@@ -22,6 +22,12 @@ on:
         required: true
         default: 'dev'
 
+# softprops/action-gh-release needs contents:write to create the
+# release. Default GITHUB_TOKEN scope is read-only on tag pushes,
+# so without this the build succeeds but the release step 403s.
+permissions:
+  contents: write
+
 jobs:
   build:
     # Native arm64 runner — pi-gen's chroot runs without QEMU
