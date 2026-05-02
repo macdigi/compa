@@ -394,19 +394,51 @@ class P6SettingsScreen:
         clock_out = self.app.config.get("LINK_MIDI_CLOCK_OUT", "1") == "1"
 
         if link is not None:
-            # Live status (peers + tempo)
             if link.available:
                 peers = link.num_peers
                 tempo = link.tempo
+                source = link.tempo_source  # "boot" / "local" / "link"
+                source_label = {
+                    "local": "from this Compa",
+                    "link":  "from a Link peer",
+                    "boot":  "default",
+                }.get(source, source)
+                # Status row
                 if peers > 0:
-                    status = (f"{peers} peer{'s' if peers != 1 else ''} · "
-                              f"{tempo:.1f} BPM")
+                    status = (f"connected · {peers} peer"
+                              f"{'s' if peers != 1 else ''}")
                 else:
-                    status = f"alone · {tempo:.1f} BPM"
+                    status = "connected · alone"
             else:
                 status = "stopped" if not link_enabled else "unavailable"
+                tempo = 0.0
+                source_label = "—"
+
             self._rows.append({"label": "  Status", "type": "info",
                                "value": status})
+
+            if link.available:
+                # Tempo + source row
+                self._rows.append({
+                    "label": "  Tempo",
+                    "type": "info",
+                    "value": f"{tempo:.1f} BPM · {source_label}",
+                })
+
+                # Sending clock to: device list
+                if clock_out:
+                    targets = list(self.app._midi_connections.keys())
+                    if targets:
+                        recipients = ", ".join(targets)
+                    else:
+                        recipients = "no devices connected"
+                else:
+                    recipients = "off"
+                self._rows.append({
+                    "label": "  Sending clock to",
+                    "type": "info",
+                    "value": recipients,
+                })
 
             self._rows.append({
                 "label": "Enable Link", "type": "toggle",

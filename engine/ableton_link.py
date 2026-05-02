@@ -32,6 +32,7 @@ Implementation notes:
 import asyncio
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,11 @@ class AbletonLinkBridge:
         self._tempo_listeners: list[Callable[[float], None]] = []
         self._peers_listeners: list[Callable[[int], None]] = []
         self._lock = threading.Lock()
+        # Source of the most recent tempo change: "boot", "local", "link"
+        self._tempo_source = "boot"
+        # Monotonic timestamp of the most recent Link activity (tempo or
+        # peers callback). UI uses this to show a heartbeat dot.
+        self._last_activity = 0.0
         self._aalink = None
         try:
             import aalink
@@ -198,14 +204,34 @@ class AbletonLinkBridge:
         """Push a tempo change out to Link peers (and stay in sync locally).
 
         Safe to call from any thread — routed through the asyncio loop.
+        Marks the tempo source as 'local' so the UI can show it came from
+        this Compa rather than from a Link peer.
         """
         if self._link is None or self._loop is None:
             return
+        self._tempo_source = "local"
+        self._last_activity = time.monotonic()
         try:
             asyncio.run_coroutine_threadsafe(
                 self._async_set_tempo(float(bpm)), self._loop)
         except Exception as e:
             log.debug("set_tempo failed: %s", e)
+
+    @property
+    def tempo_source(self) -> str:
+        """Source of the current tempo: 'boot', 'local', or 'link'."""
+        return self._tempo_source
+
+    @property
+    def seconds_since_activity(self) -> float:
+        """How long since the last Link tempo or peers callback fired.
+
+        Returns a large number (>1e6) if we've never seen activity.
+        UI uses this to show a heartbeat — recent activity = live signal.
+        """
+        if self._last_activity == 0.0:
+            return 1e9
+        return time.monotonic() - self._last_activity
 
     # ── Listener registration ─────────────────────────────────────────
 
@@ -241,6 +267,14 @@ class AbletonLinkBridge:
             value = float(bpm)
         except (TypeError, ValueError):
             return
+        # Mark source as 'link' since this fires when a peer changed it.
+        # set_tempo() also sets _tempo_source='local' just before pushing
+        # the value to Link, so a Local change followed by Link's own
+        # echo callback will momentarily flip to 'link' — that's accurate
+        # because by the time the callback fires, the value is in the
+        # shared session.
+        self._tempo_source = "link"
+        self._last_activity = time.monotonic()
         log.debug("Link tempo -> %.2f BPM", value)
         with self._lock:
             listeners = list(self._tempo_listeners)
@@ -255,6 +289,7 @@ class AbletonLinkBridge:
             value = int(count)
         except (TypeError, ValueError):
             return
+        self._last_activity = time.monotonic()
         print(f"Ableton Link: peers={value}", flush=True)
         with self._lock:
             listeners = list(self._peers_listeners)

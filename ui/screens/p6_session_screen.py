@@ -216,16 +216,30 @@ class P6SessionScreen:
         if link is not None and link.available:
             peers = link.num_peers
             tempo = link.tempo
-            # Dot color: bright green when synced with peers, dim when alone
-            dot_color = theme.GREEN if peers > 0 else theme.TEXT_DIM
+            # Heartbeat: dot pulses bright for ~1s after a Link callback
+            # (tempo or peers change), then settles to steady state.
+            since = link.seconds_since_activity
+            if since < 0.3:
+                # Fresh activity — flash bright green
+                dot_color = theme.GREEN
+                dot_radius = 6
+            elif peers > 0:
+                # Steady connected state — solid green
+                dot_color = theme.GREEN
+                dot_radius = 4
+            else:
+                # Alone, no recent activity — dim
+                dot_color = theme.TEXT_DIM
+                dot_radius = 4
             label_color = theme.TEXT if peers > 0 else theme.TEXT_DIM
             link_x = 320
             link_y = 12
-            # Small dot
-            pygame.draw.circle(surface, dot_color, (link_x, link_y + 6), 4)
+            pygame.draw.circle(surface, dot_color, (link_x, link_y + 6),
+                               dot_radius)
             # "LINK" label + peer count
             if peers > 0:
-                txt = f"LINK · {peers} peer{'s' if peers != 1 else ''} · {tempo:.1f} BPM"
+                txt = (f"LINK · {peers} peer{'s' if peers != 1 else ''} · "
+                       f"{tempo:.1f} BPM")
             else:
                 txt = "LINK · alone"
             surf = f_tiny.render(txt, True, label_color)
