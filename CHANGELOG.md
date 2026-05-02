@@ -14,6 +14,43 @@ affect what a user sees.
 
 (nothing yet — this section fills up as new commits land)
 
+## v0.1.1 — 2026-05-02
+
+**Ableton Link tempo sync over WiFi**
+
+- Joins any Link session on the local network and stays tempo-locked
+  with iPad apps (AUM, Koala, Drambo, Loopy Pro, GarageBand),
+  Ableton Live, Push 3, and other Link-aware peers.
+- Compa broadcasts MIDI clock (0xF8 at 24 PPQN) to every connected
+  device's MIDI out — so SP-404, P-6, and other class-compliant
+  grooveboxes follow Link tempo without a single USB cable to the
+  iPad. Set the device's sync source to External / Auto.
+- Multi-Compa mesh: two Compas on the same network see each other
+  as peers and stay locked together.
+- LINK indicator on the session screen — green dot pulses on each
+  tempo / peers update.
+- Settings → ABLETON LINK section: live status, tempo source
+  ("from this Compa" / "from a Link peer"), recipient device list,
+  Enable Link toggle, Send MIDI Clock toggle.
+
+**Touchscreen calibration**
+
+- New in-app calibration screen for USB capacitive HID touchscreens.
+  4-corner + center taps compute an affine transform; persists at
+  ~/.config/compa/touch_calibration.json.
+- Settings → Calibrate now opens the in-app screen instead of
+  launching ts_calibrate (which only worked for old resistive
+  panels).
+
+**Update flow fix**
+
+- Settings → Updates now actually works on flashed images. The
+  previous image build was stripping .git from the source so the
+  updater couldn't fetch from GitHub. Both the workflow and
+  install.sh have been patched so .git survives the image build,
+  with a bootstrap fallback for any deployment that ships source
+  without .git.
+
 ## v0.1.0 — 2026-04-29 — first public release
 
 The first stamped Compa OS image. Touchscreen companion for
