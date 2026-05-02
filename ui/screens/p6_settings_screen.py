@@ -271,16 +271,13 @@ class P6SettingsScreen:
         print("Audio route stopped", flush=True)
 
     def _run_calibrate(self):
-        """Launch ts_calibrate with TSLIB environment variables."""
-        env = os.environ.copy()
-        env["TSLIB_TSDEVICE"] = env.get("TSLIB_TSDEVICE", "/dev/input/touchscreen")
-        env["TSLIB_FBDEVICE"] = env.get("TSLIB_FBDEVICE", "/dev/fb0")
-        env["TSLIB_CALIBFILE"] = "/etc/pointercal"
-        try:
-            subprocess.Popen(["sudo", "ts_calibrate"], env=env)
-            print("Touch calibration started", flush=True)
-        except Exception as e:
-            print(f"Failed to start ts_calibrate: {e}", flush=True)
+        """Launch the in-app touch calibration screen.
+
+        Works for any touchscreen delivering events through pygame (HID USB
+        capacitive panels, DSI panels via SDL, etc.). Replaces the legacy
+        ts_calibrate which only worked for resistive ADS7846 touchscreens.
+        """
+        self.app.switch_screen("touch_calibrate")
 
     # ── Settings row definitions ────────────────────────────────────
 

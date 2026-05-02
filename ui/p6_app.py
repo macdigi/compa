@@ -30,6 +30,8 @@ from ui.screens.file_browser_screen import FileBrowserScreen
 from ui.screens.device_workspace import DeviceWorkspaceScreen
 from ui.screens.io_settings_screen import IOSettingsScreen
 from ui.screens.controller_screen import ControllerScreen
+from ui.screens.touch_calibrate_screen import TouchCalibrateScreen
+from engine.touch_calibration import TouchCalibration
 from engine.atom_sq import AtomSQ, find_atom_sq_ports
 from engine.p6_midi import P6Midi, find_p6_ports
 from engine.midi_router import MidiRouter, Layer
@@ -242,6 +244,10 @@ class P6App:
         self.mouse_mode = self.config.get("MOUSE_MODE", "0") == "1"
         if self.mouse_mode:
             pygame.mouse.set_visible(True)
+
+        # ── HID touchscreen calibration (USB capacitive panels) ──
+        self.touch_calibration = TouchCalibration()
+        self.is_calibrating = False  # set True by TouchCalibrateScreen
 
         # ── MIDI devices (init before screens so state objects exist) ──
         self.atom_sq: AtomSQ | None = None
@@ -495,6 +501,7 @@ class P6App:
             "files": FileBrowserScreen(self),
             "io": IOSettingsScreen(self),
             "controller": ControllerScreen(self),
+            "touch_calibrate": TouchCalibrateScreen(self),
         }
         self.current_screen_name = "session"
 
@@ -3450,6 +3457,23 @@ class P6App:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 continue
+
+            # Apply HID touchscreen calibration to mouse events (skip during
+            # calibration screen and when a real mouse is in use).
+            if (not self.is_calibrating and not self.mouse_mode
+                    and self.touch_calibration.is_calibrated()
+                    and event.type in (pygame.MOUSEBUTTONDOWN,
+                                       pygame.MOUSEBUTTONUP,
+                                       pygame.MOUSEMOTION)):
+                cx, cy = self.touch_calibration.apply(*event.pos)
+                if event.type == pygame.MOUSEMOTION:
+                    event = pygame.event.Event(pygame.MOUSEMOTION,
+                                               pos=(cx, cy),
+                                               rel=event.rel,
+                                               buttons=event.buttons)
+                else:
+                    event = pygame.event.Event(event.type, pos=(cx, cy),
+                                               button=event.button)
 
             # Convert touch events to mouse events with scroll detection
             # Skip in FB mode (evdev handles touch) and when mouse mode is on
