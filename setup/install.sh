@@ -99,8 +99,24 @@ if [[ -n "${COMPA_SOURCE_DIR}" && -d "${COMPA_SOURCE_DIR}" ]]; then
     rm -rf "${COMPA_DIR}"
     mkdir -p "${COMPA_DIR}"
     cp -a "${COMPA_SOURCE_DIR}/." "${COMPA_DIR}/"
-    rm -rf "${COMPA_DIR}/.git" "${COMPA_DIR}/venv"
+    rm -rf "${COMPA_DIR}/venv"
     ok "Copied staged source tree → ${COMPA_DIR}"
+
+    # Ensure /home/pi/compa is a real git checkout so Settings → Updates
+    # works after first boot. If the staged source already included .git
+    # we keep it; otherwise we bootstrap one pointing at origin.
+    if [[ ! -d "${COMPA_DIR}/.git" ]]; then
+        log "Bootstrapping git checkout for in-app updates"
+        sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" init -q -b "${COMPA_BRANCH}"
+        sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" remote add origin "${COMPA_REPO}"
+        if sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" fetch --quiet --depth 50 origin "${COMPA_BRANCH}" 2>/dev/null; then
+            sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" reset --hard "FETCH_HEAD" >/dev/null
+            sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" branch --set-upstream-to="origin/${COMPA_BRANCH}" "${COMPA_BRANCH}" 2>/dev/null || true
+            ok "git checkout aligned with origin/${COMPA_BRANCH}"
+        else
+            warn "Could not fetch ${COMPA_REPO} during install — Settings → Updates may need a manual 'git fetch' on first run"
+        fi
+    fi
 elif [[ -d "${COMPA_DIR}/.git" ]]; then
     sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" fetch --quiet origin
     sudo -u "${COMPA_USER}" git -C "${COMPA_DIR}" reset --hard "origin/${COMPA_BRANCH}" >/dev/null

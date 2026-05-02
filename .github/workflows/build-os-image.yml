@@ -106,8 +106,11 @@ jobs:
           cp compa-src/setup/install.sh pi-gen/setup/install.sh
           cp compa-src/setup/50-ableton-push-2.rules \
              pi-gen/setup/50-ableton-push-2.rules
+          # NOTE: .git is intentionally INCLUDED so the resulting image is a
+          # real git checkout. install.sh keeps .git in place; the in-app
+          # Settings → Updates flow uses it to fetch new commits from origin.
+          # Removing this would silently break the auto-updater.
           rsync -a --delete \
-            --exclude '.git' \
             --exclude '.github' \
             --exclude '__pycache__' \
             --exclude '*.pyc' \
