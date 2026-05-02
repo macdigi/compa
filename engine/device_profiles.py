@@ -477,8 +477,15 @@ class DeviceManager:
         self.register_profile(_make_p6_profile())
         self.register_profile(_make_sp404mk2_profile())
         self.register_profile(_make_force_profile())
-        self.register_profile(_make_apple_ios_profile())
-        # Generic fallback is NOT registered — it's used only when nothing matches
+        # Apple iOS profile is intentionally NOT registered. iPadOS won't
+        # expose USB Audio Class to non-Apple hosts, so the card has no real
+        # function over USB — iPad integration goes through Ableton Link
+        # (over WiFi) instead. Profile code is kept for a future Compa 2
+        # USB-gadget-mode implementation where the Pi acts as a USB Audio
+        # peripheral to the iPad.
+        # self.register_profile(_make_apple_ios_profile())
+        #
+        # Generic fallback is NOT registered — used only when nothing matches
 
     # ── Public API ───────────────────────────────────────────────────
 

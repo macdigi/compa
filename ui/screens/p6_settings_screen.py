@@ -73,6 +73,28 @@ class P6SettingsScreen:
         pygame.mouse.set_visible(self.app.mouse_mode)
         save_config_key("MOUSE_MODE", "1" if self.app.mouse_mode else "0")
 
+    def _toggle_link_enabled(self):
+        from ui.p6_app import save_config_key
+        link = getattr(self.app, "link", None)
+        if link is None:
+            return
+        currently = self.app.config.get("LINK_ENABLED", "1") == "1"
+        new_value = not currently
+        if new_value:
+            link.start()
+        else:
+            link.stop()
+        self.app.config["LINK_ENABLED"] = "1" if new_value else "0"
+        save_config_key("LINK_ENABLED", "1" if new_value else "0")
+
+    def _toggle_link_clock_out(self):
+        from ui.p6_app import save_config_key
+        currently = self.app.config.get("LINK_MIDI_CLOCK_OUT", "1") == "1"
+        new_value = not currently
+        self.app.send_midi_clock = new_value
+        self.app.config["LINK_MIDI_CLOCK_OUT"] = "1" if new_value else "0"
+        save_config_key("LINK_MIDI_CLOCK_OUT", "1" if new_value else "0")
+
     def _toggle_auto_record(self):
         from ui.p6_app import save_config_key
         self.app.auto_record = not self.app.auto_record
@@ -362,6 +384,43 @@ class P6SettingsScreen:
 
         if not connected:
             self._rows.append({"label": "  No devices", "type": "info", "value": "—"})
+
+        # ── Ableton Link ───────────────────────────────────────────────
+        self._rows.append({"label": "", "type": "section",
+                           "value": "ABLETON LINK"})
+
+        link = getattr(self.app, "link", None)
+        link_enabled = self.app.config.get("LINK_ENABLED", "1") == "1"
+        clock_out = self.app.config.get("LINK_MIDI_CLOCK_OUT", "1") == "1"
+
+        if link is not None:
+            # Live status (peers + tempo)
+            if link.available:
+                peers = link.num_peers
+                tempo = link.tempo
+                if peers > 0:
+                    status = (f"{peers} peer{'s' if peers != 1 else ''} · "
+                              f"{tempo:.1f} BPM")
+                else:
+                    status = f"alone · {tempo:.1f} BPM"
+            else:
+                status = "stopped" if not link_enabled else "unavailable"
+            self._rows.append({"label": "  Status", "type": "info",
+                               "value": status})
+
+            self._rows.append({
+                "label": "Enable Link", "type": "toggle",
+                "value": link_enabled,
+                "action": self._toggle_link_enabled,
+            })
+            self._rows.append({
+                "label": "Send MIDI Clock", "type": "toggle",
+                "value": clock_out,
+                "action": self._toggle_link_clock_out,
+            })
+        else:
+            self._rows.append({"label": "  aalink not installed",
+                               "type": "info", "value": "—"})
 
         # MIDI Controller Mapping
         self._rows.append({"label": "", "type": "section", "value": "MIDI CONTROLLER"})

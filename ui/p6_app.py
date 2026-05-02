@@ -45,6 +45,7 @@ from engine.spectra_mapper import SpectraMapper
 from engine.push2 import Push2, find_push2_ports
 from engine.controller_actions import dispatch as _dispatch_action
 from engine.master_clock import MasterClock
+from engine.ableton_link import AbletonLinkBridge
 try:
     from engine.push2_display import Push2Display
     from ui.push2_render import Push2Renderer
@@ -290,6 +291,28 @@ class P6App:
         # a stable BPM regardless of device clock. Tempo encoder
         # (Push 2 CC 14) nudges this directly.
         self.master_clock = MasterClock(bpm=120.0)
+
+        # ── Ableton Link — tempo sync with iOS apps + DAWs over WiFi ──
+        # iPad apps (AUM, Koala, Drambo, Loopy Pro, GarageBand), Ableton
+        # Live, and other Link-aware peers all auto-discover Compa on the
+        # same network and stay tempo-locked. No USB cable, no setup.
+        self.link = AbletonLinkBridge(initial_bpm=120.0, quantum=4.0)
+        self.link.add_tempo_listener(
+            lambda bpm: self.master_clock.set_bpm(bpm))
+        # Read persisted Link settings (defaults: enabled, clock out enabled)
+        link_enabled = self.config.get("LINK_ENABLED", "1") == "1"
+        if link_enabled:
+            self.link.start()
+
+        # ── Persistent MIDI clock broadcaster ────────────────────────
+        # Always run master_clock so Compa is the tempo authority. On
+        # every 24-PPQN tick, send 0xF8 to all connected device MIDI
+        # outs so SP/P-6/etc. follow Compa (and therefore Link) tempo.
+        self.send_midi_clock = self.config.get(
+            "LINK_MIDI_CLOCK_OUT", "1") == "1"
+        self.master_clock.add_listener(self._broadcast_midi_clock)
+        self.master_clock.start()
+
         # (name, monotonic_ts) for the most recent Tempo / Master /
         # Swing encoder turn — the Push 2 renderer pops up the current
         # value for ~1.5s after each event.
@@ -2028,6 +2051,9 @@ class P6App:
         if name == "tempo":
             try:
                 self.master_clock.nudge_bpm(float(delta))
+                # Push the new tempo out to Link peers so iPad apps etc.
+                # follow Compa's tempo nudge in real time.
+                self.link.set_tempo(self.master_clock.get_bpm())
             except Exception:
                 pass
             return
@@ -3355,6 +3381,25 @@ class P6App:
     @property
     def clock_relay_active(self) -> bool:
         return getattr(self, "_clock_relay_active", False)
+
+    # ── MIDI clock broadcast (master_clock listener) ─────────────────
+
+    def _broadcast_midi_clock(self) -> None:
+        """Send a single 0xF8 MIDI Clock byte to every connected device.
+
+        Called 24x per beat by master_clock. Tempo follows Link via the
+        link.add_tempo_listener hook in __init__. Toggleable via the
+        send_midi_clock flag (Settings → Link → Send MIDI Clock).
+        """
+        if not getattr(self, "send_midi_clock", True):
+            return
+        for conn in self._midi_connections.values():
+            out = getattr(conn, "_out", None)
+            if out is not None:
+                try:
+                    out.send_message([0xF8])
+                except Exception:
+                    pass
 
     # ── Hot-plug detection ───────────────────────────────────────────
 

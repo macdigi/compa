@@ -211,6 +211,26 @@ class P6SessionScreen:
         surf = f_tiny.render("raredata.net", True, theme.TEXT_DIM)
         surface.blit(surf, (240, 24))
 
+        # ── Ableton Link indicator ─────────────────────────────────────
+        link = getattr(self.app, "link", None)
+        if link is not None and link.available:
+            peers = link.num_peers
+            tempo = link.tempo
+            # Dot color: bright green when synced with peers, dim when alone
+            dot_color = theme.GREEN if peers > 0 else theme.TEXT_DIM
+            label_color = theme.TEXT if peers > 0 else theme.TEXT_DIM
+            link_x = 320
+            link_y = 12
+            # Small dot
+            pygame.draw.circle(surface, dot_color, (link_x, link_y + 6), 4)
+            # "LINK" label + peer count
+            if peers > 0:
+                txt = f"LINK · {peers} peer{'s' if peers != 1 else ''} · {tempo:.1f} BPM"
+            else:
+                txt = "LINK · alone"
+            surf = f_tiny.render(txt, True, label_color)
+            surface.blit(surf, (link_x + 10, link_y))
+
         # Reset card rects each frame
         self._card_buttons = []
         self._card_rects = []  # (rect, short_name) for tap-to-focus
