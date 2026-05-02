@@ -345,6 +345,54 @@ def _make_force_profile() -> DeviceProfile:
     )
 
 
+def _make_apple_ios_profile() -> DeviceProfile:
+    """Apple iPad / iPhone / iPod via USB-C or Lightning.
+
+    Matches by Apple vendor ID (0x05AC) only — Apple uses many product IDs
+    across iOS device generations, so empty usb_products signals "any product
+    from this vendor" (see DeviceManager.detect()).
+
+    iOS exposes itself as a USB Audio Class + USB MIDI peer when plugged in
+    (USB-C iPads/iPhones natively; Lightning needs the Camera Connection Kit
+    + powered hub). Acts as a peer for routing to apps like AUM, Koala,
+    Drambo, Loopy Pro. Tempo sync also available via Ableton Link over WiFi
+    (separate path, no USB needed).
+    """
+    return DeviceProfile(
+        name="Apple iOS",
+        short_name="iOS",
+        usb_vendor=0x05AC,
+        usb_products=[],  # empty = match any product from this vendor
+
+        audio_hint="iPad",  # ALSA device name contains "iPad"/"iPhone"/etc.
+        audio_in_channels=2,
+        audio_out_channels=2,
+        supported_sample_rates=[44100, 48000],
+
+        midi_hint="iPad",
+        midi_channels={},
+        midi_note_range=(0, 127),
+        cc_map={},
+
+        pattern_count=0,
+        pattern_pc_channel=0,
+
+        sends_clock=True,
+        receives_clock=True,
+        transport_works=True,
+
+        mount_path="",  # iOS doesn't expose USB Mass Storage by default
+
+        has_granular=False,
+        has_effects=False,
+        has_dj_mode=False,
+        has_looper=False,
+        has_sequencer=False,
+
+        sample_format="wav",
+    )
+
+
 def _make_generic_usb_audio_profile() -> DeviceProfile:
     """Fallback for any USB audio interface with no MIDI features."""
     return DeviceProfile(
@@ -429,6 +477,7 @@ class DeviceManager:
         self.register_profile(_make_p6_profile())
         self.register_profile(_make_sp404mk2_profile())
         self.register_profile(_make_force_profile())
+        self.register_profile(_make_apple_ios_profile())
         # Generic fallback is NOT registered — it's used only when nothing matches
 
     # ── Public API ───────────────────────────────────────────────────
@@ -452,11 +501,15 @@ class DeviceManager:
 
         self._connected.clear()
 
-        # Try each profile against the bus — match ALL, not just first
+        # Try each profile against the bus — match ALL, not just first.
+        # Empty usb_products is a wildcard meaning "any product from this
+        # vendor" (used for Apple iOS where every model has a different PID).
         for profile in self._profiles.values():
             for dev in usb_devices:
-                if (dev["vendor"] == profile.usb_vendor
-                        and dev["product"] in profile.usb_products):
+                vendor_match = dev["vendor"] == profile.usb_vendor
+                product_match = (not profile.usb_products
+                                 or dev["product"] in profile.usb_products)
+                if vendor_match and product_match:
                     log.info("Matched device: %s (vendor=%04x product=%04x)",
                              profile.name, dev["vendor"], dev["product"])
                     self._connected[profile.short_name] = profile

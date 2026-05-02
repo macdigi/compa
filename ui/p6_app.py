@@ -3370,11 +3370,15 @@ class P6App:
         current_keys = set(self.device_manager.connected.keys())
         found_keys = set()
 
-        # Check which registered profiles match current USB bus
+        # Check which registered profiles match current USB bus.
+        # Empty usb_products is a wildcard meaning "any product from this
+        # vendor" — see DeviceManager.detect() for the same rule.
         for profile in self.device_manager.profiles.values():
             for dev in usb_devices:
-                if (dev["vendor"] == profile.usb_vendor
-                        and dev["product"] in profile.usb_products):
+                vendor_match = dev["vendor"] == profile.usb_vendor
+                product_match = (not profile.usb_products
+                                 or dev["product"] in profile.usb_products)
+                if vendor_match and product_match:
                     found_keys.add(profile.short_name)
                     break
 
@@ -3387,6 +3391,7 @@ class P6App:
             self.device_manager._connected[short_name] = profile
             if self.device_manager._focus_key is None:
                 self.device_manager.set_focus(short_name)
+            print(f"Hot-plug: {profile.name} connected", flush=True)
             # Try to open MIDI
             if profile.midi_hint:
                 try:
@@ -3395,7 +3400,7 @@ class P6App:
                         conn = P6Midi(midi_in, midi_out, profile=profile)
                         conn.on_transport = self._on_p6_transport
                         self._midi_connections[short_name] = conn
-                        print(f"Hot-plug: {profile.name} connected", flush=True)
+                        print(f"Hot-plug: {profile.name} MIDI opened", flush=True)
                 except Exception as e:
                     print(f"Hot-plug MIDI failed for {short_name}: {e}", flush=True)
 
