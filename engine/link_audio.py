@@ -45,6 +45,11 @@ class LinkAudioBroadcaster:
         # Stats — readable from any thread, updated lock-free from push()
         self._committed = 0
         self._dropped = 0
+        # Last seen RMS of incoming audio (rolling) so we can tell whether
+        # push() is being called with non-silent data.
+        self._last_rms = 0.0
+        self._stats_thread: Optional[threading.Thread] = None
+        self._stats_stop = threading.Event()
 
         # Try to import pylinkaudio — graceful no-op if missing.
         self._pla = None
@@ -112,6 +117,12 @@ class LinkAudioBroadcaster:
                      self._channel_name, self._peer_name)
             print(f"Link Audio: broadcasting '{self._channel_name}' "
                   f"as peer '{self._peer_name}'", flush=True)
+            # Background stats thread so we can see what's happening
+            # without instrumenting every call site.
+            self._stats_stop.clear()
+            self._stats_thread = threading.Thread(
+                target=self._stats_loop, name="LinkAudioStats", daemon=True)
+            self._stats_thread.start()
             return True
         except Exception as e:
             log.error("Link Audio start failed: %s", e)
@@ -121,8 +132,27 @@ class LinkAudioBroadcaster:
             self._enabled = False
             return False
 
+    def _stats_loop(self) -> None:
+        """Print push() stats every 5s so the journal shows what's flowing."""
+        last_committed = 0
+        last_dropped = 0
+        while not self._stats_stop.wait(5.0):
+            c = self._committed
+            d = self._dropped
+            dc = c - last_committed
+            dd = d - last_dropped
+            last_committed = c
+            last_dropped = d
+            print(f"Link Audio: peers={self.num_peers} "
+                  f"+committed={dc} +dropped={dd} "
+                  f"rms={self._last_rms:.4f}", flush=True)
+
     def stop(self) -> None:
         self._enabled = False
+        self._stats_stop.set()
+        if self._stats_thread is not None:
+            self._stats_thread.join(timeout=1.0)
+            self._stats_thread = None
         if self._sink is not None:
             try:
                 # AudioSink doesn't have an explicit stop — releasing it
@@ -158,6 +188,8 @@ class LinkAudioBroadcaster:
         try:
             # float32 [-1, 1] → int16. clip just in case of overshoot.
             buf16 = (indata * 32767.0).clip(-32768, 32767).astype(np.int16)
+            # Track RMS for diagnostics — cheap.
+            self._last_rms = float(np.sqrt(np.mean(buf16.astype(np.float32) ** 2))) / 32768.0
             ok = self._sink.write(
                 buf16,
                 sample_rate=int(sample_rate),
