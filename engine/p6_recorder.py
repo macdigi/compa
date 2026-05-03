@@ -276,18 +276,12 @@ class P6Recorder:
                 samplerate=self._sample_rate,
                 channels=P6_CHANNELS,
                 dtype="float32",
-                # blocksize=1024 + latency=low so audio_callback fires more
-                # often with less per-call work, keeping up with USB delivery
-                # rate. Previously blocksize=4096/latency=high caused ~22%
-                # input dropouts on Pi 3B (recorder couldn't drain ALSA fast
-                # enough), which manifested as choppy Link Audio downstream.
-                blocksize=1024,
-                latency="low",
+                blocksize=4096,  # Larger buffer reduces glitches on Pi 3B USB bus
+                latency="high",
                 callback=self._audio_callback,
             )
             self._stream.start()
             self._monitoring = True
-            print(f"Monitoring started (blocksize=1024, latency=low)", flush=True)
             log.info("Monitoring started")
         except Exception as e:
             log.error("Failed to start monitoring: %s", e)

@@ -523,9 +523,6 @@ class P6App:
             # (which feeds the broadcaster) actually runs even when the
             # user hasn't entered a record/monitor screen yet.
             self.recorder.start_monitoring()
-            print(f"Link Audio: recorder.is_monitoring={self.recorder._monitoring} "
-                  f"stream={self.recorder._stream is not None} "
-                  f"device={self.recorder.device_name}", flush=True)
 
         # ── Sessions directory ───────────────────────────────────────
         os.makedirs(self.config["P6_SESSIONS_DIR"], exist_ok=True)
