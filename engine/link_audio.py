@@ -5,29 +5,46 @@ captured audio out to the Link Audio mesh. Live 12.4 (or any other
 Link Audio peer) sees Compa as a channel source and can route it to
 a track input.
 
-Runs alongside the existing Ableton Link tempo bridge (aalink). They
-each create their own Link session — the Pi shows up as two peers
-on the network, which is harmless. Consolidating onto a single
-pylinkaudio Link instance is a separate cleanup.
+Architecture: the recorder hands us large bursty blocks (~85ms at
+48k/4096) for USB stability. Link Audio receivers expect a steady
+stream — Live drops anything that doesn't arrive at a predictable
+cadence. So we decouple producer/consumer:
 
-Usage:
-    bcast = LinkAudioBroadcaster(peer_name="compa-2", channel_name="compa-2")
-    bcast.start()
-    # From audio callback:
-    bcast.push(indata, sample_rate=44100)  # indata = float32 stereo [-1, 1]
-    bcast.stop()
+    recorder._audio_callback ──push()──► ring buffer
+                                              │
+                                              ▼
+                                   _send_worker thread
+                                              │
+                                              ▼
+                                    sink.write() at HOP-rate
+
+The send worker drains the ring at the natural HOP/sample_rate
+cadence (~21ms per hop at 48k/1024), giving Live the smooth stream
+it wants.
+
+Runs alongside aalink (tempo) for now; consolidating onto a single
+pylinkaudio Link instance is a separate cleanup.
 """
 import logging
 import threading
+import time
 from typing import Optional
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
+# Send-side hop, matching the working pylinkaudio audio_send.py example.
+HOP_FRAMES = 1024
+# Ring buffer holds ~250ms of audio at 48kHz to absorb input bursts +
+# scheduling jitter. Keep small to avoid latency.
+RING_SECONDS = 0.25
+DEFAULT_SAMPLE_RATE = 48000
+CHANNELS = 2
+
 
 class LinkAudioBroadcaster:
-    """Owns a pylinkaudio LinkAudio session + a single AudioSink channel."""
+    """Owns a pylinkaudio LinkAudio session + AudioSink + send worker."""
 
     def __init__(self, peer_name: str = "compa",
                  channel_name: str = "compa", initial_bpm: float = 120.0,
@@ -40,13 +57,25 @@ class LinkAudioBroadcaster:
         self._link = None
         self._sink = None
         self._enabled = False
-        self._lock = threading.Lock()
 
-        # Stats — readable from any thread, updated lock-free from push()
+        # Ring buffer (int16 stereo). Single producer (audio callback),
+        # single consumer (send worker). Positions guarded by a lock.
+        ring_frames = int(RING_SECONDS * DEFAULT_SAMPLE_RATE)
+        self._ring = np.zeros((ring_frames, CHANNELS), dtype=np.int16)
+        self._ring_frames = ring_frames
+        self._wpos = 0
+        self._rpos = 0
+        self._ring_lock = threading.Lock()
+        self._sample_rate = DEFAULT_SAMPLE_RATE
+
+        # Send worker
+        self._worker: Optional[threading.Thread] = None
+        self._worker_stop = threading.Event()
+
+        # Stats
         self._committed = 0
         self._dropped = 0
-        # Last seen RMS of incoming audio (rolling) so we can tell whether
-        # push() is being called with non-silent data.
+        self._overruns = 0  # ring buffer overruns (consumer too slow)
         self._last_rms = 0.0
         self._stats_thread: Optional[threading.Thread] = None
         self._stats_stop = threading.Event()
@@ -93,11 +122,6 @@ class LinkAudioBroadcaster:
         return (self._committed, self._dropped)
 
     def start(self) -> bool:
-        """Open the LinkAudio session and announce the channel.
-
-        Returns True on success. Safe to call when pylinkaudio is missing
-        (returns False) or already started (no-op, returns True).
-        """
         if self._pla is None:
             return False
         if self._link is not None:
@@ -108,17 +132,22 @@ class LinkAudioBroadcaster:
                                              name=self._peer_name)
             self._link.enabled = True
             self._link.link_audio_enabled = True
-            # Buffer of 2x our typical write so commits don't block while
-            # the previous block is still being sent on the wire.
             self._sink = self._pla.AudioSink(
-                self._link, self._channel_name, max_samples=4096)
+                self._link, self._channel_name, max_samples=HOP_FRAMES * 2)
             self._enabled = True
             log.info("Link Audio broadcaster: '%s' as '%s'",
                      self._channel_name, self._peer_name)
             print(f"Link Audio: broadcasting '{self._channel_name}' "
-                  f"as peer '{self._peer_name}'", flush=True)
-            # Background stats thread so we can see what's happening
-            # without instrumenting every call site.
+                  f"as peer '{self._peer_name}' (HOP={HOP_FRAMES}, "
+                  f"ring={self._ring_frames})", flush=True)
+
+            # Start send worker
+            self._worker_stop.clear()
+            self._worker = threading.Thread(
+                target=self._send_worker, name="LinkAudioSend", daemon=True)
+            self._worker.start()
+
+            # Stats thread
             self._stats_stop.clear()
             self._stats_thread = threading.Thread(
                 target=self._stats_loop, name="LinkAudioStats", daemon=True)
@@ -132,34 +161,17 @@ class LinkAudioBroadcaster:
             self._enabled = False
             return False
 
-    def _stats_loop(self) -> None:
-        """Print push() stats every 5s so the journal shows what's flowing."""
-        last_committed = 0
-        last_dropped = 0
-        while not self._stats_stop.wait(5.0):
-            c = self._committed
-            d = self._dropped
-            dc = c - last_committed
-            dd = d - last_dropped
-            last_committed = c
-            last_dropped = d
-            print(f"Link Audio: peers={self.num_peers} "
-                  f"+committed={dc} +dropped={dd} "
-                  f"rms={self._last_rms:.4f}", flush=True)
-
     def stop(self) -> None:
         self._enabled = False
+        self._worker_stop.set()
         self._stats_stop.set()
+        if self._worker is not None:
+            self._worker.join(timeout=1.0)
+            self._worker = None
         if self._stats_thread is not None:
             self._stats_thread.join(timeout=1.0)
             self._stats_thread = None
-        if self._sink is not None:
-            try:
-                # AudioSink doesn't have an explicit stop — releasing it
-                # is enough (its destructor stops the channel).
-                self._sink = None
-            except Exception:
-                pass
+        self._sink = None
         if self._link is not None:
             try:
                 self._link.link_audio_enabled = False
@@ -169,50 +181,123 @@ class LinkAudioBroadcaster:
             self._link = None
         log.info("Link Audio broadcaster stopped")
 
-    # ── Real-time push ────────────────────────────────────────────────
+    # ── Producer (called from audio callback) ────────────────────────
 
     def push(self, indata: np.ndarray, sample_rate: int) -> bool:
-        """Send a buffer of float32 audio to the Link Audio channel.
+        """Append a buffer of float32 audio to the send ring.
 
-        Safe to call from an audio callback. Converts float32 [-1, 1]
-        to int16 in-place and forwards to the AudioSink. Returns True
-        if the block was committed to the wire (i.e., a peer is
-        subscribed); False if dropped (no subscriber, or backpressure).
-
-        The channel is announced as soon as start() succeeds; commits
-        only happen when at least one peer (e.g. Live 12.4 with a track
-        routed) subscribes to the channel.
+        Safe to call from an audio callback. Converts float32 → int16
+        and writes to the ring. Returns True if all frames fit; False
+        if any were dropped due to ring overrun (consumer too slow).
         """
-        if not self._enabled or self._sink is None:
+        if not self._enabled:
             return False
         try:
-            # float32 [-1, 1] → int16. clip just in case of overshoot.
             buf16 = (indata * 32767.0).clip(-32768, 32767).astype(np.int16)
-            # Track RMS for diagnostics — cheap.
-            self._last_rms = float(np.sqrt(np.mean(buf16.astype(np.float32) ** 2))) / 32768.0
-            # Chunk into ~21ms hops so Live can fit each piece inside its
-            # latency window. The recorder hands us ~85ms blocks at 48kHz/4096
-            # which is too coarse for Link Audio's default tolerance — Live
-            # reports "dropouts" and refuses to commit. Smaller hops let
-            # the network spread jitter across multiple chances.
-            HOP = 1024
-            sr = int(sample_rate)
-            any_ok = False
-            for start in range(0, len(buf16), HOP):
-                chunk = buf16[start:start + HOP]
+            self._last_rms = float(np.sqrt(np.mean(
+                buf16.astype(np.float32) ** 2))) / 32768.0
+            self._sample_rate = int(sample_rate)
+            n = len(buf16)
+            if n == 0:
+                return True
+            with self._ring_lock:
+                # Compute available space (consumer's read pointer minus
+                # producer's write pointer, modulo ring size, minus 1 to
+                # distinguish empty from full).
+                used = (self._wpos - self._rpos) % self._ring_frames
+                space = self._ring_frames - used - 1
+                if n > space:
+                    # Overrun — drop the oldest data by advancing rpos
+                    drop = n - space
+                    self._rpos = (self._rpos + drop) % self._ring_frames
+                    self._overruns += 1
+                wp = self._wpos
+                tail = self._ring_frames - wp
+                if n <= tail:
+                    self._ring[wp:wp + n] = buf16
+                else:
+                    self._ring[wp:] = buf16[:tail]
+                    self._ring[:n - tail] = buf16[tail:]
+                self._wpos = (wp + n) % self._ring_frames
+            return True
+        except Exception as e:
+            log.debug("Link Audio push failed: %s", e)
+            return False
+
+    # ── Consumer (send worker thread) ────────────────────────────────
+
+    def _send_worker(self) -> None:
+        """Drain the ring buffer at HOP/sample_rate cadence, write to sink."""
+        # Pre-allocate the chunk buffer to avoid per-iteration allocations.
+        chunk = np.empty((HOP_FRAMES, CHANNELS), dtype=np.int16)
+        period = HOP_FRAMES / float(self._sample_rate)
+        next_send = time.monotonic()
+
+        while not self._worker_stop.is_set():
+            # Check available frames in the ring.
+            with self._ring_lock:
+                used = (self._wpos - self._rpos) % self._ring_frames
+                if used >= HOP_FRAMES:
+                    rp = self._rpos
+                    tail = self._ring_frames - rp
+                    if HOP_FRAMES <= tail:
+                        chunk[:] = self._ring[rp:rp + HOP_FRAMES]
+                    else:
+                        chunk[:tail] = self._ring[rp:]
+                        chunk[tail:] = self._ring[:HOP_FRAMES - tail]
+                    self._rpos = (rp + HOP_FRAMES) % self._ring_frames
+                    have = True
+                else:
+                    have = False
+
+            if not have:
+                # Underrun — wait briefly then check again, but don't
+                # let next_send drift forever.
+                time.sleep(0.002)
+                if time.monotonic() - next_send > 0.5:
+                    next_send = time.monotonic()
+                continue
+
+            # Update period in case sample_rate changed (rare).
+            period = HOP_FRAMES / float(self._sample_rate)
+
+            try:
                 ok = self._sink.write(
                     chunk,
-                    sample_rate=sr,
+                    sample_rate=self._sample_rate,
                     quantum=self._quantum,
                 )
                 if ok:
                     self._committed += 1
-                    any_ok = True
                 else:
                     self._dropped += 1
-            return any_ok
-        except Exception as e:
-            # Don't ever raise from the audio callback.
-            log.debug("Link Audio push failed: %s", e)
-            self._dropped += 1
-            return False
+            except Exception as e:
+                log.debug("Link Audio sink.write failed: %s", e)
+                self._dropped += 1
+
+            # Pace ourselves to the natural audio rate.
+            next_send += period
+            sleep_dt = next_send - time.monotonic()
+            if sleep_dt > 0:
+                time.sleep(sleep_dt)
+            else:
+                # Falling behind — reset schedule to "now".
+                next_send = time.monotonic()
+
+    # ── Stats ─────────────────────────────────────────────────────────
+
+    def _stats_loop(self) -> None:
+        last_committed = 0
+        last_dropped = 0
+        last_overruns = 0
+        while not self._stats_stop.wait(5.0):
+            c = self._committed
+            d = self._dropped
+            o = self._overruns
+            dc = c - last_committed
+            dd = d - last_dropped
+            do = o - last_overruns
+            last_committed, last_dropped, last_overruns = c, d, o
+            print(f"Link Audio: peers={self.num_peers} "
+                  f"+committed={dc} +dropped={dd} +overruns={do} "
+                  f"rms={self._last_rms:.4f}", flush=True)
