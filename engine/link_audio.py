@@ -190,16 +190,27 @@ class LinkAudioBroadcaster:
             buf16 = (indata * 32767.0).clip(-32768, 32767).astype(np.int16)
             # Track RMS for diagnostics — cheap.
             self._last_rms = float(np.sqrt(np.mean(buf16.astype(np.float32) ** 2))) / 32768.0
-            ok = self._sink.write(
-                buf16,
-                sample_rate=int(sample_rate),
-                quantum=self._quantum,
-            )
-            if ok:
-                self._committed += 1
-            else:
-                self._dropped += 1
-            return bool(ok)
+            # Chunk into ~21ms hops so Live can fit each piece inside its
+            # latency window. The recorder hands us ~85ms blocks at 48kHz/4096
+            # which is too coarse for Link Audio's default tolerance — Live
+            # reports "dropouts" and refuses to commit. Smaller hops let
+            # the network spread jitter across multiple chances.
+            HOP = 1024
+            sr = int(sample_rate)
+            any_ok = False
+            for start in range(0, len(buf16), HOP):
+                chunk = buf16[start:start + HOP]
+                ok = self._sink.write(
+                    chunk,
+                    sample_rate=sr,
+                    quantum=self._quantum,
+                )
+                if ok:
+                    self._committed += 1
+                    any_ok = True
+                else:
+                    self._dropped += 1
+            return any_ok
         except Exception as e:
             # Don't ever raise from the audio callback.
             log.debug("Link Audio push failed: %s", e)
