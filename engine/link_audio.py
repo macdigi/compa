@@ -80,6 +80,10 @@ class LinkAudioBroadcaster:
         self._dropped = 0
         self._overruns = 0  # ring buffer overruns (consumer too slow)
         self._last_rms = 0.0
+        # Write-time profiling
+        self._write_total_us = 0.0
+        self._write_max_us = 0.0
+        self._write_count = 0
         self._stats_thread: Optional[threading.Thread] = None
         self._stats_stop = threading.Event()
 
@@ -277,8 +281,14 @@ class LinkAudioBroadcaster:
                     break  # underrun — wait for ring to fill
 
                 try:
+                    t0 = time.perf_counter()
                     ok = self._sink.write(
                         chunk, sample_rate=sr, quantum=self._quantum)
+                    elapsed_us = (time.perf_counter() - t0) * 1e6
+                    self._write_total_us += elapsed_us
+                    self._write_count += 1
+                    if elapsed_us > self._write_max_us:
+                        self._write_max_us = elapsed_us
                     if ok:
                         self._committed += 1
                     else:
@@ -314,14 +324,28 @@ class LinkAudioBroadcaster:
         last_committed = 0
         last_dropped = 0
         last_overruns = 0
+        last_write_total = 0.0
+        last_write_count = 0
         while not self._stats_stop.wait(5.0):
             c = self._committed
             d = self._dropped
             o = self._overruns
+            wt = self._write_total_us
+            wc = self._write_count
+            wmax = self._write_max_us
+            self._write_max_us = 0.0  # reset window-max for next window
+
             dc = c - last_committed
             dd = d - last_dropped
             do = o - last_overruns
+            dwt = wt - last_write_total
+            dwc = wc - last_write_count
+            avg_us = (dwt / dwc) if dwc > 0 else 0.0
+
             last_committed, last_dropped, last_overruns = c, d, o
+            last_write_total, last_write_count = wt, wc
             print(f"Link Audio: peers={self.num_peers} "
                   f"+committed={dc} +dropped={dd} +overruns={do} "
-                  f"rms={self._last_rms:.4f}", flush=True)
+                  f"rms={self._last_rms:.4f} "
+                  f"write_avg={avg_us:.0f}us write_max={wmax:.0f}us",
+                  flush=True)
