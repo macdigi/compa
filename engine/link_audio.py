@@ -79,6 +79,8 @@ class LinkAudioBroadcaster:
         self._committed = 0
         self._dropped = 0
         self._overruns = 0  # ring buffer overruns (consumer too slow)
+        self._pushes = 0    # push() call count
+        self._push_frames = 0  # total frames received via push()
         self._last_rms = 0.0
         # Write-time profiling
         self._write_total_us = 0.0
@@ -207,6 +209,8 @@ class LinkAudioBroadcaster:
             n = len(buf16)
             if n == 0:
                 return True
+            self._pushes += 1
+            self._push_frames += n
             with self._ring_lock:
                 # Compute available space (consumer's read pointer minus
                 # producer's write pointer, modulo ring size, minus 1 to
@@ -321,11 +325,7 @@ class LinkAudioBroadcaster:
     # ── Stats ─────────────────────────────────────────────────────────
 
     def _stats_loop(self) -> None:
-        last_committed = 0
-        last_dropped = 0
-        last_overruns = 0
-        last_write_total = 0.0
-        last_write_count = 0
+        last = {"c": 0, "d": 0, "o": 0, "wt": 0.0, "wc": 0, "p": 0, "pf": 0}
         while not self._stats_stop.wait(5.0):
             c = self._committed
             d = self._dropped
@@ -333,18 +333,24 @@ class LinkAudioBroadcaster:
             wt = self._write_total_us
             wc = self._write_count
             wmax = self._write_max_us
-            self._write_max_us = 0.0  # reset window-max for next window
+            p = self._pushes
+            pf = self._push_frames
+            self._write_max_us = 0.0
 
-            dc = c - last_committed
-            dd = d - last_dropped
-            do = o - last_overruns
-            dwt = wt - last_write_total
-            dwc = wc - last_write_count
+            dc = c - last["c"]
+            dd = d - last["d"]
+            do = o - last["o"]
+            dwt = wt - last["wt"]
+            dwc = wc - last["wc"]
+            dp = p - last["p"]
+            dpf = pf - last["pf"]
             avg_us = (dwt / dwc) if dwc > 0 else 0.0
+            push_fps = dpf / 5.0  # frames per second from recorder
+            send_fps = (dc * HOP_FRAMES) / 5.0  # frames per second sent
 
-            last_committed, last_dropped, last_overruns = c, d, o
-            last_write_total, last_write_count = wt, wc
+            last = {"c": c, "d": d, "o": o, "wt": wt, "wc": wc, "p": p, "pf": pf}
             print(f"Link Audio: peers={self.num_peers} "
+                  f"push_fps={push_fps:.0f} send_fps={send_fps:.0f} "
                   f"+committed={dc} +dropped={dd} +overruns={do} "
                   f"rms={self._last_rms:.4f} "
                   f"write_avg={avg_us:.0f}us write_max={wmax:.0f}us",
