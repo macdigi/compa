@@ -519,6 +519,10 @@ class P6App:
         link_audio_enabled = self.config.get("LINK_AUDIO_ENABLED", "1") == "1"
         if link_audio_enabled and self.link_audio.start():
             self.recorder.link_broadcaster = self.link_audio
+            # Force the recorder's input stream open so the audio callback
+            # (which feeds the broadcaster) actually runs even when the
+            # user hasn't entered a record/monitor screen yet.
+            self.recorder.start_monitoring()
 
         # ── Sessions directory ───────────────────────────────────────
         os.makedirs(self.config["P6_SESSIONS_DIR"], exist_ok=True)
