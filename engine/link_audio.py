@@ -227,62 +227,90 @@ class LinkAudioBroadcaster:
     # ── Consumer (send worker thread) ────────────────────────────────
 
     def _send_worker(self) -> None:
-        """Drain the ring buffer at HOP/sample_rate cadence, write to sink."""
-        # Pre-allocate the chunk buffer to avoid per-iteration allocations.
+        """Drain the ring at real-time rate using absolute-clock pacing.
+
+        Anchored to a start time so cumulative drift is impossible. Each
+        iteration calculates how many hops *should* have been sent by
+        now (= elapsed_seconds / period) and sends however many we owe
+        (subject to ring availability). Then sleeps until the next hop's
+        absolute deadline.
+        """
         chunk = np.empty((HOP_FRAMES, CHANNELS), dtype=np.int16)
-        period = HOP_FRAMES / float(self._sample_rate)
-        next_send = time.monotonic()
+        sr = self._sample_rate
+        period = HOP_FRAMES / float(sr)
+        start = time.monotonic()
+        n_sent = 0
 
         while not self._worker_stop.is_set():
-            # Check available frames in the ring.
-            with self._ring_lock:
-                used = (self._wpos - self._rpos) % self._ring_frames
-                if used >= HOP_FRAMES:
-                    rp = self._rpos
-                    tail = self._ring_frames - rp
-                    if HOP_FRAMES <= tail:
-                        chunk[:] = self._ring[rp:rp + HOP_FRAMES]
+            # Re-check sample rate (almost never changes).
+            if self._sample_rate != sr:
+                sr = self._sample_rate
+                period = HOP_FRAMES / float(sr)
+                # Re-anchor so the new period starts cleanly.
+                start = time.monotonic()
+                n_sent = 0
+
+            # How many hops should have been sent by now?
+            elapsed = time.monotonic() - start
+            target = int(elapsed / period) + 1
+
+            # Send as many hops as we owe AND have data for.
+            sent_this_iter = 0
+            while n_sent < target and not self._worker_stop.is_set():
+                with self._ring_lock:
+                    used = (self._wpos - self._rpos) % self._ring_frames
+                    if used >= HOP_FRAMES:
+                        rp = self._rpos
+                        tail = self._ring_frames - rp
+                        if HOP_FRAMES <= tail:
+                            chunk[:] = self._ring[rp:rp + HOP_FRAMES]
+                        else:
+                            chunk[:tail] = self._ring[rp:]
+                            chunk[tail:] = self._ring[:HOP_FRAMES - tail]
+                        self._rpos = (rp + HOP_FRAMES) % self._ring_frames
+                        have = True
                     else:
-                        chunk[:tail] = self._ring[rp:]
-                        chunk[tail:] = self._ring[:HOP_FRAMES - tail]
-                    self._rpos = (rp + HOP_FRAMES) % self._ring_frames
-                    have = True
-                else:
-                    have = False
+                        have = False
 
-            if not have:
-                # Underrun — wait briefly then check again, but don't
-                # let next_send drift forever.
-                time.sleep(0.002)
-                if time.monotonic() - next_send > 0.5:
-                    next_send = time.monotonic()
-                continue
+                if not have:
+                    break  # underrun — wait for ring to fill
 
-            # Update period in case sample_rate changed (rare).
-            period = HOP_FRAMES / float(self._sample_rate)
-
-            try:
-                ok = self._sink.write(
-                    chunk,
-                    sample_rate=self._sample_rate,
-                    quantum=self._quantum,
-                )
-                if ok:
-                    self._committed += 1
-                else:
+                try:
+                    ok = self._sink.write(
+                        chunk, sample_rate=sr, quantum=self._quantum)
+                    if ok:
+                        self._committed += 1
+                    else:
+                        self._dropped += 1
+                except Exception as e:
+                    log.debug("Link Audio sink.write failed: %s", e)
                     self._dropped += 1
-            except Exception as e:
-                log.debug("Link Audio sink.write failed: %s", e)
-                self._dropped += 1
 
-            # Pace ourselves to the natural audio rate.
-            next_send += period
-            sleep_dt = next_send - time.monotonic()
-            if sleep_dt > 0:
-                time.sleep(sleep_dt)
+                n_sent += 1
+                sent_this_iter += 1
+
+            # Sleep until the deadline for hop #(n_sent + 1).
+            # If we're behind (couldn't send all owed hops because ring
+            # was empty), don't oversleep — wake quickly to retry.
+            now = time.monotonic()
+            elapsed = now - start
+            target = int(elapsed / period) + 1
+            if n_sent >= target:
+                next_deadline = start + (n_sent) * period
+                sleep_dt = next_deadline - now
+                if sleep_dt > 0.001:
+                    # Leave 0.5ms of slack for busy-wait at the end so we
+                    # don't oversleep past the deadline.
+                    time.sleep(sleep_dt - 0.0005)
             else:
-                # Falling behind — reset schedule to "now".
-                next_send = time.monotonic()
+                # Behind — brief sleep to let ring refill, then retry.
+                time.sleep(0.001)
+
+            # Periodic re-anchor if we've drifted MASSIVELY (e.g. system
+            # clock jump or multi-second hang). 10s of drift = reset.
+            if abs(time.monotonic() - start - n_sent * period) > 10.0:
+                start = time.monotonic()
+                n_sent = 0
 
     # ── Stats ─────────────────────────────────────────────────────────
 
