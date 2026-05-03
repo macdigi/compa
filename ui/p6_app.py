@@ -46,6 +46,7 @@ from engine.push2 import Push2, find_push2_ports
 from engine.controller_actions import dispatch as _dispatch_action
 from engine.master_clock import MasterClock
 from engine.ableton_link import AbletonLinkBridge
+from engine.link_audio import LinkAudioBroadcaster
 try:
     from engine.push2_display import Push2Display
     from ui.push2_render import Push2Renderer
@@ -503,6 +504,21 @@ class P6App:
             recording_dir=self.config["P6_RECORDING_DIR"],
             device_hint=self.config["AUDIO_DEVICE_HINT"],
         )
+
+        # ── Link Audio broadcaster ────────────────────────────────────
+        # Stream the recorder's input audio (whichever USB device it's
+        # bound to) to the Link Audio mesh. Live 12.4 (and any other
+        # Link Audio peer) sees Compa as a channel source. Channel name
+        # is the device's hostname so multiple Compas don't collide.
+        import socket as _socket
+        _hostname = _socket.gethostname()
+        self.link_audio = LinkAudioBroadcaster(
+            peer_name=_hostname,
+            channel_name=_hostname,
+        )
+        link_audio_enabled = self.config.get("LINK_AUDIO_ENABLED", "1") == "1"
+        if link_audio_enabled and self.link_audio.start():
+            self.recorder.link_broadcaster = self.link_audio
 
         # ── Sessions directory ───────────────────────────────────────
         os.makedirs(self.config["P6_SESSIONS_DIR"], exist_ok=True)

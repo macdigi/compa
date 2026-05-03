@@ -95,6 +95,11 @@ class P6Recorder:
         self.on_level: Optional[Callable[[float, float, float, float], None]] = None
         self.on_recording_complete: Optional[Callable[[str, float], None]] = None
 
+        # Link Audio broadcaster — when set, every captured block is also
+        # pushed to a Link Audio sink so peers like Live 12.4 can receive
+        # Compa's input audio over the LAN.
+        self.link_broadcaster = None
+
         self._find_device()
 
     def _find_device(self) -> None:
@@ -484,6 +489,13 @@ class P6Recorder:
         if self._monitor_out_stream and self._monitor_out_stream.active:
             try:
                 self._monitor_out_stream.write(indata)
+            except Exception:
+                pass  # Don't crash the audio callback
+
+        # Forward to Link Audio broadcaster (sends to Live 12.4 etc. over LAN)
+        if self.link_broadcaster is not None:
+            try:
+                self.link_broadcaster.push(indata, self._sample_rate)
             except Exception:
                 pass  # Don't crash the audio callback
 
