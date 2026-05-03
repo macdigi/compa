@@ -91,6 +91,13 @@ class P6Recorder:
         self._recall_write_pos = 0
         self._recall_total_written = 0  # total frames ever written (for knowing how full)
 
+        # Input overrun tracking — ALSA dropped audio because the callback fell behind.
+        # Each input_overflow is missed audio. Reported via PortAudio status flags.
+        self._input_overruns = 0
+        self._input_underruns = 0
+        self._input_overrun_log_t = 0.0      # monotonic time of last warning (rate-limit)
+        self._input_overrun_console_count = 0  # times we've printed to stdout
+
         # Callbacks
         self.on_level: Optional[Callable[[float, float, float, float], None]] = None
         self.on_recording_complete: Optional[Callable[[str, float], None]] = None
@@ -259,6 +266,16 @@ class P6Recorder:
     def waveform(self) -> np.ndarray:
         """Get the waveform preview as a numpy array."""
         return self._waveform.copy()
+
+    @property
+    def input_overruns(self) -> int:
+        """ALSA input overflow events since recorder started. Each one is missed audio."""
+        return self._input_overruns
+
+    @property
+    def input_underruns(self) -> int:
+        """ALSA input underflow events since recorder started."""
+        return self._input_underruns
 
     # ── Stream management ───────────────────────────────────────────────
 
@@ -464,6 +481,29 @@ class P6Recorder:
         Keep this as fast as possible — runs in the audio thread.
         Only do disk I/O when actually recording.
         """
+        # Surface ALSA overruns — silently dropping these masks choppy recordings
+        # (Pi 3B + USB capture under load can lose ~25% of buffers).
+        if status:
+            if status.input_overflow:
+                self._input_overruns += 1
+            if status.input_underflow:
+                self._input_underruns += 1
+            if status.input_overflow or status.input_underflow:
+                now = time.monotonic()
+                if now - self._input_overrun_log_t >= 1.0:
+                    self._input_overrun_log_t = now
+                    log.warning(
+                        "Recorder: ALSA input overrun (overflow=%d underflow=%d total)",
+                        self._input_overruns, self._input_underruns,
+                    )
+                    if self._input_overrun_console_count < 3:
+                        self._input_overrun_console_count += 1
+                        print(
+                            f"[Compa recorder] ALSA input overrun "
+                            f"(overflow={self._input_overruns} underflow={self._input_underruns})",
+                            flush=True,
+                        )
+
         # Write to disk FIRST if recording (highest priority)
         if self._recording and self._writer:
             try:
