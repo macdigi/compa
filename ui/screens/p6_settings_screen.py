@@ -95,6 +95,19 @@ class P6SettingsScreen:
         self.app.config["LINK_MIDI_CLOCK_OUT"] = "1" if new_value else "0"
         save_config_key("LINK_MIDI_CLOCK_OUT", "1" if new_value else "0")
 
+    def _toggle_network_midi(self):
+        from ui.p6_app import save_config_key
+        nm = getattr(self.app, "network_midi", None)
+        if nm is None:
+            return
+        currently = self.app.config.get("NETWORK_MIDI_ENABLED", "0") == "1"
+        new_value = not currently
+        ok = nm.start() if new_value else nm.stop()
+        if not ok:
+            return
+        self.app.config["NETWORK_MIDI_ENABLED"] = "1" if new_value else "0"
+        save_config_key("NETWORK_MIDI_ENABLED", "1" if new_value else "0")
+
     def _toggle_auto_record(self):
         from ui.p6_app import save_config_key
         self.app.auto_record = not self.app.auto_record
@@ -452,6 +465,32 @@ class P6SettingsScreen:
             })
         else:
             self._rows.append({"label": "  aalink not installed",
+                               "type": "info", "value": "—"})
+
+        # ── Network MIDI (rtpmidid) ───────────────────────────────────
+        self._rows.append({"label": "", "type": "section",
+                           "value": "NETWORK MIDI"})
+        nm = getattr(self.app, "network_midi", None)
+        nm_enabled = self.app.config.get("NETWORK_MIDI_ENABLED", "0") == "1"
+        if nm is not None:
+            if nm.enabled:
+                peers = nm.peer_count
+                if peers > 0:
+                    nm_status = (f"sharing · {peers} peer"
+                                 f"{'s' if peers != 1 else ''}")
+                else:
+                    nm_status = "sharing · ready"
+            else:
+                nm_status = "off"
+            self._rows.append({"label": "  Status", "type": "info",
+                               "value": nm_status})
+            self._rows.append({
+                "label": "Share USB MIDI on LAN", "type": "toggle",
+                "value": nm_enabled,
+                "action": self._toggle_network_midi,
+            })
+        else:
+            self._rows.append({"label": "  rtpmidid not installed",
                                "type": "info", "value": "—"})
 
         # MIDI Controller Mapping

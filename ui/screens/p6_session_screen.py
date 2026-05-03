@@ -245,6 +245,25 @@ class P6SessionScreen:
             surf = f_tiny.render(txt, True, label_color)
             surface.blit(surf, (link_x + 10, link_y))
 
+        # ── Network MIDI indicator ───────────────────────────────────
+        nm = getattr(self.app, "network_midi", None)
+        if nm is not None and nm.enabled:
+            nm_peers = nm.peer_count
+            if nm_peers > 0:
+                nm_dot = theme.GREEN
+                nm_label_color = theme.TEXT
+                nm_txt = (f"NET MIDI · {nm_peers} peer"
+                          f"{'s' if nm_peers != 1 else ''}")
+            else:
+                nm_dot = theme.TEXT_DIM
+                nm_label_color = theme.TEXT_DIM
+                nm_txt = "NET MIDI · ready"
+            nm_x = 320
+            nm_y = 30
+            pygame.draw.circle(surface, nm_dot, (nm_x, nm_y + 6), 4)
+            surf = f_tiny.render(nm_txt, True, nm_label_color)
+            surface.blit(surf, (nm_x + 10, nm_y))
+
         # Reset card rects each frame
         self._card_buttons = []
         self._card_rects = []  # (rect, short_name) for tap-to-focus

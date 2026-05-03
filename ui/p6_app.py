@@ -47,6 +47,7 @@ from engine.controller_actions import dispatch as _dispatch_action
 from engine.master_clock import MasterClock
 from engine.ableton_link import AbletonLinkBridge
 from engine.link_audio import LinkAudioBroadcaster
+from engine.network_midi import NetworkMidi
 try:
     from engine.push2_display import Push2Display
     from ui.push2_render import Push2Renderer
@@ -523,6 +524,14 @@ class P6App:
             # (which feeds the broadcaster) actually runs even when the
             # user hasn't entered a record/monitor screen yet.
             self.recorder.start_monitoring()
+
+        # ── Network MIDI bridge ──────────────────────────────────────
+        # rtpmidid daemon — shares all USB MIDI controllers (Push 2,
+        # SP-404MKII, Twister, etc.) over the LAN as RTP-MIDI peers.
+        # Opt-in: defaults off, persisted via NETWORK_MIDI_ENABLED.
+        self.network_midi = NetworkMidi()
+        if self.config.get("NETWORK_MIDI_ENABLED", "0") == "1":
+            self.network_midi.start()
 
         # ── Sessions directory ───────────────────────────────────────
         os.makedirs(self.config["P6_SESSIONS_DIR"], exist_ok=True)
