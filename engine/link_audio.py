@@ -34,8 +34,11 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Send-side hop, matching the working pylinkaudio audio_send.py example.
-HOP_FRAMES = 1024
+# Send-side hop. Larger hops amortize per-iteration overhead (lock,
+# time.sleep granularity, sink.write call) over more frames, so the
+# worker can sustain real-time rate even on Pi 3B. 2048 frames @ 48k
+# = 42.7ms — still under Live's default 100ms latency tolerance.
+HOP_FRAMES = 2048
 # Ring buffer holds ~250ms of audio at 48kHz to absorb input bursts +
 # scheduling jitter. Keep small to avoid latency.
 RING_SECONDS = 0.25
