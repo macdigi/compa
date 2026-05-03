@@ -230,55 +230,83 @@ class LinkAudioBroadcaster:
     # ── Consumer (send worker thread) ────────────────────────────────
 
     def _send_worker(self) -> None:
-        """Drain the ring as fast as sink.write will accept.
+        """Drain the ring at real-time rate using absolute-clock pacing.
 
-        No self-pacing — relies on AudioSink's internal buffer to provide
-        back-pressure (returns False when full). On Pi 3B the explicit
-        pacing approach was capping throughput around ~35000 fps regardless
-        of HOP size, suggesting the cap was in our worker scheduling, not
-        in sink.write itself. Removing pacing tests that hypothesis.
-
-        If sink.write returns False, we briefly sleep so we don't pin the
-        CPU at 100% spinning on a full sink. If the ring is empty, we
-        sleep slightly longer to wait for the next push.
+        Anchored to a start time so cumulative drift is impossible. Each
+        iteration calculates how many hops *should* have been sent by
+        now (= elapsed_seconds / period) and sends however many we owe
+        (subject to ring availability). Then sleeps until the next hop's
+        absolute deadline.
         """
         chunk = np.empty((HOP_FRAMES, CHANNELS), dtype=np.int16)
+        sr = self._sample_rate
+        period = HOP_FRAMES / float(sr)
+        start = time.monotonic()
+        n_sent = 0
 
         while not self._worker_stop.is_set():
-            sr = self._sample_rate
-            with self._ring_lock:
-                used = (self._wpos - self._rpos) % self._ring_frames
-                if used >= HOP_FRAMES:
-                    rp = self._rpos
-                    tail = self._ring_frames - rp
-                    if HOP_FRAMES <= tail:
-                        chunk[:] = self._ring[rp:rp + HOP_FRAMES]
+            # Re-check sample rate (almost never changes).
+            if self._sample_rate != sr:
+                sr = self._sample_rate
+                period = HOP_FRAMES / float(sr)
+                start = time.monotonic()
+                n_sent = 0
+
+            # How many hops should have been sent by now?
+            elapsed = time.monotonic() - start
+            target = int(elapsed / period) + 1
+
+            # Send as many hops as we owe AND have data for.
+            while n_sent < target and not self._worker_stop.is_set():
+                with self._ring_lock:
+                    used = (self._wpos - self._rpos) % self._ring_frames
+                    if used >= HOP_FRAMES:
+                        rp = self._rpos
+                        tail = self._ring_frames - rp
+                        if HOP_FRAMES <= tail:
+                            chunk[:] = self._ring[rp:rp + HOP_FRAMES]
+                        else:
+                            chunk[:tail] = self._ring[rp:]
+                            chunk[tail:] = self._ring[:HOP_FRAMES - tail]
+                        self._rpos = (rp + HOP_FRAMES) % self._ring_frames
+                        have = True
                     else:
-                        chunk[:tail] = self._ring[rp:]
-                        chunk[tail:] = self._ring[:HOP_FRAMES - tail]
-                    self._rpos = (rp + HOP_FRAMES) % self._ring_frames
-                    have = True
-                else:
-                    have = False
+                        have = False
 
-            if not have:
-                # Ring empty — wait for next push.
-                time.sleep(0.005)
-                continue
+                if not have:
+                    break  # underrun — wait for ring to fill
 
-            try:
-                ok = self._sink.write(
-                    chunk, sample_rate=sr, quantum=self._quantum)
-                if ok:
-                    self._committed += 1
-                else:
+                try:
+                    ok = self._sink.write(
+                        chunk, sample_rate=sr, quantum=self._quantum)
+                    if ok:
+                        self._committed += 1
+                    else:
+                        self._dropped += 1
+                except Exception as e:
+                    log.debug("Link Audio sink.write failed: %s", e)
                     self._dropped += 1
-                    # Sink full — back off briefly so we don't spin.
-                    time.sleep(0.001)
-            except Exception as e:
-                log.debug("Link Audio sink.write failed: %s", e)
-                self._dropped += 1
+
+                n_sent += 1
+
+            # Sleep until the next hop's deadline. If we're caught up,
+            # sleep most of the period; if we're behind, brief sleep to
+            # let the ring refill, then retry.
+            now = time.monotonic()
+            elapsed = now - start
+            target_now = int(elapsed / period) + 1
+            if n_sent >= target_now:
+                next_deadline = start + n_sent * period
+                sleep_dt = next_deadline - now
+                if sleep_dt > 0.001:
+                    time.sleep(sleep_dt - 0.0005)
+            else:
                 time.sleep(0.001)
+
+            # Safety re-anchor if we've drifted MASSIVELY (e.g. clock jump).
+            if abs(time.monotonic() - start - n_sent * period) > 10.0:
+                start = time.monotonic()
+                n_sent = 0
 
     # ── Stats ─────────────────────────────────────────────────────────
 
