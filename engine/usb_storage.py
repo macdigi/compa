@@ -80,7 +80,16 @@ class AkaiStorageManager:
 
         Called periodically from the app's update loop.
         Returns list of currently mounted drives.
+
+        This MUST NOT raise. Storage scan errors must never crash the app.
         """
+        try:
+            return self._scan_and_mount_impl()
+        except Exception as e:
+            log.error("scan_and_mount failed: %s", e, exc_info=True)
+            return self._drives
+
+    def _scan_and_mount_impl(self) -> list[MountedDrive]:
         now = time.monotonic()
         if now - self._last_scan < self._scan_interval:
             return self._drives
@@ -421,7 +430,23 @@ class AkaiStorageManager:
         if os.path.ismount(mount_point):
             pass  # Use existing mount
         else:
-            os.makedirs(mount_point, exist_ok=True)
+            try:
+                os.makedirs(mount_point, exist_ok=True)
+            except (PermissionError, OSError) as e:
+                # /media/pi often doesn't exist when running as a service.
+                # Try to create it via sudo, then retry once.
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "install", "-d", "-o", "pi", "-g", "pi",
+                         "-m", "0755", MOUNT_BASE, mount_point],
+                        capture_output=True, timeout=5,
+                    )
+                except Exception as e2:
+                    log.error("mkdir fallback failed %s: %s", mount_point, e2)
+                    return None
+                if not os.path.isdir(mount_point):
+                    log.error("Cannot create mount point %s: %s", mount_point, e)
+                    return None
             try:
                 result = subprocess.run(
                     ["sudo", "mount", "-o", "uid=1000,gid=1000,fmask=0000,dmask=0000",

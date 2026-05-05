@@ -124,15 +124,40 @@ class P6Recorder:
             if self._device_hint in name and dev.get("max_input_channels", 0) >= 2:
                 candidates.append((i, name))
 
-        # Fallback to default input
+        # Fallback: enumerate USB-ish stereo inputs in order.
+        # Never use sd.default.device[0] — when multiple USB cards are on the
+        # bus the system "default" pseudo-device is unreliable (often points
+        # at HDMI or fails to open). Picking real USB cards explicitly is
+        # robust against that. Skip names that are pseudo-devices, system
+        # outputs, or known non-input cards.
         if not candidates:
-            try:
-                default_in = sd.default.device[0]
-                dev = sd.query_devices(default_in)
-                if dev.get("max_input_channels", 0) >= 2:
-                    candidates.append((default_in, dev.get("name", "default")))
-            except Exception:
-                pass
+            skip_tokens = ("default", "built-in", "hdmi", "monitor",
+                           "pulse", "sysdefault", "dmix", "dsnoop",
+                           "front", "surround", "rear", "iec958",
+                           "spdif", "null", "samplerate", "speexrate",
+                           "upmix", "vdownmix")
+            # Preferred device-name fragments — earlier = higher priority.
+            # Anything not in this list still qualifies, just lower priority.
+            preferred = ("p-6", "id4", "id14", "id22", "id44", "scarlett",
+                         "sp-404", "force", "usb audio", "usb")
+            ranked = []
+            for i, dev in enumerate(devices):
+                if dev.get("max_input_channels", 0) < 2:
+                    continue
+                name = dev.get("name", "")
+                lname = name.lower()
+                if any(tok in lname for tok in skip_tokens):
+                    continue
+                # Rank by first matching preferred token; unmatched = end.
+                rank = len(preferred)
+                for idx, tok in enumerate(preferred):
+                    if tok in lname:
+                        rank = idx
+                        break
+                ranked.append((rank, i, name))
+            ranked.sort(key=lambda r: r[0])
+            for _rank, i, name in ranked:
+                candidates.append((i, name))
 
         if not candidates:
             print(f"No audio input matching '{self._device_hint}'", flush=True)
