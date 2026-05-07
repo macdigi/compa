@@ -174,6 +174,18 @@ class Push2Renderer:
                 self._render_frame(self.surface)
                 self.display.send_surface(self.surface)
                 self._update_button_leds()
+                # Mirror the rendered Push 2 frame into the parallel
+                # video recorder if the app is currently recording. The
+                # main touchscreen recorder and this one are started
+                # together in p6_app.py so the streams stay aligned.
+                # Used by the marketing pipeline to composite the
+                # Push 2 footage onto a hardware photo overlay.
+                rec = getattr(self.app, 'push2_recorder', None)
+                if rec is not None and rec.recording:
+                    try:
+                        rec.capture(self.surface)
+                    except Exception as e:
+                        log.debug("push2 record capture failed: %s", e)
                 # Capture screenshot if requested — done inline so the
                 # surface still holds the frame we just sent. Racing
                 # from the SIGUSR1 thread caused all-black PNGs because

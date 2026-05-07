@@ -35,16 +35,20 @@ DEFAULT_VIDEO_DIR = os.path.join(
 )
 
 
-def default_output_path() -> str:
+def default_output_path(label: str = "compa") -> str:
     """Generate a timestamped filename inside the videos directory.
 
     Ensures the directory exists and returns a path like
     ~/compa/videos/compa_20260420_143205.mp4 so multiple recordings
     never overwrite each other.
+
+    `label` lets parallel recorders write to distinct files —
+    e.g. compa_<ts>.mp4 for the touchscreen, push2_<ts>.mp4 for
+    the Push 2 LCD mirror.
     """
     os.makedirs(DEFAULT_VIDEO_DIR, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(DEFAULT_VIDEO_DIR, f"compa_{ts}.mp4")
+    return os.path.join(DEFAULT_VIDEO_DIR, f"{label}_{ts}.mp4")
 
 
 def latest_video_path() -> Optional[str]:
@@ -63,7 +67,8 @@ class VideoRecorder:
     """Pipes pygame surface frames into a live-encoding ffmpeg process."""
 
     def __init__(self, screen_size: tuple[int, int], fps: int = 30,
-                 output_path: Optional[str] = None):
+                 output_path: Optional[str] = None,
+                 label: str = "compa"):
         """Two-stage pipeline: capture to MJPEG, re-encode to H.264.
 
         Pi 3B's H.264 encoder tops out around 8-10 fps at 1024x600,
@@ -81,15 +86,21 @@ class VideoRecorder:
         If output_path is None, each call to start() generates a new
         timestamped filename under DEFAULT_VIDEO_DIR so recordings
         never overwrite each other.
+
+        `label` differentiates parallel recorders (e.g. "compa" for
+        the main touchscreen and "push2" for the Push 2 LCD mirror).
+        Used in the MJPEG temp path and the default output filename
+        so two recorders running side-by-side don't collide.
         """
         self._size = screen_size
         self._fps = fps
         self._frame_interval = 1.0 / fps
+        self._label = label
         # None = pick a fresh timestamped path on each start().
         # Caller can also pass a fixed path to override.
         self._fixed_output = output_path
         self._output: Optional[str] = output_path
-        self._mjpeg_tmp = "/dev/shm/compa_capture.mkv"
+        self._mjpeg_tmp = f"/dev/shm/compa_capture_{label}.mkv"
         self._proc: Optional[subprocess.Popen] = None
         self._frames = 0
         self._start_time = 0.0
@@ -121,7 +132,7 @@ class VideoRecorder:
                 if os.path.exists(self._output):
                     os.remove(self._output)
             else:
-                self._output = default_output_path()
+                self._output = default_output_path(self._label)
             # Clean up any leftover MJPEG temp
             if os.path.exists(self._mjpeg_tmp):
                 os.remove(self._mjpeg_tmp)

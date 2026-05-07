@@ -452,7 +452,20 @@ class P6App:
         # Captures to MJPEG in RAM, re-encodes to H.264 on stop.
         # Pi 3B can handle MJPEG at the full UI frame rate.
         self.video_recorder = VideoRecorder(
-            screen_size=(self._display_w, self._display_h), fps=self.fps)
+            screen_size=(self._display_w, self._display_h), fps=self.fps,
+            label="compa")
+
+        # Parallel Push 2 LCD recorder. Same MJPEG → H.264 pipeline as
+        # the touchscreen, sized to Push 2's 960×160 LCD at 20 fps to
+        # match Push2Renderer's TARGET_FPS. Push2Renderer pushes its
+        # latest rendered surface into capture() each frame when this
+        # recorder is recording — see ui/push2_render.py. Output goes
+        # to push2_<ts>.mp4 alongside the main compa_<ts>.mp4 so the
+        # marketing-render pipeline can composite the Push 2 footage
+        # onto a hardware photo.
+        self.push2_recorder = VideoRecorder(
+            screen_size=(960, 160), fps=20, label="push2")
+
         self.demo_scheduler: DemoScheduler | None = None
 
         # ── WiFi + Bluetooth managers (end-user connectivity) ───────
@@ -3735,20 +3748,35 @@ class P6App:
             pygame.image.save(self.screen, "/tmp/compa_screen.png")
             print("Screenshot captured", flush=True)
 
-        # Video recording triggers
+        # Video recording triggers — main touchscreen + Push 2 LCD
+        # mirror are started/stopped together so the two streams stay
+        # frame-aligned for the compositor downstream. Push 2 recorder
+        # only runs when the Push 2 hardware is actually connected.
+        def _start_recorders():
+            self.video_recorder.start()
+            if getattr(self, 'push2_renderer', None):
+                self.push2_recorder.start()
+
+        def _stop_recorders():
+            self.video_recorder.stop()
+            if self.push2_recorder.recording:
+                self.push2_recorder.stop()
+
         if os.path.exists("/tmp/compa_record_start"):
             os.remove("/tmp/compa_record_start")
-            self.video_recorder.start()
+            _start_recorders()
 
         if os.path.exists("/tmp/compa_record_stop"):
             os.remove("/tmp/compa_record_stop")
-            self.video_recorder.stop()
+            _stop_recorders()
 
         # Auto-demo: starts recording, drives the sequence, then stops
         if os.path.exists("/tmp/compa_record_demo"):
             os.remove("/tmp/compa_record_demo")
             if not self.video_recorder.recording:
                 if self.video_recorder.start():
+                    if getattr(self, 'push2_renderer', None):
+                        self.push2_recorder.start()
                     self.demo_scheduler = DemoScheduler(build_demo_sequence())
                     self.demo_scheduler.start(self)
 
@@ -3756,7 +3784,7 @@ class P6App:
         if self.demo_scheduler is not None:
             self.demo_scheduler.tick(self)
             if self.demo_scheduler.finished:
-                self.video_recorder.stop()
+                _stop_recorders()
                 self.demo_scheduler = None
 
         # Screenshot all screens at once
@@ -4019,6 +4047,8 @@ class P6App:
         # Finalize any in-progress video recording first so the MP4 is valid
         if getattr(self, 'video_recorder', None) and self.video_recorder.recording:
             self.video_recorder.stop()
+        if getattr(self, 'push2_recorder', None) and self.push2_recorder.recording:
+            self.push2_recorder.stop()
         # Stop the controller mapper + chromatic keyboard threads cleanly
         if hasattr(self, "controller_mapper"):
             try:
