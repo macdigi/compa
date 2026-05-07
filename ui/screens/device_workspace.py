@@ -81,7 +81,10 @@ class DeviceWorkspaceScreen:
         #   "twin"    — Layout A: pad selector + Push 2 hardware grid
         #               mirror + piano widget. Optimized for learning
         #               the layout / dashboard glance.
-        self._keys_view_mode: str = "perform"
+        # Default to "twin" so a fresh KEYS tab shows the keyboard up
+        # front — that's the view that communicates "you can play this"
+        # to a new user. The perform/piano-roll view is one tap away.
+        self._keys_view_mode: str = "twin"
 
         # Rolling note history for the perform view's piano roll.
         # Each entry: {"note": int, "on": float, "off": float | None}
