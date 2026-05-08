@@ -170,6 +170,16 @@ class Push2Renderer:
     def _loop(self) -> None:
         while not self._stop.is_set():
             t0 = time.monotonic()
+            # When Compa 2 has taken over (Clips screen), skip the
+            # existing renderer — Compa 2's render thread owns the OLED
+            # + LEDs.
+            try:
+                ctrl = getattr(self.app, "push2_control", None)
+                if ctrl is not None and getattr(ctrl, "is_active", False):
+                    time.sleep(0.05)
+                    continue
+            except Exception:
+                pass
             try:
                 self._render_frame(self.surface)
                 self.display.send_surface(self.surface)

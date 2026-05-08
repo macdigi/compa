@@ -42,6 +42,10 @@ class AudioEngine:
         self._running = False
         # Preview voice (for browser preview)
         self._preview_voice: Optional[Voice] = None
+        # External mixers — callables (mix, frames) → None that add into the
+        # output mix. Used by the clip engine to share the single
+        # OutputStream without opening a parallel one.
+        self.external_mixers: list = []
 
     def start(self):
         """Start the audio output stream."""
@@ -261,6 +265,14 @@ class AudioEngine:
             self.voices = [v for v in self.voices if v.active]
             if self._preview_voice and not self._preview_voice.active:
                 self._preview_voice = None
+
+        # External mixers (clip engine, etc.) — additive into mix
+        for fn in self.external_mixers:
+            try:
+                fn(mix, frames)
+            except Exception:
+                # Don't crash the audio thread on a buggy mixer
+                pass
 
         # Soft clip
         np.clip(mix, -1.0, 1.0, out=mix)

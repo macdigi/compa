@@ -549,6 +549,16 @@ class P6App:
         # ── Sessions directory ───────────────────────────────────────
         os.makedirs(self.config["P6_SESSIONS_DIR"], exist_ok=True)
 
+        # ── Compa 2: Clip engine + Push 2 native driver ──────────────
+        # Slot declarations only here — actual init runs after the
+        # existing Push 2 driver + display have claimed the hardware,
+        # so we can host on top of them.
+        self.clip_engine = None
+        self.clip_stream = None
+        self.push2_surface = None
+        self.push2_control = None
+        self.push2_render = None
+
         # ── Screens ─────────────────────────────────────────────────
         self.screens: dict[str, object] = {
             "session": P6SessionScreen(self),
@@ -568,6 +578,15 @@ class P6App:
             "controller": ControllerScreen(self),
             "touch_calibrate": TouchCalibrateScreen(self),
         }
+
+        # Compa 2 Clips touchscreen — added after the dict to keep the
+        # registration tidy and so the screen can reference the engine
+        # we just built.
+        try:
+            from ui.screens.clip_screen import ClipScreen
+            self.screens["clips"] = ClipScreen(self)
+        except Exception as e:
+            print(f"ClipScreen init failed: {e}", flush=True)
         self.current_screen_name = "session"
 
         # ── Nav bar (responsive) ─────────────────────────────────────
@@ -676,6 +695,12 @@ class P6App:
                 print(f"Push 2 display init failed: {e}")
                 self.push2_display = None
                 self.push2_renderer = None
+
+        # ── Compa 2: clip engine + hosted Push 2 surface ─────────────
+        # Initialised here so it can host on top of the existing
+        # self.push2 + self.push2_display rather than fighting them
+        # for the hardware.
+        self._init_compa2()
 
         # Connect MIDI for ALL detected devices
         for short_name, profile in self.device_manager.connected.items():
@@ -1252,6 +1277,12 @@ class P6App:
         """Push 2 pad hit. Dispatch depends on the current push2_mode,
         which mirrors the focused device-workspace tab on Compa
         (control / keys / sequence / pattern / ...)."""
+        # Compa 2 takes over when on Clips screen.
+        if (self.current_screen_name == "clips"
+                and self.push2_control is not None
+                and self.push2_control.is_active):
+            self.push2_surface.dispatch_pad(idx, velocity)
+            return
         if self.push2_mode == "keys":
             self._on_push2_keys_pad(idx, velocity)
             return
@@ -2088,6 +2119,12 @@ class P6App:
         """Tempo / Master / Swing encoders. Records a transient event
         so the Push 2 display can show a short popup with the current
         value when the user turns one of these knobs."""
+        # Compa 2 takeover
+        if (self.current_screen_name == "clips"
+                and self.push2_control is not None
+                and self.push2_control.is_active):
+            self.push2_surface.dispatch_special_encoder(name, delta)
+            return
         import time as _time
         self._push2_last_special_encoder = (name, _time.monotonic())
         if name == "tempo":
@@ -2293,6 +2330,12 @@ class P6App:
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
+        # Compa 2 takes over when on Clips screen.
+        if (self.current_screen_name == "clips"
+                and self.push2_control is not None
+                and self.push2_control.is_active):
+            self.push2_surface.dispatch_button(name, value)
+            return
         # Shift is a modifier — track press/release so other handlers
         # can combine it with other buttons (e.g. Shift+D-pad).
         if name == "shift":
@@ -2949,6 +2992,8 @@ class P6App:
     def _on_push2_encoder(self, idx: int, delta: int):
         """Push 2 performance encoder turn.
 
+        Compa 2 takes over when on Clips screen.
+
         Pattern mode (overlay sequencer): encoders 1-2 are the
         "remix" knobs — encoder 1 re-rolls the step grid at a
         density proportional to its position; encoder 2 randomizes
@@ -2965,6 +3010,12 @@ class P6App:
           - encoders 1-6 adjust Ctrl 1-6 of the active bus
           - encoder 7 reserved
           - encoder 8 cycles the active effect (CC#83)."""
+        # Compa 2 takeover
+        if (self.current_screen_name == "clips"
+                and self.push2_control is not None
+                and self.push2_control.is_active):
+            self.push2_surface.dispatch_encoder(idx, delta)
+            return
         if self.push2_mode == "keys":
             self._on_push2_keys_encoder(idx, delta)
             return
@@ -3426,6 +3477,68 @@ class P6App:
 
     # ── MIDI clock broadcast (master_clock listener) ─────────────────
 
+    def _init_compa2(self) -> None:
+        """Initialize the Compa 2 clip engine + Push 2 native driver.
+
+        Quietly does nothing on hardware that can't run it (e.g. Pi 3B
+        without enough audio bandwidth — we'll add a hardware gate
+        later). All errors are caught and logged so a failure here
+        never breaks the rest of Compa.
+        """
+        try:
+            from engine.clip_engine.engine import ClipEngine
+            from engine.clip_engine.stream import ClipStream
+            from session.defaults import build_default_session
+            from session.persistence import load_session, save_session
+
+            # Build / load session
+            session = load_session("default") or build_default_session()
+            try:
+                save_session(session, "default")
+            except Exception:
+                pass
+
+            engine = ClipEngine(sample_rate=44100, max_frames=512)
+            engine.set_session(session)
+            self.clip_engine = engine
+
+            # Audio stream (own OutputStream, not shared with audio_engine)
+            self.clip_stream = ClipStream(engine, link=self.link,
+                                          sample_rate=44100, block_size=256)
+            # Don't start the stream until the user enters Clips screen,
+            # so Compa 1 features keep working on Pi 3B + Pi 5 without
+            # a parallel audio device contending for the bus.
+
+            # Push 2 native driver — host on existing self.push2 +
+            # self.push2_display (Compa 1's existing Push 2 stack). Skip
+            # if no existing driver (no Push 2 plugged in).
+            try:
+                if self.push2 is not None:
+                    from engine.push2driver.surface import Push2Surface
+                    from ui.push2_control import Push2Control
+                    from ui.render_thread import RenderThread
+
+                    surface = Push2Surface(
+                        existing_push2=self.push2,
+                        existing_display=self.push2_display,
+                    )
+                    control = Push2Control(
+                        surface=surface,
+                        engine=engine,
+                        session=session,
+                        link_provider=lambda: self.link.beat,
+                    )
+                    self.push2_surface = surface
+                    self.push2_control = control
+                    self.push2_render = RenderThread(control, fps=60)
+                    self.push2_render.start()
+                    print("Compa 2: Push 2 hosted surface active",
+                          flush=True)
+            except Exception as e:
+                print(f"Compa 2 Push 2 driver init: {e}", flush=True)
+        except Exception as e:
+            print(f"Compa 2 init failed: {e}", flush=True)
+
     def _broadcast_midi_clock(self) -> None:
         """Send a single 0xF8 MIDI Clock byte to every connected device.
 
@@ -3553,6 +3666,19 @@ class P6App:
             if old_screen and hasattr(old_screen, "on_exit"):
                 old_screen.on_exit()
             self._screen_context = context or {}
+            # Start / stop clip audio stream as we enter / leave clips
+            if name == "clips":
+                if self.clip_stream is not None and not self.clip_stream.running:
+                    self.clip_stream.start()
+                if self.push2_control is not None:
+                    self.push2_control.is_active = True
+                    self.push2_control.request_redraw()
+            elif self.current_screen_name == "clips" and name != "clips":
+                # Leaving clips — surrender Push 2 back to the existing
+                # Compa Push 2 modes (control / keys / pattern), but keep
+                # clips playing in the background.
+                if self.push2_control is not None:
+                    self.push2_control.is_active = False
             self.current_screen_name = name
             new_screen = self.screens[name]
             if hasattr(new_screen, "on_enter"):
@@ -3673,7 +3799,7 @@ class P6App:
                     pygame.K_F3: "pattern", pygame.K_F4: "record",
                     pygame.K_F5: "sample", pygame.K_F6: "radio",
                     pygame.K_F7: "help", pygame.K_F8: "settings",
-                    pygame.K_F9: "kit",
+                    pygame.K_F9: "kit", pygame.K_F10: "clips",
                 }
                 if event.key in NAV_KEYS:
                     self.switch_screen(NAV_KEYS[event.key])
