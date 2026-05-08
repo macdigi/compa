@@ -3516,6 +3516,31 @@ class P6App:
                     self.device_manager._focus_key = None
                     self.device_manager._active_device = None
 
+        # Recorder hot-plug: if we're not monitoring (typically because no
+        # USB audio device was present at boot), retry device detection.
+        # PortAudio caches its device list at init time, so we have to
+        # terminate + re-initialize sounddevice to pick up newly plugged
+        # cards. This is the recurring "scope shows No audio" bug — the
+        # recorder gave up at startup and never tried again.
+        rec = getattr(self, "recorder", None)
+        if rec is not None and not getattr(rec, "_monitoring", False):
+            try:
+                import sounddevice as _sd
+                try:
+                    _sd._terminate()
+                    _sd._initialize()
+                except Exception:
+                    pass
+                rec._device_index = None
+                rec._find_device()
+                if rec.available:
+                    rec.start_monitoring()
+                    if rec._monitoring:
+                        print("Recorder hot-plug: monitoring restored",
+                              flush=True)
+            except Exception as _e:
+                print(f"Recorder hot-plug retry failed: {_e}", flush=True)
+
     def switch_screen(self, name: str, context: dict | None = None):
         """Switch to a screen, optionally passing context data.
 
