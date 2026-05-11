@@ -82,6 +82,12 @@ def load_config() -> dict:
         # Recall buffer length (seconds) — rolling buffer of recent audio
         # always being captured for "forgot to hit record". Configurable.
         "RECALL_BUFFER_SECONDS": "60",
+        # Clips tab visibility. The Clips screen (Compa 2 clip launcher)
+        # is incomplete and not ready for users to interact with. Default
+        # OFF — hides the nav button, the F10 keyboard shortcut, and the
+        # Push 2 routing path that toggles into Clips. Flip to "1" when
+        # the feature is ready to ship. Long-term: gate by hardware (Pi 4+).
+        "CLIPS_TAB_ENABLED": "0",
         # Default pre-roll for every REC press (seconds). 0 = off (clean
         # start at REC). Anything > 0 silently includes the prior N seconds
         # from the recall buffer. Capped at RECALL_BUFFER_SECONDS.
@@ -627,7 +633,9 @@ class P6App:
         # XFER is now a location inside the Files screen ("Device"), so
         # it no longer has its own nav slot. The transfer screen still
         # lives in self.screens["transfer"] and is delegated to by Files.
+        # Clips tab is feature-gated — see CLIPS_TAB_ENABLED in config.
         nav_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
+        clips_enabled = self.config.get("CLIPS_TAB_ENABLED", "0") == "1"
         if theme.SCREEN_WIDTH >= 700:
             # Wide screen: full labels
             nav_labels = [
@@ -661,6 +669,8 @@ class P6App:
                 ("FB", "files"),
             ]
             font_name = "tiny"
+        if not clips_enabled:
+            nav_labels = [pair for pair in nav_labels if pair[1] != "clips"]
 
         self.nav_buttons: list[tuple[Button, str]] = []
         num_btns = len(nav_labels)
@@ -2369,8 +2379,11 @@ class P6App:
         """Push 2 transport / function buttons."""
         # Push 2 Clip button (CC 113) → toggle Compa 2 Clips screen.
         # Press goes to clips; press again from clips returns to the
-        # last device-workspace screen.
-        if name == "clip" and value > 0:
+        # last device-workspace screen. Gated by CLIPS_TAB_ENABLED — when
+        # disabled, the Clip button is a no-op so users can't end up on
+        # an incomplete screen.
+        if (name == "clip" and value > 0
+                and self.config.get("CLIPS_TAB_ENABLED", "0") == "1"):
             if self.current_screen_name == "clips":
                 # Bounce back to whatever the user was on before
                 back = getattr(self, "_pre_clips_screen", "session")
@@ -4021,8 +4034,11 @@ class P6App:
                     pygame.K_F3: "pattern", pygame.K_F4: "record",
                     pygame.K_F5: "sample", pygame.K_F6: "radio",
                     pygame.K_F7: "help", pygame.K_F8: "settings",
-                    pygame.K_F9: "kit", pygame.K_F10: "clips",
+                    pygame.K_F9: "kit",
                 }
+                # F10 → Clips only when the feature gate is on
+                if self.config.get("CLIPS_TAB_ENABLED", "0") == "1":
+                    NAV_KEYS[pygame.K_F10] = "clips"
                 if event.key in NAV_KEYS:
                     self.switch_screen(NAV_KEYS[event.key])
                     continue

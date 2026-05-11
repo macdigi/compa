@@ -12,7 +12,12 @@ affect what a user sees.
 
 ## Unreleased
 
-(nothing yet — this section fills up as new commits land)
+- **Clips tab hidden by default** — the Compa 2 clip launcher is still
+  incomplete and shouldn't be tappable yet. The nav button, F10
+  shortcut, and Push 2 Clip-button routing are all gated by a new
+  `CLIPS_TAB_ENABLED` config flag (default off). Flip to `1` to
+  preview the in-progress feature; will re-enable by default once
+  it's ready to ship.
 
 ## v0.2.0 — 2026-05-10
 
