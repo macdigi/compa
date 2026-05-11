@@ -24,6 +24,7 @@ class RenderThread(threading.Thread):
         self._last_pad_state: dict[tuple[int, int], tuple[int, int]] = {}
         self._last_button_state: dict[int, tuple[int, int]] = {}
         self._last_clock_send = 0.0
+        self._was_active = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -45,6 +46,25 @@ class RenderThread(threading.Thread):
         surface = ctrl.surface
         if surface is None or not surface.available:
             return
+        # Active edge — when we just took over, blank the entire pad
+        # grid + button rows so leftover Compa-1 colors don't bleed
+        # through. Track the transition so we don't blast every frame.
+        if ctrl.is_active and not self._was_active:
+            try:
+                surface.all_pads_off()
+                surface.all_buttons_off()
+            except Exception:
+                pass
+            self._last_pad_state.clear()
+            self._last_button_state.clear()
+            self._was_active = True
+        elif not ctrl.is_active and self._was_active:
+            # Released back to Compa 1 — clear our cache so the next
+            # entry redraws from scratch. Compa 1's renderer takes
+            # over and repaints its pads on its own loop.
+            self._last_pad_state.clear()
+            self._last_button_state.clear()
+            self._was_active = False
         # Idle when not active — leave the existing Compa Push 2
         # rendering alone.
         if not ctrl.is_active:
@@ -85,15 +105,11 @@ class RenderThread(threading.Thread):
                 surface.set_button_color(cc, 0, 0)
         self._last_button_state = dict(button_state)
 
-        # OLED — only repaint when dirty
-        if not ctrl.consume_dirty():
-            return
+        # OLED — repaint each tick (Push 2 blanks if no frame for 2s)
         try:
             img = mode.draw_oled(C.DISPLAY_WIDTH, C.DISPLAY_HEIGHT)
-            if img is None:
-                payload = blank()
-            else:
-                payload = image_to_frame(img)
-            surface.send_display_payload(payload)
+            if img is not None:
+                surface.send_display_image(img)
         except Exception as e:
             print(f"render OLED failed: {e}", flush=True)
+        ctrl.consume_dirty()

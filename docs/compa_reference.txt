@@ -102,9 +102,31 @@ Roland P-6 Parameters
   FX: reverb send, delay send, delay time, delay feedback
 
 Roland SP-404 MK2 Parameters
-  FX Bus 1-5: effect type, depth, rate, mix level
-  Looper: loop length, overdub level, playback speed
-  DJ Mode: crossfader position, EQ low/mid/high, filter sweep
+  Tabbed layout — one tab per FX bus + Looper + DJ Mode + LFO + Clock.
+
+  Bus 1-4 FX  — full FX selector (tap the prev/next arrows to walk
+                the 38-effect SP list; tap the name banner to toggle
+                the bus on/off) + the six control knobs (CC#16-18,
+                CC#80-82). Each bus is its own MIDI channel.
+  Input FX    — same UI for the SP's input bus on Ch5.
+  Looper      — performance layout. Status badge at top infers state
+                (READY / RECORDING / PLAYING / OVERDUBBING) from the
+                CCs we sent. Marquee REC button smart-toggles to
+                STOP RECORDING while a take is in progress. Below it:
+                OVERDUB and STOP secondary row, then UNDO / REDO /
+                DELETE / RESET TEMPO utility row, then a Play Rate
+                knob (CC#90, 64 = normal). Hint reminds you to enable
+                the looper on the SP unit first.
+  DJ Mode     — split-deck console. Two decks side by side: each has
+                its own deck label header (DECK A on Ch1, DECK B on
+                Ch2), vertical volume fader (drag-aware), 6-button
+                transport (PLAY/PAUSE/CUE/SYNC/BEND±), and a per-
+                deck FX rack identical to Bus 1/2 layout (the deck
+                FX is literally Bus 1 / Bus 2). Crossfader runs the
+                full width below both decks; the thumb color blends
+                from Deck A accent to Deck B accent based on its
+                position. Tracks must already be on the SP's SD card
+                (SP-404 firmware requirement, not a Compa limit).
 
 Generic USB Devices
   No parameter knobs are available for unrecognized devices. The
@@ -124,7 +146,13 @@ Roland P-6 Layout
 
 Roland SP-404 MK2 Layout
   4 columns by 4 rows = 16 pattern slots. Same tap and long-press
-  behavior as the P-6 layout.
+  behavior as the P-6 layout. Below the grid, a transport bar:
+    PLAY     — sends MIDI Start to the SP (kicks the active pattern)
+    STOP     — sends MIDI Stop
+    ? RECORD — opens an overlay with step-by-step instructions for
+               recording, overdubbing, and step-editing patterns on
+               the SP itself (REC has to be triggered on the unit;
+               Compa drives transport but can't initiate REC over MIDI)
 
 Chain / Song Mode
   Tap the Chain button to enter chain mode. Select multiple patterns
@@ -147,10 +175,30 @@ IN Source Selector
   shows all connected USB audio devices plus the radio stream.
 
 Recall Buffer
-  Compa continuously captures the last 60 seconds of audio from the
-  selected source into a circular buffer. If you missed pressing
-  record, tap Recall to save the buffer contents as a new take. This
-  means you never lose a good moment.
+  Compa continuously captures recent audio from the selected source
+  into a circular buffer (default 60 seconds, configurable in
+  Settings up to 30 minutes). The RCL button on each device card
+  shows the current buffer fill (e.g. "RCL 47s" while it warms up,
+  then "RCL 60s" once full). Tap RCL to save the buffer contents
+  as a new take. This means you never lose a good moment.
+
++REC (Recall + Continue)
+  The +REC button next to RCL combines recall with live recording.
+  Tap it once and Compa dumps the entire recall buffer to a new WAV
+  file AND keeps recording into that same file until you press STOP.
+  One seamless take starting from "the moment I forgot to hit record"
+  all the way through whatever you do next. The file's metadata
+  sidecar tags it with started_via=recall_continue so DAWs and your
+  future self can see what kind of file it is.
+
+Pre-Roll on REC (alternative to +REC)
+  Settings has a "Pre-roll on REC" row. Set it above 0 and every
+  normal REC press silently prepends that many seconds of recall
+  audio before the live recording starts. Default is OFF (clean cut
+  at REC press). Common useful values: 5s for "give me a beat or two
+  of lead-in," 30s for "I want the whole jam I just built." Capped
+  at the recall buffer length — can't pre-roll longer than what's
+  being captured.
 
 Threshold Recording
   Enable threshold recording with the T button. Set the threshold
@@ -285,6 +333,22 @@ Threshold Level
   Set the audio level (in dBFS) at which threshold recording is
   triggered. Lower values mean quieter sounds will trigger recording.
   A typical starting point is -30 dBFS.
+
+Recall buffer length
+  How many seconds of recent audio Compa keeps in its rolling buffer
+  for the RCL and +REC buttons. Default 60s. Steps: 15s up to 60s,
+  30s up to 5min, 60s up to the 30min ceiling. RAM cost is roughly
+  23 MB per minute at 48 kHz stereo (e.g. 5min ≈ 115 MB, 30min ≈
+  690 MB). Resize is live — monitoring briefly stops to swap the
+  buffer safely. The buffer fill resets on resize.
+
+Pre-roll on REC
+  Default pre-roll length applied to every REC press. OFF (default)
+  = clean start at the moment you tap REC. Anything above 0 silently
+  prepends that many seconds from the recall buffer to the new file.
+  Capped at the configured Recall buffer length. Smart steps: 5s
+  increments up to 30s, then 10s up to 60s, then 30s up to your
+  buffer length.
 
 Silence Duration
   Set how many seconds of silence must elapse before threshold

@@ -30,6 +30,12 @@ class NoteDrumMode(Mode):
         self.selected_pad = 0   # 0..15 (currently focused drum)
         self.page = 0           # 0..3 (which 16-step page of a 64-step clip)
         self.step_resolution_beats = 0.25  # 1/16 default (1 step)
+        # Steps currently held for edit (multi-step batch). Each entry
+        # is the absolute step number (page * 16 + step_in_page).
+        self._held_steps: set[int] = set()
+        # Latched note created on hold-down so encoder edits work even
+        # for previously-empty steps (creates default note then edits).
+        self._latched_notes: dict[int, "Note"] = {}
 
     @property
     def selected_drum_pitch(self) -> int:
@@ -56,17 +62,54 @@ class NoteDrumMode(Mode):
                         self.control.request_redraw()
                         return True
                     self.control.engine.play_note_live(
-                        self.track_idx, 36 + pad_idx, velocity)
+                        self.track_idx, 36 + pad_idx, velocity,
+                        link_beat=self.control._beat())
                 else:
                     self.control.engine.stop_note_live(
-                        self.track_idx, 36 + pad_idx)
+                        self.track_idx, 36 + pad_idx,
+                        link_beat=self.control._beat())
                 return True
             else:
-                # Step seq pads — col 4..7, row 0..3 = 16 steps
+                # Step seq pads — col 4..7, row 0..3 = 16 steps.
+                # Press: hold the step for encoder editing AND toggle
+                # whether the step exists on tap (released without an
+                # encoder turn). Release: drop hold, finalize.
+                step_in_page = (3 - row) * 4 + (col - 4)
+                step = self.page * 16 + step_in_page
                 if is_press:
-                    step_in_page = (3 - row) * 4 + (col - 4)
-                    step = self.page * 16 + step_in_page
-                    self._toggle_step(step)
+                    self._held_steps.add(step)
+                    # If step is empty, create a note immediately so
+                    # encoder edits affect something. We remember
+                    # whether we created it so a release-without-edit
+                    # leaves the note in place (treats hold as "draw").
+                    sess = self.control.session
+                    scene = self.control.selected_scene or 0
+                    clip = sess.get_clip(self.track_idx, scene)
+                    from session.clip import MidiClip
+                    if not isinstance(clip, MidiClip):
+                        self._toggle_step(step)
+                        return True
+                    beat = step * self.step_resolution_beats
+                    pitch = self.selected_drum_pitch
+                    existing = next((n for n in clip.notes
+                                      if abs(n.start_beat - beat) < 1e-3
+                                      and n.pitch == pitch
+                                      and not n.muted), None)
+                    if existing is None:
+                        from session.note import Note
+                        new = Note(pitch=pitch, start_beat=beat,
+                                    duration_beats=self.step_resolution_beats * 0.9,
+                                    velocity=100)
+                        clip.notes.append(new)
+                        self._latched_notes[step] = new
+                    else:
+                        # Already-on step: hold = adjust, no toggle on
+                        # release.
+                        self._latched_notes[step] = existing
+                    self.control.request_redraw()
+                else:
+                    self._held_steps.discard(step)
+                    self._latched_notes.pop(step, None)
                 return True
         else:
             # Top 4 rows = loop selector / page nav. row 4..7
@@ -91,7 +134,83 @@ class NoteDrumMode(Mode):
             self.step_resolution_beats = self._div_to_beats(div)
             self.control.request_redraw()
             return True
+        # Mute + step pad = mute step in place (clear notes for held steps)
+        # Delete + held drum / step = clear
+        if name == "delete" and self._held_steps:
+            sess = self.control.session
+            scene = self.control.selected_scene or 0
+            clip = sess.get_clip(self.track_idx, scene)
+            from session.clip import MidiClip
+            if isinstance(clip, MidiClip):
+                pitch = self.selected_drum_pitch
+                steps = sorted(self._held_steps)
+                clip.notes = [
+                    n for n in clip.notes
+                    if not any(
+                        abs(n.start_beat - s * self.step_resolution_beats) < 1e-3
+                        and n.pitch == pitch
+                        for s in steps
+                    )
+                ]
+                self.control.request_redraw()
+                return True
         return False
+
+    # Encoders edit held steps' parameters: 1 nudge, 2 coarse-len,
+    # 3 fine-len, 4 velocity, 5 chance, 6 vel-range.
+    def on_encoder_turn(self, name: str, delta: int) -> bool:
+        if not self._held_steps and not self._latched_notes:
+            return False
+        if not name.startswith("track"):
+            return False
+        try:
+            i = int(name[5:]) - 1
+        except ValueError:
+            return False
+        sess = self.control.session
+        scene = self.control.selected_scene or 0
+        clip = sess.get_clip(self.track_idx, scene)
+        from session.clip import MidiClip
+        if not isinstance(clip, MidiClip):
+            return False
+        pitch = self.selected_drum_pitch
+        notes = []
+        for s in self._held_steps:
+            beat = s * self.step_resolution_beats
+            for n in clip.notes:
+                if (abs(n.start_beat - beat) < 1e-3
+                        and n.pitch == pitch and not n.muted):
+                    notes.append(n)
+                    break
+        if not notes:
+            return False
+
+        # Encoder mapping
+        if i == 0:  # nudge: % offset within the step
+            shift = delta * 0.005  # beats per tick
+            for n in notes:
+                n.start_beat = max(0.0, n.start_beat + shift)
+        elif i == 1:  # coarse length: by step resolution
+            for n in notes:
+                n.duration_beats = max(0.05,
+                    n.duration_beats + delta * self.step_resolution_beats * 0.5)
+        elif i == 2:  # fine length: by 1/16 of step
+            for n in notes:
+                n.duration_beats = max(0.05,
+                    n.duration_beats + delta * self.step_resolution_beats * 0.05)
+        elif i == 3:  # velocity
+            for n in notes:
+                n.velocity = max(1, min(127, n.velocity + delta))
+        elif i == 4:  # chance 0..1
+            for n in notes:
+                n.chance = max(0.0, min(1.0, n.chance + delta * 0.02))
+        elif i == 5:  # velocity range 0..63
+            for n in notes:
+                n.velocity_range = max(0, min(63, n.velocity_range + delta))
+        else:
+            return False
+        self.control.request_redraw()
+        return True
 
     def _div_to_beats(self, div: str) -> float:
         return {

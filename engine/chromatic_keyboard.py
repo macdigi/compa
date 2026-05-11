@@ -185,12 +185,33 @@ class ChromaticKeyboard:
         return False
 
     def _scan_and_connect(self) -> bool:
-        """Scan rtmidi ports and connect to the first generic keyboard."""
+        """Scan rtmidi ports and connect to the first generic keyboard.
+
+        Backoff: each call to rtmidi.MidiIn() opens an ALSA seq client.
+        On a healthy system that's free, but on a Pi where /dev/snd/seq is
+        starved (kernel resource exhausted) every attempt logs and may leak
+        another seq client slot. We back off exponentially on consecutive
+        failures + rate-limit the log so we don't fill the journal or pile
+        kernel pressure on a system that's already starved.
+        """
+        import time as _time
+        now = _time.monotonic()
+        # Lazy-init backoff state
+        if not hasattr(self, "_scan_next_at"):
+            self._scan_next_at = 0.0
+            self._scan_attempts = 0
+            self._scan_last_log = 0.0
+        if now < self._scan_next_at:
+            return False
+
         try:
             midi_in = rtmidi.MidiIn()
             ports = midi_in.get_ports()
             if not ports:
                 midi_in.delete()
+                # No ports is normal (no keyboard plugged in) — short backoff
+                self._scan_attempts = 0
+                self._scan_next_at = now + 2.0
                 return False
 
             for i, name in enumerate(ports):
@@ -212,15 +233,30 @@ class ChromaticKeyboard:
                     print(f"ChromaticKB: {name}", flush=True)
                     if self.on_connect:
                         self.on_connect(name)
+                    # Reset backoff on success
+                    self._scan_attempts = 0
+                    self._scan_next_at = 0.0
                     return True
                 except Exception as e:
                     log.warning("ChromaticKB open port %d failed: %s", i, e)
                     continue
 
             midi_in.delete()
+            # No matching candidate among the visible ports — short backoff
+            self._scan_attempts = 0
+            self._scan_next_at = now + 2.0
             return False
         except Exception as e:
-            log.warning("ChromaticKB scan error: %s", e)
+            # Most common failure here is "open /dev/snd/seq failed: Cannot
+            # allocate memory" when the kernel ALSA seq table is exhausted.
+            # Each retry leaks more — backoff hard.
+            self._scan_attempts += 1
+            backoff = min(120.0, 2.0 * (2 ** max(0, self._scan_attempts - 1)))
+            self._scan_next_at = now + backoff
+            if now - self._scan_last_log > 60.0:
+                log.warning("ChromaticKB scan error (%s); backing off %.0fs",
+                            e, backoff)
+                self._scan_last_log = now
             return False
 
     # ── Main thread ──────────────────────────────────────────────────

@@ -98,6 +98,12 @@ class Push2Surface:
         else:
             self.midi = None
             self.display = None
+            # In hosted mode we still need our palette uploaded to the
+            # device so the indices we send (5, 11, 21, …) light up the
+            # colors we drew on the touchscreen. Skip the named slots
+            # the existing Compa code relies on (0 black, 8 yellow,
+            # 122–127 white/grays/RGB).
+            self._upload_palette_via_existing()
 
     @property
     def available(self) -> bool:
@@ -108,6 +114,24 @@ class Push2Surface:
     @property
     def palette(self) -> list[tuple[int, int, int, int]]:
         return self._palette
+
+    def _upload_palette_via_existing(self) -> None:
+        """Upload our palette through the existing Push 2 driver's
+        output ports. Skip the slots Compa 1 depends on so the existing
+        renderer keeps painting the colors it expects."""
+        ex = self._existing_push2
+        if ex is None:
+            return
+        protected = {0, 1, 3, 8, 122, 123, 124, 125, 126, 127}
+        try:
+            for idx, (r, g, b, w) in enumerate(self._palette):
+                if idx in protected:
+                    continue
+                msg = sysex.set_palette_entry(idx, r, g, b, w)
+                ex._send_both(list(msg))
+            ex._send_both(list(sysex.reapply_palette()))
+        except Exception as e:
+            print(f"hosted palette upload failed: {e}", flush=True)
 
     def set_event_handler(self, fn: Callable[[object], None]) -> None:
         self._on_event = fn
@@ -251,20 +275,48 @@ class Push2Surface:
             self.midi.send(msg)
 
     # ── Display ────────────────────────────────────────────────────
-    def send_display_payload(self, payload: bytes) -> None:
+    def send_display_image(self, img) -> None:
+        """Ship a PIL RGB image to Push 2.
+
+        Hosted mode: converts to BGR565 numpy and uses the existing
+        Push2Display.send_frame_rgb565 (which handles XOR + filler +
+        bulk write itself).
+
+        Standalone mode: packs the image with our own pixel module and
+        ships via our USB handle.
+        """
         ex = self._existing_display
         if ex is not None:
             try:
-                # Existing display has a different API; try common ones.
-                if hasattr(ex, "send_raw_payload"):
-                    ex.send_raw_payload(payload)
-                elif hasattr(ex, "send_frame"):
-                    ex.send_frame(payload)
-                elif hasattr(ex, "_send_payload"):
-                    ex._send_payload(payload)
-            except Exception:
-                pass
+                import numpy as np
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                if img.size != (C.DISPLAY_WIDTH, C.DISPLAY_HEIGHT):
+                    img = img.resize((C.DISPLAY_WIDTH, C.DISPLAY_HEIGHT))
+                arr = np.asarray(img, dtype=np.uint8)
+                r = arr[..., 0].astype(np.uint16)
+                g = arr[..., 1].astype(np.uint16)
+                b = arr[..., 2].astype(np.uint16)
+                fb = ((b & 0xf8) << 8) | ((g & 0xfc) << 3) | (r >> 3)
+                ex.send_frame_rgb565(fb)
+            except Exception as e:
+                print(f"send_display_image (hosted) failed: {e}",
+                      flush=True)
             return
+        if self.display is not None:
+            from .pixel import pack_frame
+            import numpy as np
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            if img.size != (C.DISPLAY_WIDTH, C.DISPLAY_HEIGHT):
+                img = img.resize((C.DISPLAY_WIDTH, C.DISPLAY_HEIGHT))
+            arr = np.asarray(img, dtype=np.uint8)
+            payload = pack_frame(arr)
+            self.display.send_frame(payload)
+
+    def send_display_payload(self, payload: bytes) -> None:
+        """Standalone-mode raw payload send. Hosted mode prefers
+        send_display_image()."""
         if self.display is not None:
             self.display.send_frame(payload)
 
@@ -284,9 +336,24 @@ class Push2Surface:
             except Exception:
                 pass
 
+    # Map Compa-1 button names to our standard Push 2 vocabulary.
+    _NAME_TRANSLATIONS = {
+        # Scene-launch column (right of pad grid)
+        **{f"launch_{i+1}": f"scene_{i+1}" for i in range(8)},
+        # Upper display row → "select track"
+        **{f"top_select_{i+1}": f"upper_display_{i+1}" for i in range(8)},
+        # Lower display row → "stop clip per track"
+        **{f"bot_select_{i+1}": f"lower_display_{i+1}" for i in range(8)},
+        # Compa 1 names a few transport / nav differently
+        "nav_up": "up", "nav_down": "down",
+        "nav_left": "left", "nav_right": "right",
+    }
+
     def dispatch_button(self, name: str, value: int) -> None:
-        cc = C.NAMES_TO_BUTTONS.get(name, 0)
-        ev = ButtonEvent(cc=cc, name=name, is_press=(value > 0))
+        # Translate Compa 1's button vocabulary to ours
+        translated = self._NAME_TRANSLATIONS.get(name, name)
+        cc = C.NAMES_TO_BUTTONS.get(translated, 0)
+        ev = ButtonEvent(cc=cc, name=translated, is_press=(value > 0))
         cb = self._on_event
         if cb is not None:
             try:

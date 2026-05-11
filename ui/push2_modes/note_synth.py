@@ -59,12 +59,16 @@ class NoteSynthMode(Mode):
         if self.in_key and not self._is_in_scale(pitch):
             return True
         if is_press:
-            self.control.engine.play_note_live(self.track_idx, pitch, velocity)
+            self.control.engine.play_note_live(
+                self.track_idx, pitch, velocity,
+                link_beat=self.control._beat())
             self._held_notes[(col, row)] = pitch
         else:
             held = self._held_notes.pop((col, row), None)
             if held is not None:
-                self.control.engine.stop_note_live(self.track_idx, held)
+                self.control.engine.stop_note_live(
+                    self.track_idx, held,
+                    link_beat=self.control._beat())
         return True
 
     def on_button(self, name: str, is_press: bool) -> bool:

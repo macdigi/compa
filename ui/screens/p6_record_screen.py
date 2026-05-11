@@ -60,7 +60,10 @@ class P6RecordScreen:
             self.app.recorder.start_monitoring()
 
     def on_exit(self):
-        if not self.app.recorder.is_recording:
+        # Don't tear down the recorder while an active MON route is using
+        # it — see p6_session_screen.on_exit for the full feedback story.
+        if (not self.app.recorder.is_recording
+                and not getattr(self.app, "_monitor_source", "")):
             self.app.recorder.stop_monitoring()
 
     def _cycle_audio_source(self):

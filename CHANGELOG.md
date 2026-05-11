@@ -14,6 +14,79 @@ affect what a user sees.
 
 (nothing yet — this section fills up as new commits land)
 
+## v0.2.0 — 2026-05-10
+
+**Recall buffer enhancements — three ways to never miss a take**
+
+- **+REC button** on every device card. Dumps the entire current
+  recall buffer to a new WAV file *and* keeps recording into the
+  same file. One seamless take from "the moment you forgot to hit
+  record" all the way to your stop press.
+- **Pre-roll on every REC press** — new Settings row. Set it to any
+  length up to your buffer size and every normal REC press silently
+  prepends that much audio from the recall buffer. The "I forgot to
+  record" failure mode becomes structurally impossible.
+- **Configurable recall buffer length** — Settings row, smart steps
+  (15s / 30s / 60s / 2min / 5min / 10min / 30min ceiling). Live
+  resize with brief monitoring stop during the swap. RAM cost is
+  ~23 MB per minute at 48 kHz stereo.
+- File metadata sidecar tags pre-roll length and "started_via:
+  recall_continue" so DAWs and your future self can see what the
+  file actually is.
+
+**SP-404 MK2 modes — Compa-side UI rewrite**
+
+- **DJ mode** — split-deck console. Each deck has its own volume
+  fader, transport row (PLAY/PAUSE/CUE/SYNC/BEND±), and full FX
+  rack with the 38-effect SP list (prev/next cycler showing the
+  effect name, ON/OFF toggle, six control knobs). Deck A drives
+  Bus 1 / Ch1, Deck B drives Bus 2 / Ch2 — the SP's own internal
+  routing. Crossfader spans both decks with a thumb that color-
+  blends between the two deck accents based on position.
+- **Looper** — performance-grade. Status badge that infers state
+  (READY / RECORDING / PLAYING / OVERDUBBING) from the CCs Compa
+  sent. Marquee REC button that smart-toggles to STOP RECORDING
+  while a take is in progress. OVERDUB / STOP / DELETE / RESET
+  TEMPO / UNDO / REDO laid out for fast finger reach.
+- **Pattern** — added MIDI Start/Stop transport buttons to the
+  pattern grid (PLAY / STOP send to the SP) and a "? RECORD"
+  helper overlay that walks you through real-time recording,
+  overdubbing, and step-edit on the SP itself.
+
+**MON (monitor routing) fixes**
+
+- MON between two USB-audio devices no longer creates a feedback
+  chamber when SP-404's External Source is on. Two distinct bugs
+  shipped: (1) MON setup was leaving the previous output stream
+  open during the swap window — fixed with explicit close-first
+  ordering. (2) Tapping a different card mid-MON would silently
+  collapse the route via screen-transition tear-down — fixed by
+  preserving the recorder when MON is active.
+
+**Stability — kernel resource leaks**
+
+- ChromaticKB scan no longer hammers `/dev/snd/seq` when the kernel
+  ALSA seq table is starved. Exponential backoff (2s → 120s ceiling)
+  + log rate-limit (1 line per minute). Each retry was previously
+  leaking kernel-side seq client slots, eventually starving any
+  audio open — *that* was the actual cause behind perceived "MON
+  crashes the system" reports.
+- Recorder hot-plug retry got the same backoff treatment (5s → 60s
+  ceiling, log rate-limited, resets to 0 on USB topology change so
+  a freshly plugged device is detected on the very next 5-second
+  tick).
+
+**Power supply — Pi 5 USB stability note**
+
+- Pi 5 users: official 27 W USB-C PD power supply (5 V / 5 A) is
+  required to drive multiple bus-powered USB devices. Generic
+  "27 W" chargers that negotiate at 9 V / 3 A leave the Pi in
+  restricted USB-current mode (600 mA cap across all ports
+  combined), which trips over-current the moment a touchscreen or
+  similar device is plugged in. Adding `usb_max_current_enable=1`
+  to `/boot/firmware/config.txt` lifts the cap to 1.6 A *if* the
+  PSU can deliver — both pieces are required.
+
 ## v0.1.1 — 2026-05-02
 
 **Ableton Link tempo sync over WiFi**

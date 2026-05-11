@@ -17,8 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+import random
+
 from session.clip import (Clip, MidiClip, AudioClip, ClipState,
-                          LaunchQuantize, LaunchMode)
+                          LaunchQuantize, LaunchMode,
+                          FollowAction, FollowActionType)
 from session.session import Session
 
 
@@ -135,10 +138,15 @@ class ClipScheduler:
                 st.state = ClipState.STOPPED
 
     def launch_scene(self, scene: int, current_beat: float) -> None:
+        """Fire every clip in the row. Tracks with an empty cell in
+        this scene get stopped so the row is what you hear (not
+        leftovers from the previous scene)."""
         for t in range(len(self.session.tracks)):
             clip = self.session.get_clip(t, scene)
             if clip is not None:
                 self.launch_clip(t, scene, current_beat)
+            else:
+                self.stop_clip(t, current_beat)
 
     # ── Tick (audio callback) ──────────────────────────────────────
     def tick(self, beat_at_block_start: float,
@@ -158,84 +166,156 @@ class ClipScheduler:
             if st.state != ClipState.PLAYING:
                 continue
             clip = self.session.get_clip(track, scene)
-            if clip is None or not isinstance(clip, MidiClip):
+            if clip is None:
                 continue
+            if isinstance(clip, MidiClip):
+                self._scan_midi_clip(track, scene, clip, st,
+                                      beat_at_block_start, block_end_beat,
+                                      beats_per_sample)
 
-            self._scan_midi_clip(track, scene, clip, st,
-                                  beat_at_block_start, block_end_beat,
-                                  beats_per_sample)
+            # Follow Action — fires when clip has played for after_bars
+            self._check_follow_action(track, scene, clip, st,
+                                       beat_at_block_start, block_end_beat)
 
     # ── Helpers ────────────────────────────────────────────────────
     def _scan_midi_clip(self, track: int, scene: int, clip: MidiClip,
                         st: ClipPlayState, block_start: float,
                         block_end: float, bps: float) -> None:
+        """Walk this block in clip-local time and fire any notes whose
+        start_beat falls inside the block. Half-open intervals
+        [a, b) so notes at the loop boundary (beat 0) fire exactly
+        once on each wrap.
+
+        Wrapped state is tracked via st.last_scanned_beat which holds
+        the absolute Link beat we've already scanned through.
+        """
+        import random
         loop_len = clip.length_beats
         if loop_len <= 0:
             return
         start_beat = st.actual_start_beat
+        if block_end <= start_beat:
+            return  # Clip not playing yet in this block
 
-        # Window in clip-local space
-        local_start = (block_start - start_beat) % loop_len
-        local_end_abs = block_end - start_beat
-        # If we cross a loop boundary in this block, do two passes.
-        passes: list[tuple[float, float, float]] = []
-        # (clip_window_start, clip_window_end, beat_offset_to_block_start_for_clip_t=0)
-        if local_end_abs - (block_start - start_beat) <= 0:
-            return
-        # Compute local_end via modulo so we stay within [0, loop_len]
-        # but we also need to handle wrap-around. Simpler: walk in chunks.
-        cursor_block_beat = block_start
-        cursor_local = local_start
-        while cursor_block_beat < block_end:
-            remaining_in_loop = loop_len - cursor_local
-            chunk_end_block = min(block_end,
-                                  cursor_block_beat + remaining_in_loop)
-            chunk_local_end = cursor_local + (chunk_end_block - cursor_block_beat)
-            passes.append((cursor_local, chunk_local_end,
-                           cursor_block_beat - block_start))
-            cursor_block_beat = chunk_end_block
-            cursor_local = 0.0
-            if not clip.looping and cursor_block_beat < block_end:
-                # Stop the clip after one play
-                self._flush_active_notes(track, scene, block_start, block_offset=0)
-                st.state = ClipState.STOPPED
-                return
-
-        # Issue note_offs for any active notes whose end_beat is now <= block_end
+        # Issue note_offs that fall in this block
         for n in list(st.notes_active):
             if n.end_beat <= block_end:
-                offset = max(0, int((n.end_beat - block_start) / bps))
+                offset = max(0, min(int((n.end_beat - block_start) / bps),
+                                     int((block_end - block_start) / bps) - 1))
                 self._dispatcher(track, "note_off", n.pitch, 0, offset)
                 st.notes_active.remove(n)
 
-        # For each pass, find notes whose start_beat falls inside (a, b]
-        for (a, b, beat_offset) in passes:
+        # Track per-state: how far we've already scanned (absolute beat).
+        # Initialize on first pass to start_beat so we include note at 0.
+        if st.last_scanned_beat < start_beat:
+            scan_from = start_beat
+        else:
+            scan_from = st.last_scanned_beat
+
+        # Walk the block in loop-aware chunks: [scan_from, block_end)
+        cursor = scan_from
+        while cursor < block_end:
+            local = (cursor - start_beat) % loop_len
+            remaining_in_loop = loop_len - local
+            chunk_end = min(block_end, cursor + remaining_in_loop)
+            # Half-open interval [local, local_end) within the clip
+            local_end = local + (chunk_end - cursor)
+            # Fire notes in this clip-local window
             for note in clip.notes:
                 if note.muted:
                     continue
-                if not (a < note.start_beat <= b):
-                    if not (a == 0.0 and note.start_beat == 0.0
-                            and st.last_scanned_beat < 0):
-                        continue
-                # Compute absolute beat at which to fire
-                abs_beat = block_start + beat_offset + (note.start_beat - a)
-                offset = max(0, int((abs_beat - block_start) / bps))
-                # Probability check (simple)
-                import random
+                if not (local <= note.start_beat < local_end):
+                    continue
                 if note.chance < 1.0 and random.random() > note.chance:
                     continue
+                # Absolute Link beat for this note
+                abs_beat = cursor + (note.start_beat - local)
+                offset = max(0, min(int((abs_beat - block_start) / bps),
+                                     int((block_end - block_start) / bps) - 1))
                 vel = note.velocity
                 if note.velocity_range > 0:
                     delta = random.randint(-note.velocity_range,
                                             note.velocity_range)
                     vel = max(1, min(127, vel + delta))
                 self._dispatcher(track, "note_on", note.pitch, vel, offset)
-                # Schedule note_off
                 end_beat = abs_beat + note.duration_beats
                 st.notes_active.append(_PlayingNote(
                     pitch=note.pitch, end_beat=end_beat))
+            cursor = chunk_end
+            if not clip.looping and cursor >= start_beat + loop_len:
+                self._flush_active_notes(track, scene, block_start,
+                                          block_offset=0)
+                st.state = ClipState.STOPPED
+                break
 
         st.last_scanned_beat = block_end
+
+    # ── Follow Action ──────────────────────────────────────────────
+    def _check_follow_action(self, track: int, scene: int, clip: Clip,
+                              st: ClipPlayState, block_start: float,
+                              block_end: float) -> None:
+        fa = getattr(clip, "follow_action", None)
+        if fa is None or fa.type == FollowActionType.NONE:
+            return
+        if fa.after_bars <= 0:
+            return
+        ts_num = self.session.time_signature_num
+        period_beats = fa.after_bars * ts_num
+        # Determine if a multiple of period_beats falls inside this block.
+        elapsed_at_block_end = block_end - st.actual_start_beat
+        elapsed_at_block_start = block_start - st.actual_start_beat
+        if elapsed_at_block_end <= 0:
+            return
+        # Last and current period count
+        prev_count = max(0, int(elapsed_at_block_start // period_beats))
+        curr_count = int(elapsed_at_block_end // period_beats)
+        if curr_count <= prev_count:
+            return
+        # Roll chance
+        if fa.chance < 1.0 and random.random() > fa.chance:
+            return
+        target = self._resolve_follow_action(track, scene, fa)
+        if target is None:
+            return
+        target_scene = target
+        # Stop current then launch target
+        self.stop_clip(track, block_start)
+        if target_scene >= 0:
+            self.launch_clip(track, target_scene, block_start)
+
+    def _resolve_follow_action(self, track: int, scene: int,
+                                 fa: FollowAction) -> int | None:
+        clips = self.session.tracks[track].clips
+        n = len(clips)
+        nonempty = [s for s in range(n) if clips[s] is not None]
+        if not nonempty:
+            return None
+        if fa.type == FollowActionType.STOP:
+            return -1   # signal "stop without launching"
+        if fa.type == FollowActionType.NEXT:
+            for s in nonempty:
+                if s > scene:
+                    return s
+            return nonempty[0]   # wrap
+        if fa.type == FollowActionType.PREVIOUS:
+            for s in reversed(nonempty):
+                if s < scene:
+                    return s
+            return nonempty[-1]
+        if fa.type == FollowActionType.FIRST:
+            return nonempty[0]
+        if fa.type == FollowActionType.LAST:
+            return nonempty[-1]
+        if fa.type == FollowActionType.ANY:
+            return random.choice(nonempty)
+        if fa.type == FollowActionType.OTHER:
+            others = [s for s in nonempty if s != scene]
+            return random.choice(others) if others else None
+        if fa.type == FollowActionType.JUMP:
+            if 0 <= fa.target_scene < n and clips[fa.target_scene] is not None:
+                return fa.target_scene
+            return None
+        return None
 
     def _flush_active_notes(self, track: int, scene: int,
                              current_beat: float, block_offset: int) -> None:

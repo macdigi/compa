@@ -47,17 +47,51 @@ class SessionMode(Mode):
             self.control.select_cell(track_idx, scene_idx)
             return True
 
+        # Record + empty slot on an audio track = arm recording.
+        # Captures from the recorder's input (SP-404 / P-6 / whatever
+        # USB audio is monitored) for 4 bars, drops the result into
+        # the slot as an AudioClip.
+        if "record" in mods:
+            from session.track import TrackType
+            track = sess.tracks[track_idx]
+            if track.type == TrackType.AUDIO:
+                self.control.arm_recording(track_idx, scene_idx)
+                return True
+
         clip = sess.get_clip(track_idx, scene_idx)
         if clip is None:
             # Tap on empty slot does nothing in v1 (no auto-seed garbage)
             return True
-        self.control.launch_clip(track_idx, scene_idx)
+        # Shift = launch immediately (Live's retrigger-now behavior).
+        immediate = "shift" in mods
+        self.control.launch_clip(track_idx, scene_idx,
+                                  immediate=immediate)
         return True
 
     # ── Buttons we handle in this mode ─────────────────────────────
     def on_button(self, name: str, is_press: bool) -> bool:
         if not is_press:
             return False
+        # Add Track (CC 53) — appends new track. Shift = drum rack,
+        # otherwise synth voice. Add Device (CC 52) is reserved for
+        # the device chain editor (later).
+        if name == "add_track":
+            self.control.add_track(
+                drum=("shift" in self.control.modifiers))
+            return True
+        # Delete + upper-display button = remove that track.
+        if name.startswith("upper_display_"):
+            try:
+                col = int(name.split("_")[2]) - 1
+            except ValueError:
+                return False
+            track_idx = col + self.track_offset
+            if "delete" in self.control.modifiers:
+                self.control.remove_track(track_idx)
+                return True
+            self.control.selected_track = track_idx
+            self.control.request_redraw()
+            return True
         # Scene-launch column (right of pad grid)
         if name.startswith("scene_"):
             try:
@@ -75,15 +109,6 @@ class SessionMode(Mode):
                 return False
             track_idx = col + self.track_offset
             self.control.stop_clip(track_idx)
-            return True
-        # Upper display row = select track
-        if name.startswith("upper_display_"):
-            try:
-                col = int(name.split("_")[2]) - 1
-            except ValueError:
-                return False
-            self.control.selected_track = col + self.track_offset
-            self.control.request_redraw()
             return True
         if name == "stop_clip":
             mods = self.control.modifiers
@@ -112,6 +137,14 @@ class SessionMode(Mode):
                                     self.track_offset + 8)
             self.control.request_redraw()
             return True
+        # New button: Shift = Capture MIDI (Live 12.4 feature),
+        # otherwise = add an empty scene at the end.
+        if name == "new":
+            if "shift" in self.control.modifiers:
+                self.control.capture_midi_to_clip()
+            else:
+                self.control.add_scene()
+            return True
         return False
 
     # ── Pad render ─────────────────────────────────────────────────
@@ -131,9 +164,12 @@ class SessionMode(Mode):
                 base_color = (clip.color if (clip is not None and clip.color)
                               else (track.color if track.color
                                     else track_color_index(track_idx)))
+                # Recording-armed shows red pulse even on empty slots
+                if self.control.engine.is_recording(track_idx, scene_idx):
+                    out[(col, row)] = (121, C.ANIM_PULSE_8TH)
+                    continue
                 if clip is None:
-                    # Empty slot — very dim track color (palette idx works
-                    # better via animation) — show off for now
+                    # Empty slot — leave off
                     continue
                 state = sched.get_state(track_idx, scene_idx)
                 if state == ClipState.PLAYING:

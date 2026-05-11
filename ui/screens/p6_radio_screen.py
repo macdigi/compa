@@ -162,7 +162,7 @@ class P6RadioScreen:
             if result == "PLAY":
                 url = self._url_modal.input_text.strip()
                 if url:
-                    self._radio.play(url, station_name="Custom")
+                    self.app.start_radio(url, "Custom")
             return
 
         # Search keyboard input
@@ -305,7 +305,7 @@ class P6RadioScreen:
                 row_rect = pygame.Rect(16, list_y + i * item_h, list_w, item_h - 2)
                 if row_rect.collidepoint(mx, my):
                     self._selected = self._scroll + i
-                    self._radio.play(station["url"], station.get("name", ""))
+                    self.app.start_radio(station["url"], station.get("name", ""))
                     return
 
             # ── Bottom controls (not playing) ─────────────────────────

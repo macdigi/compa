@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 MODIFIER_NAMES = frozenset({
     "shift", "select", "delete", "duplicate", "quantize",
     "double_loop", "fixed_length", "mute", "solo", "stop_clip",
-    "repeat", "accent", "new",
+    "repeat", "accent", "new", "record",
 })
 
 

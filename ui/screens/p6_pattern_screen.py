@@ -23,6 +23,9 @@ class P6PatternScreen:
         # Mode: "grid", "chain", or "seq"
         self._mode = "grid"
 
+        # Help overlay (shown over grid mode when "?" tapped)
+        self._show_record_help = False
+
         # Grid layout — adapts to device pattern count
         self._recalc_grid()
 
@@ -79,8 +82,9 @@ class P6PatternScreen:
         self._grid_y = 46
         self._cell_gap = 4
 
-        # How many rows fit in the visible area
-        avail_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self._grid_y - 8
+        # How many rows fit in the visible area — leave 60px at bottom
+        # for the transport bar (PLAY / STOP / HELP)
+        avail_h = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - self._grid_y - 8 - 60
         self._grid_visible_rows = max(1, avail_h // (self._cell_h + self._cell_gap))
 
         # Scroll offset (in rows)
@@ -145,6 +149,12 @@ class P6PatternScreen:
             self.app.router.layer = Layer.PAD
 
     def handle_event(self, event):
+        # Help overlay swallows all clicks first
+        if self._show_record_help:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._show_record_help = False
+            return
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
 
@@ -164,6 +174,9 @@ class P6PatternScreen:
                 return
 
             if self._mode == "grid":
+                # Transport bar buttons checked first (covers row above nav)
+                if self._handle_grid_transport_click(mx, my):
+                    return
                 self._handle_grid_click(mx, my)
             elif self._mode == "chain":
                 self._handle_chain_click(mx, my)
@@ -195,6 +208,131 @@ class P6PatternScreen:
             if rect.collidepoint(mx, my):
                 self._select_pattern(i)
                 return
+
+    def _grid_transport_rects(self):
+        """Layout for the GRID-mode transport bar (PLAY / STOP / HELP / status).
+
+        Sits above the nav bar, below the pattern grid. Returns the dict so
+        both draw and click handler use the same rects without drift."""
+        bar_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 50
+        return {
+            "bar_y": bar_y,
+            "play": pygame.Rect(16, bar_y, 100, 40),
+            "stop": pygame.Rect(124, bar_y, 100, 40),
+            "help": pygame.Rect(theme.SCREEN_WIDTH - 116, bar_y, 100, 40),
+        }
+
+    def _handle_grid_transport_click(self, mx, my):
+        rects = self._grid_transport_rects()
+        if rects["play"].collidepoint(mx, my):
+            if self.app.p6:
+                self.app.p6.send_start()
+            return True
+        if rects["stop"].collidepoint(mx, my):
+            if self.app.p6:
+                self.app.p6.send_stop()
+            return True
+        if rects["help"].collidepoint(mx, my):
+            self._show_record_help = True
+            return True
+        return False
+
+    def _draw_grid_transport(self, surface, f_small, f_med):
+        """Transport bar across the bottom: PLAY / STOP / status / HELP."""
+        rects = self._grid_transport_rects()
+
+        # Background strip
+        bar_rect = pygame.Rect(8, rects["bar_y"] - 4,
+                               theme.SCREEN_WIDTH - 16, 48)
+        pygame.draw.rect(surface, theme.BG_PANEL, bar_rect, border_radius=6)
+        pygame.draw.rect(surface, theme.BORDER, bar_rect, 1, border_radius=6)
+
+        # PLAY
+        play_rect = rects["play"]
+        pygame.draw.rect(surface, theme.GREEN, play_rect, border_radius=6)
+        pygame.draw.rect(surface, theme.BORDER, play_rect, 1, border_radius=6)
+        ps = f_med.render("▶ PLAY", True, theme.BG)
+        surface.blit(ps, ps.get_rect(center=play_rect.center))
+
+        # STOP
+        stop_rect = rects["stop"]
+        pygame.draw.rect(surface, theme.BUTTON_BG, stop_rect, border_radius=6)
+        pygame.draw.rect(surface, theme.BORDER, stop_rect, 1, border_radius=6)
+        ss = f_med.render("■ STOP", True, theme.TEXT_BRIGHT)
+        surface.blit(ss, ss.get_rect(center=stop_rect.center))
+
+        # HELP
+        help_rect = rects["help"]
+        pygame.draw.rect(surface, theme.ACCENT_DIM, help_rect, border_radius=6)
+        pygame.draw.rect(surface, theme.BORDER, help_rect, 1, border_radius=6)
+        hs = f_med.render("? RECORD", True, theme.TEXT_BRIGHT)
+        surface.blit(hs, hs.get_rect(center=help_rect.center))
+
+        # Status text in the middle: active pattern + send hint
+        active = self.app.p6.state.active_pattern if self.app.p6 else 0
+        name = self._pattern_names[active] if active < len(self._pattern_names) else ""
+        if name:
+            mid = f"Pattern {active + 1}: {name}"
+        else:
+            mid = f"Pattern {active + 1}"
+        ms = f_small.render(mid, True, theme.TEXT_DIM)
+        surface.blit(ms, ms.get_rect(centerx=theme.SCREEN_WIDTH // 2,
+                                     centery=play_rect.centery))
+
+        # Tiny "MIDI Start/Stop" hint just below
+        hint = f_small.render("PLAY/STOP send MIDI Start/Stop to the SP",
+                              True, theme.TEXT_DIM)
+        surface.blit(hint, hint.get_rect(centerx=theme.SCREEN_WIDTH // 2,
+                                         top=play_rect.bottom + 2))
+
+    def _draw_record_help_overlay(self, surface, f_small, f_med, f_large):
+        """How-to-record overlay — tap anywhere to dismiss."""
+        # Dim the background
+        dim = pygame.Surface((theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT),
+                             pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 180))
+        surface.blit(dim, (0, 0))
+
+        # Card
+        card_w = min(720, theme.SCREEN_WIDTH - 40)
+        card_h = min(440, theme.SCREEN_HEIGHT - 60)
+        card_x = (theme.SCREEN_WIDTH - card_w) // 2
+        card_y = (theme.SCREEN_HEIGHT - card_h) // 2
+        card = pygame.Rect(card_x, card_y, card_w, card_h)
+        pygame.draw.rect(surface, theme.BG_PANEL, card, border_radius=10)
+        pygame.draw.rect(surface, theme.ACCENT, card, 2, border_radius=10)
+
+        # Title
+        title = f_large.render("How to record a pattern", True, theme.ACCENT)
+        surface.blit(title, title.get_rect(centerx=card.centerx,
+                                            top=card.top + 18))
+
+        # Body lines
+        lines = [
+            ("Real-time recording", theme.TEXT_BRIGHT),
+            ("  1. Tap an empty pattern slot in the grid to select it.", theme.TEXT),
+            ("  2. On the SP-404: press REC, then PLAY to start recording.", theme.TEXT),
+            ("  3. Perform on the pads in time with the metronome.", theme.TEXT),
+            ("  4. Press REC again to stop — the pattern loops.", theme.TEXT),
+            ("", theme.TEXT),
+            ("Overdub onto an existing pattern", theme.TEXT_BRIGHT),
+            ("  Select the pattern, press REC + PLAY together, then play.", theme.TEXT),
+            ("", theme.TEXT),
+            ("Step edit", theme.TEXT_BRIGHT),
+            ("  On the SP: hold SHIFT + press PATTERN to enter step edit.", theme.TEXT),
+            ("  Use VALUE knob to navigate; tap pads to add/remove hits.", theme.TEXT),
+            ("", theme.TEXT),
+            ("(Tap anywhere to dismiss)", theme.TEXT_DIM),
+        ]
+        ly = card.top + 60
+        for text, color in lines:
+            if not text:
+                ly += 8
+                continue
+            font = f_med if color == theme.TEXT_BRIGHT else f_small
+            ts = font.render(text, True, color)
+            surface.blit(ts, (card.x + 24, ly))
+            ly += ts.get_height() + 4
 
     def _handle_seq_click(self, mx, my):
         """Handle clicks in sequencer mode."""
@@ -409,10 +547,15 @@ class P6PatternScreen:
 
         if self._mode == "grid":
             self._draw_grid(surface, f_small, f_mono)
+            self._draw_grid_transport(surface, f_small, f_med)
         elif self._mode == "chain":
             self._draw_chain(surface, f_small, f_med, f_mono)
         else:
             self._draw_seq(surface, f_small, f_med, f_mono)
+
+        # Help overlay (only meaningful in grid mode but harmless elsewhere)
+        if self._show_record_help:
+            self._draw_record_help_overlay(surface, f_small, f_med, f_large)
 
     def _draw_grid(self, surface, f_small, f_mono):
         active = self.app.p6.state.active_pattern if self.app.p6 else 0

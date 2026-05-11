@@ -174,7 +174,12 @@ class DeviceWorkspaceScreen:
                                             start_octave=2, root_note=60)
 
     def on_exit(self):
-        if not self.app.recorder.is_recording:
+        # Preserve any active MON route — see p6_session_screen.on_exit
+        # for the full reasoning. Tearing down monitoring here is what
+        # caused MON-then-double-tap to silently collapse the route and
+        # produce SP-feedback when External Source was on.
+        if (not self.app.recorder.is_recording
+                and not getattr(self.app, "_monitor_source", "")):
             self.app.recorder.stop_monitoring()
         # Disable chromatic mode + release all latched notes — unless the
         # user explicitly enabled KEEP ACTIVE so they can keep playing
@@ -192,7 +197,7 @@ class DeviceWorkspaceScreen:
                 ("control", "CONTROL"),
                 ("twister", "TWISTER"),
                 ("keys", "KEYS"),
-                ("sequence", "SEQUENCE"),
+                ("pattern", "PATTERN"),
                 ("looper", "LOOPER"),
                 ("dj", "DJ"),
             ]
@@ -390,7 +395,7 @@ class DeviceWorkspaceScreen:
                     self._handle_p6_clicks(mx, my)
             elif tab_key == "twister":
                 self._handle_twister_grid_clicks(mx, my)
-            elif tab_key in ("pattern", "sequence"):
+            elif tab_key == "pattern":
                 self._handle_pattern_clicks(mx, my)
             elif tab_key == "chain":
                 self._handle_chain_tab_clicks(mx, my)
@@ -768,7 +773,15 @@ class DeviceWorkspaceScreen:
 
         # ── BPM + Transport (bottom-left overlay) ────────────────────
         if midi:
-            bpm = midi.state.bpm
+            # When LINK is on for this device, master_clock is the
+            # authoritative tempo. When LINK is off, the device runs
+            # on its own clock so show what it echoes back (state.bpm).
+            mc = getattr(self.app, "master_clock", None)
+            link_on = self.app.is_device_clock_enabled(self._device_key)
+            if link_on:
+                bpm = mc.get_bpm() if mc is not None else midi.state.bpm
+            else:
+                bpm = midi.state.bpm or (mc.get_bpm() if mc is not None else 120.0)
             bpm_y = scope_rect.bottom - 24
             bpm_surf = f_hero.render(f"{bpm:.0f}", True, self._device_color)
             surface.blit(bpm_surf, (scope_rect.x + 6, bpm_y - 14))
@@ -995,7 +1008,7 @@ class DeviceWorkspaceScreen:
 
     # ── Other tabs ───────────────────────────────────────────────────
 
-    # ── Pattern / Sequence Grid ──────────────────────────────────────
+    # ── Pattern Grid ─────────────────────────────────────────────────
 
     def _pattern_grid_layout(self):
         """Returns (cols, rows, cell_w, cell_h, start_x, start_y, pattern_count)."""
@@ -1035,7 +1048,7 @@ class DeviceWorkspaceScreen:
         midi = self.app._midi_connections.get(self._device_key)
         current = midi.state.active_pattern + 1 if midi else 1
         max_pat = getattr(dev, "pattern_count", 0)
-        title = "PATTERNS" if self._device_key == "P-6" else "SEQUENCES"
+        title = "PATTERNS"
 
         hdr_y = self._controls_top + 4
         surf = f_med.render(title, True, self._device_color)

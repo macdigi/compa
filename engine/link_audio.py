@@ -31,9 +31,14 @@ pylinkaudio Link instance is a separate cleanup.
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+
+try:
+    import sounddevice as sd
+except ImportError:
+    sd = None
 
 log = logging.getLogger(__name__)
 
@@ -280,3 +285,222 @@ class LinkAudioBroadcaster:
             if abs(time.monotonic() - start - n_sent * period) > 10.0:
                 start = time.monotonic()
                 n_sent = 0
+
+
+class LinkAudioReceiver:
+    """Subscribes to a Link Audio channel from another peer (e.g. Live)
+    and pipes the received audio to a USB output device.
+
+    Shares the LinkAudioBroadcaster's pylinkaudio.LinkAudio instance so
+    Compa shows up as a single peer in Live's UI rather than two.
+
+    Architecture (mirror of the broadcaster, in reverse):
+
+        Link recv worker ──push()──► ring buffer
+                                          │
+                                          ▼
+                                 OutputStream callback
+                                          │
+                                          ▼
+                                       USB out
+
+    The recv worker watches link.channels() for a non-self channel and
+    subscribes via AudioSource. Buffers arrive at 48kHz int16 stereo
+    (Link Audio's wire format); we convert to float32 and resample if
+    the destination USB device runs at a different rate.
+    """
+
+    def __init__(self, broadcaster: "LinkAudioBroadcaster"):
+        self._broadcaster = broadcaster
+        self._source: Optional[Any] = None
+        self._channel_id: Optional[Any] = None
+        self._channel_name: Optional[str] = None
+        self._worker: Optional[threading.Thread] = None
+        self._worker_stop = threading.Event()
+        # USB output side
+        self._out_stream: Optional["sd.OutputStream"] = None
+        self._out_rate: int = 0
+        self._out_device: Optional[int] = None
+        # Ring buffer (float32 stereo) at the OUTPUT device's rate
+        self._ring: Optional[np.ndarray] = None
+        self._ring_frames: int = 0
+        self._ring_lock = threading.Lock()
+        self._wpos: int = 0  # cumulative frames written
+        self._rpos: int = 0  # cumulative frames read
+        # Resampler if Link's 48kHz != device rate
+        self._resampler = None
+
+    @property
+    def active(self) -> bool:
+        return self._out_stream is not None
+
+    @property
+    def channel_name(self) -> Optional[str]:
+        return self._channel_name
+
+    def start(self, device_idx: int, dst_rate: int) -> bool:
+        """Begin receiving Link Audio and routing it to device_idx."""
+        if sd is None:
+            return False
+        link = getattr(self._broadcaster, "_link", None)
+        if link is None:
+            print("Link RX: broadcaster not started", flush=True)
+            return False
+        self.stop()
+        try:
+            # 500ms ring buffer, 150ms silence prefill (same shape as MON)
+            buf_frames = max(int(0.5 * dst_rate), 8192)
+            prefill = int(0.15 * dst_rate)
+            with self._ring_lock:
+                self._ring = np.zeros((buf_frames, CHANNELS), dtype=np.float32)
+                self._ring_frames = buf_frames
+                self._wpos = prefill
+                self._rpos = 0
+            self._out_rate = dst_rate
+            self._out_device = device_idx
+            # Set up resampler if needed (Link is fixed at 48kHz)
+            if dst_rate != DEFAULT_SAMPLE_RATE:
+                from engine.p6_recorder import _LinearResampler
+                self._resampler = _LinearResampler(
+                    DEFAULT_SAMPLE_RATE, dst_rate, CHANNELS)
+            else:
+                self._resampler = None
+
+            self._out_stream = sd.OutputStream(
+                device=device_idx,
+                samplerate=dst_rate,
+                channels=CHANNELS,
+                dtype="float32",
+                blocksize=512,
+                latency="high",
+                callback=self._output_callback,
+            )
+            self._out_stream.start()
+
+            self._worker_stop.clear()
+            self._worker = threading.Thread(
+                target=self._recv_worker, name="LinkAudioRecv", daemon=True)
+            self._worker.start()
+            print(f"Link RX: device={device_idx} @ {dst_rate}Hz "
+                  f"(resample={'yes' if self._resampler else 'no'})",
+                  flush=True)
+            return True
+        except Exception as e:
+            print(f"Link RX: start failed ({e})", flush=True)
+            self._cleanup()
+            return False
+
+    def stop(self) -> None:
+        if self._worker is not None or self._out_stream is not None:
+            self._worker_stop.set()
+            if self._worker is not None:
+                self._worker.join(timeout=1.0)
+            print("Link RX: stopped", flush=True)
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        self._worker = None
+        if self._out_stream is not None:
+            try:
+                self._out_stream.stop()
+                self._out_stream.close()
+            except Exception:
+                pass
+            self._out_stream = None
+        self._source = None
+        self._channel_id = None
+        self._channel_name = None
+        with self._ring_lock:
+            self._ring = None
+            self._ring_frames = 0
+            self._wpos = 0
+            self._rpos = 0
+        self._resampler = None
+
+    # ── Output callback (USB device) ────────────────────────────────
+
+    def _output_callback(self, outdata: np.ndarray, frames: int,
+                         time_info, status) -> None:
+        with self._ring_lock:
+            buf = self._ring
+            if buf is None:
+                outdata.fill(0)
+                return
+            n = self._ring_frames
+            avail = self._wpos - self._rpos
+            take = min(frames, max(0, avail))
+            if take > 0:
+                r = self._rpos % n
+                if r + take <= n:
+                    outdata[:take] = buf[r:r + take]
+                else:
+                    first = n - r
+                    outdata[:first] = buf[r:n]
+                    outdata[first:take] = buf[:take - first]
+                self._rpos += take
+            if take < frames:
+                outdata[take:].fill(0)
+
+    # ── Recv worker (network → ring buffer) ────────────────────────
+
+    def _recv_worker(self) -> None:
+        link = getattr(self._broadcaster, "_link", None)
+        pla = getattr(self._broadcaster, "_pla", None)
+        if link is None or pla is None:
+            return
+        self_peer_name = self._broadcaster.peer_name
+        # Phase 1: wait for a non-self channel to appear
+        while not self._worker_stop.is_set() and self._source is None:
+            try:
+                channels = link.channels()
+            except Exception as e:
+                print(f"Link RX: channels() failed: {e}", flush=True)
+                channels = []
+            for ch in channels:
+                try:
+                    if ch.peer_name != self_peer_name:
+                        self._source = pla.AudioSource(link, ch.id)
+                        self._channel_id = ch.id
+                        self._channel_name = ch.name
+                        print(f"Link RX: subscribed to '{ch.name}' "
+                              f"from peer '{ch.peer_name}'", flush=True)
+                        break
+                except Exception as e:
+                    print(f"Link RX: subscribe failed: {e}", flush=True)
+            if self._source is None:
+                self._worker_stop.wait(0.5)
+        # Phase 2: drain buffers from the source
+        source = self._source
+        while not self._worker_stop.is_set() and source is not None:
+            try:
+                got = source.read(0.1)  # 100ms timeout
+            except Exception as e:
+                print(f"Link RX: read failed: {e}", flush=True)
+                break
+            if got is None:
+                continue
+            arr_int16, _info = got
+            # Convert int16 → float32 in [-1, 1]
+            f32 = arr_int16.astype(np.float32) / 32768.0
+            if self._resampler is not None:
+                f32 = self._resampler.process(f32)
+            n_in = f32.shape[0]
+            if n_in <= 0:
+                continue
+            with self._ring_lock:
+                buf = self._ring
+                if buf is None:
+                    break
+                n = self._ring_frames
+                # Drop oldest if buffer would overflow
+                avail_write = n - (self._wpos - self._rpos)
+                if avail_write < n_in:
+                    self._rpos += (n_in - avail_write)
+                w = self._wpos % n
+                if w + n_in <= n:
+                    buf[w:w + n_in] = f32
+                else:
+                    first = n - w
+                    buf[w:n] = f32[:first]
+                    buf[:n_in - first] = f32[first:]
+                self._wpos += n_in

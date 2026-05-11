@@ -85,8 +85,15 @@ class P6SessionScreen:
 
     def on_exit(self):
         self._save_notes()
-        # Stop monitoring if not recording (same as Record screen)
-        if not self.app.recorder.is_recording:
+        # Stop monitoring if not recording — but ALSO leave it alone when
+        # a MON route is active, otherwise navigating to another screen
+        # silently tears down the route. The next screen's on_enter would
+        # then call switch_device(focus.audio_hint), and if focus equals
+        # the MON destination (e.g. SP), the recorder ends up reading the
+        # same device it's writing to → instant feedback chamber when the
+        # destination has External Source / loopback enabled.
+        if (not self.app.recorder.is_recording
+                and not getattr(self.app, "_monitor_source", "")):
             self.app.recorder.stop_monitoring()
 
     def handle_event(self, event):
@@ -120,19 +127,77 @@ class P6SessionScreen:
 
     def _handle_card_button(self, dev_name: str, action: str):
         """Handle transport button taps on device cards."""
-        if action == "set_monitor":
-            if self.app.monitor_output == dev_name:
-                # Toggle off
-                self.app.monitor_output = ""
-                if self.app._monitor_route and self.app._monitor_route.is_active:
-                    self.app._monitor_route.stop()
-                print(f"Monitor output: OFF", flush=True)
+        if action == "toggle_link":
+            cur = self.app.is_device_clock_enabled(dev_name)
+            self.app.set_device_clock_enabled(dev_name, not cur)
+            return
+        if action == "toggle_rx":
+            cur = getattr(self.app, "_link_rx_target", "")
+            if cur == dev_name:
+                self.app.stop_link_rx()
             else:
-                self.app.set_monitor_output(dev_name)
-                # Re-route current focus through new monitor
-                focus = self.app.device_manager.focus_key
-                if focus and focus != dev_name:
-                    self.app.route_monitor(focus)
+                self.app.start_link_rx(dev_name)
+            return
+        if action == "set_monitor":
+            # MON on card X = "send X's audio out so I can hear it on
+            # whichever other device my headphones are plugged into."
+            # Compa picks the first OTHER connected device with audio
+            # as the destination. Toggle off by pressing MON on the
+            # same card again.
+            cur_src = getattr(self.app, "_monitor_source", "")
+            if cur_src == dev_name:
+                self.app.stop_monitor_route()
+                return
+            connected = self.app.device_manager.connected
+            src = connected.get(dev_name)
+            if not src or not getattr(src, "audio_hint", None):
+                print(f"Monitor: {dev_name} has no audio input", flush=True)
+                return
+            dest = None
+            for k, p in connected.items():
+                if k != dev_name and getattr(p, "audio_hint", None):
+                    dest = k
+                    break
+            if not dest:
+                print(f"Monitor: no other device to route to", flush=True)
+                return
+            # Determine the destination's preferred rate so we can bind
+            # the source at the same rate — matching rates on both sides
+            # of the ring buffer means no resampling is needed.
+            dst_rate = 0
+            dst_idx = None
+            try:
+                from engine.audio_router import find_device_index
+                import sounddevice as sd
+                dst_profile = connected.get(dest)
+                dst_idx = find_device_index(dst_profile.audio_hint) if dst_profile else None
+                if dst_idx is not None:
+                    info = sd.query_devices(dst_idx)
+                    dst_rate = int(info.get("default_samplerate", 0))
+            except Exception as e:
+                print(f"Monitor: rate probe failed: {e}", flush=True)
+            # Release the destination device from any other route (RX
+            # or radio) that's currently holding its OutputStream.
+            if dst_idx is not None:
+                self.app._release_device(dst_idx)
+            # CRITICAL: close any existing monitor OUTPUT stream BEFORE
+            # touching the recorder INPUT. Otherwise — if you're swapping
+            # MON from "X→Y" to "Y→X" — there's a window where the input
+            # is the new source (Y) but the output is still on the old
+            # destination (also Y), creating a digital feedback loop the
+            # moment SP-404 (or any device with USB main-mix loopback)
+            # routes USB-IN back to USB-OUT.
+            self.app.recorder.stop_monitor_output()
+            # Bind recorder to source at the matching rate. Clear
+            # _monitor_source first so switch_device isn't blocked by the
+            # switch_focus guard.
+            self.app._monitor_source = ""
+            self.app.recorder.switch_device(src.audio_hint, preferred_rate=dst_rate)
+            if not self.app.recorder._monitoring:
+                self.app.recorder.start_monitoring()
+            self.app.set_monitor_output(dest)
+            self.app.route_monitor(dev_name)
+            self.app._monitor_source = dev_name
             return
 
         midi = self.app._midi_connections.get(dev_name)
@@ -153,13 +218,30 @@ class P6SessionScreen:
             if self.app.recorder.is_recording:
                 self.app.recorder.stop_recording()
             else:
-                # Switch audio source to this device and start recording
+                # Switch audio source to this device and start recording.
+                # Note: any default pre-roll set in settings is applied
+                # automatically inside start_recording.
                 dev = self.app.device_manager.connected.get(dev_name)
                 if dev and dev.audio_hint:
                     self.app.recorder.switch_device(dev.audio_hint)
                 meta = {"bpm_at_record": midi.state.bpm,
                         "pattern_at_record": midi.state.active_pattern}
                 self.app.recorder.start_recording(metadata=meta)
+        elif action == "recall_rec":
+            # +REC: dump entire recall buffer + keep recording in same file.
+            # No-op if already recording (you'd be amending mid-take which
+            # would give you nothing useful — STOP first, then +REC).
+            if self.app.recorder.is_recording:
+                return
+            dev = self.app.device_manager.connected.get(dev_name)
+            if dev and dev.audio_hint:
+                self.app.recorder.switch_device(dev.audio_hint)
+            meta = {"bpm_at_record": midi.state.bpm,
+                    "pattern_at_record": midi.state.active_pattern,
+                    "started_via": "recall_continue"}
+            path = self.app.recorder.recall_and_continue(metadata=meta)
+            if path:
+                print(f"+REC: recall→continue → {path}", flush=True)
 
     def update(self):
         # Smooth level meters
@@ -327,7 +409,7 @@ class P6SessionScreen:
             cy += 14
 
             # ── Row 2: Connection + audio specs + headphone button ────
-            is_monitor_out = (short_name == self.app.monitor_output)
+            is_monitor_out = (short_name == getattr(self.app, "_monitor_source", ""))
             if is_connected:
                 pygame.draw.circle(surface, theme.GREEN, (cx + 4, cy + 5), 3)
             else:
@@ -343,13 +425,43 @@ class P6SessionScreen:
             hp_rect = pygame.Rect(card_rect.right - 62, cy - 2, 52, 16)
             if is_monitor_out:
                 pygame.draw.rect(surface, device_color, hp_rect, border_radius=3)
-                surf = f_tiny.render("OUT *", True, theme.BG)
+                surf = f_tiny.render("MON", True, theme.BG)
             else:
                 pygame.draw.rect(surface, theme.BUTTON_BG, hp_rect, border_radius=3)
                 pygame.draw.rect(surface, theme.BORDER, hp_rect, 1, border_radius=3)
-                surf = f_tiny.render("OUT *", True, theme.TEXT_DIM)
+                surf = f_tiny.render("MON", True, theme.TEXT_DIM)
             surface.blit(surf, surf.get_rect(center=hp_rect.center))
             self._card_buttons.append((hp_rect, short_name, "set_monitor"))
+
+            # RX — receive Link Audio (e.g. from Live) and play it on
+            # this device's USB output. Mutex with MON for the same
+            # device since both want the same OutputStream.
+            is_link_rx = (short_name == getattr(self.app, "_link_rx_target", ""))
+            rx_rect = pygame.Rect(card_rect.right - 174, cy - 2, 52, 16)
+            if is_link_rx:
+                pygame.draw.rect(surface, theme.ACCENT, rx_rect, border_radius=3)
+                surf = f_tiny.render("RX", True, theme.BG)
+            else:
+                pygame.draw.rect(surface, theme.BUTTON_BG, rx_rect, border_radius=3)
+                pygame.draw.rect(surface, theme.BORDER, rx_rect, 1, border_radius=3)
+                surf = f_tiny.render("RX", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=rx_rect.center))
+            self._card_buttons.append((rx_rect, short_name, "toggle_rx"))
+
+            # LINK toggle (left of OUT) — drives whether master_clock
+            # pushes 0xF8 ticks to this device. ON = device follows
+            # Compa/Link tempo; OFF = device runs on its own clock.
+            link_on = self.app.is_device_clock_enabled(short_name)
+            link_rect = pygame.Rect(card_rect.right - 118, cy - 2, 52, 16)
+            if link_on:
+                pygame.draw.rect(surface, device_color, link_rect, border_radius=3)
+                surf = f_tiny.render("LINK", True, theme.BG)
+            else:
+                pygame.draw.rect(surface, theme.BUTTON_BG, link_rect, border_radius=3)
+                pygame.draw.rect(surface, theme.BORDER, link_rect, 1, border_radius=3)
+                surf = f_tiny.render("LINK", True, theme.TEXT_DIM)
+            surface.blit(surf, surf.get_rect(center=link_rect.center))
+            self._card_buttons.append((link_rect, short_name, "toggle_link"))
 
             cy += 14
 
@@ -402,7 +514,16 @@ class P6SessionScreen:
 
             # ── Row 4: BPM + Pattern ─────────────────────────────────
             if midi:
-                bpm = midi.state.bpm
+                # When LINK is on for this device, master_clock is the
+                # authoritative tempo. When LINK is off, the device
+                # runs on its own clock so show what it echoes back
+                # (state.bpm), falling back to master_clock if it
+                # isn't echoing yet.
+                mc = getattr(self.app, "master_clock", None)
+                if self.app.is_device_clock_enabled(short_name):
+                    bpm = mc.get_bpm() if mc is not None else midi.state.bpm
+                else:
+                    bpm = midi.state.bpm or (mc.get_bpm() if mc is not None else 120.0)
                 surf = f_hero.render(f"{bpm:.0f}", True, device_color)
                 surface.blit(surf, (cx, cy - 4))
                 bpm_w = surf.get_width()
@@ -420,10 +541,15 @@ class P6SessionScreen:
                 surface.blit(surf, (cx, cy))
             cy += 38
 
-            # ── Row 5: Transport buttons ─────────────────────────────
+            # ── Row 5: Transport buttons (PLAY / REC / +REC / STOP / RCL) ──
+            #   +REC = recall-and-continue: dump the entire current recall
+            #   buffer to a new WAV, then keep recording into the same file.
+            #   The "I forgot to hit record" rescue button.
             if midi:
-                btn_w = min(50, (inner_w - 12) // 3)
+                # 5 columns, 4 gaps. btn_w capped so labels stay readable.
                 btn_h = 24
+                gap = 4
+                btn_w = min(50, max(36, (inner_w - 16 - 16 - 4 * gap) // 5))
 
                 # Play/Stop state indicator
                 if midi.state.playing:
@@ -433,26 +559,35 @@ class P6SessionScreen:
 
                 # Transport buttons
                 bx = cx + 16
-                play_rect = pygame.Rect(bx, cy, btn_w, btn_h)
+                is_rec = self.app.recorder.is_recording
+
+                play_rect = pygame.Rect(bx + 0 * (btn_w + gap), cy, btn_w, btn_h)
                 play_bg = theme.GREEN if midi.state.playing else theme.BUTTON_BG
                 pygame.draw.rect(surface, play_bg, play_rect, border_radius=4)
                 surf = f_tiny.render("PLAY", True, theme.BG if midi.state.playing else theme.TEXT)
                 surface.blit(surf, surf.get_rect(center=play_rect.center))
 
-                rec_rect = pygame.Rect(bx + btn_w + 4, cy, btn_w, btn_h)
-                is_rec = self.app.recorder.is_recording
+                rec_rect = pygame.Rect(bx + 1 * (btn_w + gap), cy, btn_w, btn_h)
                 rec_bg = theme.RED if is_rec else theme.BUTTON_BG
                 pygame.draw.rect(surface, rec_bg, rec_rect, border_radius=4)
                 surf = f_tiny.render("REC", True, theme.TEXT_BRIGHT if is_rec else theme.TEXT)
                 surface.blit(surf, surf.get_rect(center=rec_rect.center))
 
-                stop_rect = pygame.Rect(bx + 2 * (btn_w + 4), cy, btn_w, btn_h)
+                # +REC = recall + continue. Dim while a take's already running.
+                plus_rec_rect = pygame.Rect(bx + 2 * (btn_w + gap), cy, btn_w, btn_h)
+                plus_bg = theme.BUTTON_BG if is_rec else (140, 35, 35)
+                plus_tc = theme.TEXT_DIM if is_rec else theme.TEXT_BRIGHT
+                pygame.draw.rect(surface, plus_bg, plus_rect := plus_rec_rect, border_radius=4)
+                surf = f_tiny.render("+REC", True, plus_tc)
+                surface.blit(surf, surf.get_rect(center=plus_rec_rect.center))
+
+                stop_rect = pygame.Rect(bx + 3 * (btn_w + gap), cy, btn_w, btn_h)
                 pygame.draw.rect(surface, theme.BUTTON_BG, stop_rect, border_radius=4)
                 surf = f_tiny.render("STOP", True, theme.TEXT)
                 surface.blit(surf, surf.get_rect(center=stop_rect.center))
 
-                # RECALL button
-                recall_rect = pygame.Rect(bx + 3 * (btn_w + 4), cy, btn_w, btn_h)
+                # RECALL button (save buffer only, no continue)
+                recall_rect = pygame.Rect(bx + 4 * (btn_w + gap), cy, btn_w, btn_h)
                 recall_secs = self.app.recorder.recall_seconds_available
                 recall_bg = theme.ACCENT if recall_secs >= 1 else theme.BUTTON_BG
                 recall_tc = theme.BG if recall_secs >= 1 else theme.TEXT_DIM
@@ -463,6 +598,7 @@ class P6SessionScreen:
                 # Store button rects for click handling
                 self._card_buttons.append((play_rect, short_name, "play"))
                 self._card_buttons.append((rec_rect, short_name, "rec"))
+                self._card_buttons.append((plus_rec_rect, short_name, "recall_rec"))
                 self._card_buttons.append((stop_rect, short_name, "stop"))
                 self._card_buttons.append((recall_rect, short_name, "recall"))
 
@@ -573,7 +709,8 @@ class P6SessionScreen:
             surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2, top=200))
 
         # ── Bottom info strip ────────────────────────────────────────
-        bpm = self.app.p6.state.bpm if self.app.p6 else 120.0
+        mc = getattr(self.app, "master_clock", None)
+        bpm = mc.get_bpm() if mc is not None else (self.app.p6.state.bpm if self.app.p6 else 120.0)
         content_bottom = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 50
         col_y = content_bottom
 
@@ -582,7 +719,8 @@ class P6SessionScreen:
         left_x = 16
 
         # Resample calc (compact inline)
-        bpm = self.app.p6.state.bpm if self.app.p6 else 120.0
+        mc = getattr(self.app, "master_clock", None)
+        bpm = mc.get_bpm() if mc is not None else (self.app.p6.state.bpm if self.app.p6 else 120.0)
         from engine.p6_presets import resample_calc
         calc = resample_calc(bpm)
         surf = f_tiny.render(f"RESAMPLE @ {bpm:.0f}", True, theme.TEXT_DIM)

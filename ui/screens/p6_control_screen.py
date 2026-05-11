@@ -394,10 +394,9 @@ class P6ControlScreen:
             if self._handle_looper_click(mx, my):
                 return
 
-        # DJ Mode tab — crossfader + button clicks
-        if tab_key == "dj_mode" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            mx, my = event.pos
-            if self._handle_dj_click(mx, my):
+        # DJ Mode tab — full event handling (faders w/ drag, transport, FX rack)
+        if tab_key == "dj_mode":
+            if self._handle_dj_event(event):
                 return
 
         # LFO tab — buttons
@@ -818,170 +817,534 @@ class P6ControlScreen:
         surf = f_small.render(f"Set {dev} SYNC = USB to receive clock", True, theme.TEXT_DIM)
         surface.blit(surf, surf.get_rect(centerx=cx, top=flash_y + 55))
 
-    # ── Looper tab (big buttons for SP-404 looper) ───────────────────
+    # ── Looper tab — performance-grade controls ──────────────────────
+    #
+    # Layout:
+    #   ┌──────────────────────────────────────────────────┐
+    #   │ ●  RECORDING                  SP-404 LOOPER · Ch1│  ← status badge
+    #   ├──────────────────────────────────────────────────┤
+    #   │                                                   │
+    #   │            ┌──────────────────────┐              │
+    #   │            │     ●  REC / STOP    │              │  ← marquee REC
+    #   │            └──────────────────────┘              │
+    #   │                                                   │
+    #   │  ┌──────────────┐    ┌──────────────┐            │
+    #   │  │   OVERDUB    │    │     STOP     │            │
+    #   │  └──────────────┘    └──────────────┘            │
+    #   │                                                   │
+    #   │  ┌────┐ ┌────┐ ┌──────┐ ┌─────────────┐          │
+    #   │  │UNDO│ │REDO│ │DELETE│ │ RESET TEMPO │          │
+    #   │  └────┘ └────┘ └──────┘ └─────────────┘          │
+    #   │                                                   │
+    #   │              ⊙  PLAY RATE  64                     │  ← knob
+    #   │                                                   │
+    #   │  Tip: enter looper on the SP first (LOOPER btn)   │
+    #   └──────────────────────────────────────────────────┘
+    #
+    # Status is best-effort: we track what we *sent* to infer state. The SP
+    # doesn't echo looper state back, but tracking what we sent is enough
+    # for visual feedback during a performance.
+
+    _LOOP_STATE_MAP = {
+        "idle":        ("READY",       (28, 28, 38),    (140, 140, 155)),
+        "recording":   ("RECORDING",   (210, 55, 55),   (248, 248, 252)),
+        "playing":     ("PLAYING",     (50, 195, 70),   (10, 10, 14)),
+        "overdubbing": ("OVERDUBBING", (210, 195, 40),  (10, 10, 14)),
+    }
 
     def _draw_looper_tab(self, surface, f_small, f_med):
-        """Draw large performance buttons for the SP-404 looper."""
+        """Big performance buttons + state-tracking status badge."""
         f_large = theme.font("large")
-        y_start = 90
-        btn_w = 180
-        btn_h = 70
-        gap = 16
-        cols = 3
-        x_start = (theme.SCREEN_WIDTH - cols * btn_w - (cols - 1) * gap) // 2
 
-        buttons = [
-            ("REC", theme.RED, 88, 127),
-            ("OVERDUB", theme.YELLOW, 89, 127),
-            ("STOP", theme.BUTTON_BG, 85, 127),
-            ("DELETE", (120, 40, 40), 87, 127),
-            ("UNDO", theme.ACCENT_DIM, 91, 127),
-            ("REDO", theme.ACCENT_DIM, 91, 0),
+        # Lazy state — best-effort tracking of looper state from sent CCs
+        if not hasattr(self, "_loop_state"):
+            self._loop_state = "idle"
+
+        cx = theme.SCREEN_WIDTH // 2
+        margin = 12
+
+        # Status badge across the top
+        status_y = 84
+        status_h = 40
+        status_rect = pygame.Rect(margin, status_y,
+                                  theme.SCREEN_WIDTH - 2 * margin, status_h)
+        label, bg, fg = self._LOOP_STATE_MAP[self._loop_state]
+        pygame.draw.rect(surface, bg, status_rect, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, status_rect, 1, border_radius=8)
+        ls = f_med.render(label, True, fg)
+        surface.blit(ls, ls.get_rect(centerx=status_rect.centerx,
+                                      centery=status_rect.centery))
+        rs = f_small.render("SP-404 LOOPER · Ch1", True, fg)
+        surface.blit(rs, rs.get_rect(centery=status_rect.centery,
+                                      right=status_rect.right - 14))
+
+        # Marquee REC button
+        rec_y = status_y + status_h + 18
+        rec_w = min(420, theme.SCREEN_WIDTH - 2 * margin - 80)
+        rec_h = 86
+        rec_rect = pygame.Rect(cx - rec_w // 2, rec_y, rec_w, rec_h)
+        is_recording = self._loop_state == "recording"
+        rec_bg = theme.RED if is_recording else (170, 35, 35)
+        pygame.draw.rect(surface, rec_bg, rec_rect, border_radius=14)
+        pygame.draw.rect(surface, theme.BORDER, rec_rect, 2, border_radius=14)
+        rec_label = "■  STOP RECORDING" if is_recording else "●  REC"
+        rs = f_large.render(rec_label, True, theme.TEXT_BRIGHT)
+        surface.blit(rs, rs.get_rect(center=rec_rect.center))
+        self._loop_rec_rect = rec_rect
+
+        # OVERDUB + STOP secondary row
+        sec_y = rec_y + rec_h + 14
+        sec_h = 52
+        sec_w = (theme.SCREEN_WIDTH - 2 * margin - 12) // 2
+        is_overdub = self._loop_state == "overdubbing"
+
+        od_rect = pygame.Rect(margin, sec_y, sec_w, sec_h)
+        od_bg = theme.YELLOW if is_overdub else theme.BUTTON_BG
+        od_fg = theme.BG if is_overdub else theme.TEXT_BRIGHT
+        pygame.draw.rect(surface, od_bg, od_rect, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, od_rect, 1, border_radius=8)
+        ods = f_med.render("OVERDUB", True, od_fg)
+        surface.blit(ods, ods.get_rect(center=od_rect.center))
+
+        st_rect = pygame.Rect(margin + sec_w + 12, sec_y, sec_w, sec_h)
+        pygame.draw.rect(surface, theme.BUTTON_BG, st_rect, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, st_rect, 1, border_radius=8)
+        sts = f_med.render("STOP", True, theme.TEXT_BRIGHT)
+        surface.blit(sts, sts.get_rect(center=st_rect.center))
+
+        self._loop_overdub_rect = od_rect
+        self._loop_stop_rect = st_rect
+
+        # Utility row: UNDO / REDO / DELETE / RESET TEMPO
+        util_y = sec_y + sec_h + 12
+        util_h = 44
+        util_specs = [
+            ("UNDO",        91, 127, theme.ACCENT_DIM),
+            ("REDO",        91,   0, theme.ACCENT_DIM),
+            ("DELETE",      87, 127, (120, 40, 40)),
+            ("RESET TEMPO", 86, 127, theme.BUTTON_BG),
         ]
+        n = len(util_specs)
+        util_w = (theme.SCREEN_WIDTH - 2 * margin - 8 * (n - 1)) // n
+        self._loop_util_rects = []
+        for i, (lbl, cc, val, bg_color) in enumerate(util_specs):
+            bx = margin + i * (util_w + 8)
+            rect = pygame.Rect(bx, util_y, util_w, util_h)
+            pygame.draw.rect(surface, bg_color, rect, border_radius=6)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=6)
+            us = f_small.render(lbl, True, theme.TEXT_BRIGHT)
+            surface.blit(us, us.get_rect(center=rect.center))
+            self._loop_util_rects.append((rect, cc, val))
 
-        self._looper_btn_rects = []
-        for i, (label, bg, cc, val) in enumerate(buttons):
-            row = i // cols
-            col = i % cols
-            x = x_start + col * (btn_w + gap)
-            y = y_start + row * (btn_h + gap)
-            rect = pygame.Rect(x, y, btn_w, btn_h)
-
-            pygame.draw.rect(surface, bg, rect, border_radius=10)
-            pygame.draw.rect(surface, theme.BORDER, rect, 2, border_radius=10)
-
-            surf = f_large.render(label, True, theme.TEXT_BRIGHT)
-            surface.blit(surf, surf.get_rect(center=rect.center))
-
-            self._looper_btn_rects.append((rect, cc, val))
-
-        # BPM/Rate knob (CC#90) — draw as regular knob below buttons
-        rate_y = y_start + 2 * (btn_h + gap) + 20
-        knobs = self._knobs.get("looper", [])
-        for knob, cc in knobs:
-            if cc == 90:  # BPM/Play Rate
-                knob.center = (theme.SCREEN_WIDTH // 2, rate_y + 40)
+        # Rate knob (CC#90, 0-127, 64=normal)
+        knob_y = util_y + util_h + 22
+        for knob, cc in self._knobs.get("looper", []):
+            if cc == 90:
+                knob.center = (cx, knob_y + 26)
+                knob.radius = 26
+                knob.label = "PLAY RATE"
                 knob.draw(surface)
 
-        # Hint
-        surf = f_small.render("SP-404 Looper — Ch1 | Tap buttons to trigger",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(centerx=theme.SCREEN_WIDTH // 2,
-                                          top=rate_y + 90))
+        # Helper hint at bottom
+        hint_y = knob_y + 84
+        if hint_y < theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 14:
+            tip = "Tip: activate the looper on the SP-404 first (LOOPER button on the unit)."
+            ts = f_small.render(tip, True, theme.TEXT_DIM)
+            surface.blit(ts, ts.get_rect(centerx=cx, top=hint_y))
 
     def _handle_looper_click(self, mx, my):
-        """Handle clicks on looper buttons — send momentary CC triggers."""
-        if not hasattr(self, "_looper_btn_rects"):
-            return False
-        for rect, cc, val in self._looper_btn_rects:
-            if rect.collidepoint(mx, my):
+        """Send looper CCs and update local state for visual feedback."""
+        ch = _SP404_CATEGORY_CHANNELS.get("looper", 0)
+
+        # Marquee REC (toggle: idle/playing → recording, recording → playing)
+        if getattr(self, "_loop_rec_rect", None) and \
+                self._loop_rec_rect.collidepoint(mx, my):
+            if self._loop_state == "recording":
                 if self.app.p6:
-                    ch = _SP404_CATEGORY_CHANNELS.get("looper", 0)
-                    self.app.p6.send_cc(cc, val, channel=ch)
-                return True
-        return False
-
-    # ── DJ Mode tab (crossfader + deck controls) ─────────────────────
-
-    def _draw_dj_tab(self, surface, f_small, f_med):
-        """Draw DJ mode controls — crossfader + transport buttons."""
-        f_large = theme.font("large")
-        cx = theme.SCREEN_WIDTH // 2
-
-        # Crossfader — wide horizontal bar
-        fader_y = 100
-        fader_w = theme.SCREEN_WIDTH - 100
-        fader_h = 40
-        fader_rect = pygame.Rect(50, fader_y, fader_w, fader_h)
-        pygame.draw.rect(surface, theme.KNOB_BG, fader_rect, border_radius=6)
-        pygame.draw.rect(surface, theme.BORDER, fader_rect, 1, border_radius=6)
-
-        # Crossfader thumb
-        knobs = self._knobs.get("dj_mode", [])
-        xfade_val = 64
-        for knob, cc in knobs:
-            if cc == 8:  # Crossfade
-                xfade_val = int(knob.value)
-        thumb_x = 50 + int((xfade_val / 127.0) * fader_w)
-        thumb_rect = pygame.Rect(thumb_x - 15, fader_y - 5, 30, fader_h + 10)
-        pygame.draw.rect(surface, theme.ACCENT, thumb_rect, border_radius=4)
-
-        surf = f_small.render("CH1", True, theme.TEXT_DIM)
-        surface.blit(surf, (55, fader_y - 20))
-        surf = f_small.render("CH2", True, theme.TEXT_DIM)
-        surface.blit(surf, (50 + fader_w - 30, fader_y - 20))
-        surf = f_small.render("CROSSFADER", True, theme.ACCENT)
-        surface.blit(surf, surf.get_rect(centerx=cx, top=fader_y + fader_h + 6))
-
-        self._dj_fader_rect = fader_rect
-
-        # Volume knobs (per deck)
-        vol_y = fader_y + fader_h + 50
-        for knob, cc in knobs:
-            if cc == 7:  # Volume
-                knob.center = (150, vol_y + 50)
-                knob.label = "DECK VOL"
-                knob.draw(surface)
-
-        # Transport buttons
-        btn_y = vol_y + 20
-        btn_w = 110
-        btn_h = 50
-        btn_x = 350
-
-        dj_buttons = [
-            ("PLAY", theme.GREEN, 20, 127),
-            ("PAUSE", theme.BUTTON_BG, 20, 0),
-            ("SYNC", theme.BLUE, 22, 127),
-            ("CUE", theme.YELLOW, 23, 127),
-            ("BEND+", theme.BUTTON_BG, 24, 127),
-            ("BEND-", theme.BUTTON_BG, 25, 127),
-        ]
-
-        self._dj_btn_rects = []
-        for i, (label, bg, cc, val) in enumerate(dj_buttons):
-            row = i // 3
-            col = i % 3
-            x = btn_x + col * (btn_w + 8)
-            y = btn_y + row * (btn_h + 8)
-            rect = pygame.Rect(x, y, btn_w, btn_h)
-
-            pygame.draw.rect(surface, bg, rect, border_radius=8)
-            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
-            surf = f_med.render(label, True, theme.TEXT_BRIGHT)
-            surface.blit(surf, surf.get_rect(center=rect.center))
-
-            self._dj_btn_rects.append((rect, cc, val))
-
-        # Hint
-        hint_y = btn_y + 2 * (btn_h + 8) + 16
-        surf = f_small.render("SP-404 DJ Mode — decks on Ch1/Ch2",
-                             True, theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(centerx=cx, top=hint_y))
-
-    def _handle_dj_click(self, mx, my):
-        """Handle clicks on DJ mode buttons and crossfader."""
-        # Crossfader drag
-        if hasattr(self, "_dj_fader_rect") and self._dj_fader_rect.collidepoint(mx, my):
-            frac = (mx - self._dj_fader_rect.x) / self._dj_fader_rect.width
-            val = int(max(0, min(127, frac * 127)))
-            if self.app.p6:
-                ch = _SP404_CATEGORY_CHANNELS.get("dj_mode", 0)
-                self.app.p6.send_cc(8, val, channel=ch)
-            # Update knob value
-            for knob, cc in self._knobs.get("dj_mode", []):
-                if cc == 8:
-                    knob.value = float(val)
+                    self.app.p6.send_cc(88, 0, channel=ch)
+                self._loop_state = "playing"
+            else:
+                if self.app.p6:
+                    self.app.p6.send_cc(88, 127, channel=ch)
+                self._loop_state = "recording"
             return True
 
-        # Buttons
-        if hasattr(self, "_dj_btn_rects"):
-            for rect, cc, val in self._dj_btn_rects:
+        # OVERDUB toggle
+        if getattr(self, "_loop_overdub_rect", None) and \
+                self._loop_overdub_rect.collidepoint(mx, my):
+            if self.app.p6:
+                self.app.p6.send_cc(89, 127, channel=ch)
+            if self._loop_state == "playing":
+                self._loop_state = "overdubbing"
+            elif self._loop_state == "overdubbing":
+                self._loop_state = "playing"
+            elif self._loop_state == "idle":
+                # Overdub from idle = treat as starting overdub on existing loop
+                self._loop_state = "overdubbing"
+            return True
+
+        # STOP playback
+        if getattr(self, "_loop_stop_rect", None) and \
+                self._loop_stop_rect.collidepoint(mx, my):
+            if self.app.p6:
+                self.app.p6.send_cc(85, 127, channel=ch)
+            self._loop_state = "idle"
+            return True
+
+        # Utility row
+        for rect, cc, val in self._loop_util_rects or []:
+            if rect.collidepoint(mx, my):
+                if self.app.p6:
+                    self.app.p6.send_cc(cc, val, channel=ch)
+                if cc == 87:  # DELETE clears the loop
+                    self._loop_state = "idle"
+                return True
+
+        return False
+
+    # ── DJ Mode tab — split-deck console with per-deck FX racks ──────
+    #
+    # Layout:
+    #   ┌──────────────────────────┬──────────────────────────┐
+    #   │         DECK A           │         DECK B           │
+    #   │  ┌──┐ ┌────┬────┬────┐  │  ┌──┐ ┌────┬────┬────┐  │
+    #   │  │V │ │PLAY│CUE │BND-│  │  │V │ │PLAY│CUE │BND-│  │
+    #   │  │O │ ├────┼────┼────┤  │  │O │ ├────┼────┼────┤  │
+    #   │  │L │ │PAUS│SYNC│BND+│  │  │L │ │PAUS│SYNC│BND+│  │
+    #   │  └──┘ └────┴────┴────┘  │  └──┘ └────┴────┴────┘  │
+    #   │  [◀] [ Tape Echo ON ] [▶]│  [◀] [   (OFF)    ] [▶]│
+    #   │  ( ) ( ) ( ) ( ) ( ) ( ) │  ( ) ( ) ( ) ( ) ( ) ( )│
+    #   └──────────────────────────┴──────────────────────────┘
+    #   ┌──────────────────────────────────────────────────────┐
+    #   │ A ◀━━━━━━━━━━━━━━[█]━━━━━━━━━━━━━━▶ B  CROSSFADER  │
+    #   └──────────────────────────────────────────────────────┘
+    #
+    # Per-deck channel mapping: Deck A → Ch1 (Bus 1 FX), Deck B → Ch2 (Bus 2 FX).
+    # FX knobs reuse the bus1_fx / bus2_fx Knob instances (live-synced via
+    # _sync_knobs); we just reposition them into the deck FX rack each frame.
+
+    def _draw_dj_tab(self, surface, f_small, f_med):
+        """Draw split-deck DJ console with per-deck FX racks + crossfader."""
+        f_large = theme.font("large")
+
+        # Lazy persistent state
+        if not hasattr(self, "_dj_vol"):
+            self._dj_vol = [100.0, 100.0]  # CC#7 per deck (Ch1, Ch2)
+        if not hasattr(self, "_dj_xfade"):
+            self._dj_xfade = 64.0  # CC#8 on Ch1
+        if not hasattr(self, "_dj_drag"):
+            self._dj_drag = None  # None | "xfade" | ("vol", deck_idx)
+
+        # Park dj_mode knobs offscreen — we don't draw them, prevent stray hits
+        for knob, _cc in self._knobs.get("dj_mode", []):
+            knob.center = (-1000, -1000)
+
+        # Hit-test rect bookkeeping (reset per frame)
+        self._dj_btn_rects = []          # [(rect, cc, val, channel)]
+        self._dj_vol_rects = [None, None]
+        self._dj_fx_prev_rects = [None, None]
+        self._dj_fx_next_rects = [None, None]
+        self._dj_fx_toggle_rects = [None, None]
+
+        # Layout — responsive to screen size
+        margin = 8
+        deck_gap = 6
+        deck_top = 84
+
+        usable_bottom = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT - 6
+        crossfader_block_h = 48   # fader 30 + caption 14 + breathing
+        crossfader_gap = 12
+        deck_h = max(220, usable_bottom - deck_top - crossfader_block_h - crossfader_gap)
+        deck_w = (theme.SCREEN_WIDTH - 2 * margin - deck_gap) // 2
+
+        for idx, (label, fx_tab, accent) in enumerate([
+            ("DECK A", "bus1_fx", theme.ACCENT),
+            ("DECK B", "bus2_fx", theme.BLUE),
+        ]):
+            deck_x = margin + idx * (deck_w + deck_gap)
+            self._draw_dj_deck(surface, deck_x, deck_top, deck_w, deck_h,
+                               idx, label, fx_tab, accent,
+                               f_small, f_med, f_large)
+
+        # Crossfader strip across the bottom
+        xf_y = deck_top + deck_h + crossfader_gap
+        xf_rect = pygame.Rect(margin, xf_y, theme.SCREEN_WIDTH - 2 * margin, 30)
+        self._draw_dj_crossfader(surface, xf_rect, f_small, f_med)
+
+    def _draw_dj_deck(self, surface, x, y, w, h, deck_idx, label, fx_tab,
+                      accent, f_small, f_med, f_large):
+        """Draw one DJ deck panel (volume, transport, FX rack)."""
+        # Background panel
+        panel = pygame.Rect(x, y, w, h)
+        pygame.draw.rect(surface, theme.BG_PANEL, panel, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, panel, 1, border_radius=8)
+
+        # Header band
+        header_h = 24
+        header_rect = pygame.Rect(x, y, w, header_h)
+        pygame.draw.rect(surface, accent, header_rect,
+                         border_top_left_radius=8, border_top_right_radius=8)
+        surf = f_med.render(label, True, theme.BG)
+        surface.blit(surf, surf.get_rect(center=header_rect.center))
+
+        # Inner work area
+        inner_x = x + 10
+        inner_y = y + header_h + 8
+        inner_w = w - 20
+
+        # ── Vol fader (vertical, left) + transport (right) ───────────
+        vol_w = 32
+        vol_h = 110
+        vol_rect = pygame.Rect(inner_x, inner_y, vol_w, vol_h)
+        pygame.draw.rect(surface, theme.KNOB_BG, vol_rect, border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER, vol_rect, 1, border_radius=4)
+
+        vol_val = self._dj_vol[deck_idx]
+        thumb_y = vol_rect.bottom - int((vol_val / 127.0) * vol_rect.h)
+        thumb = pygame.Rect(vol_rect.x - 4, thumb_y - 6, vol_rect.w + 8, 12)
+        pygame.draw.rect(surface, accent, thumb, border_radius=3)
+        pygame.draw.rect(surface, theme.BG, thumb, 1, border_radius=3)
+
+        cap = f_small.render("VOL", True, theme.TEXT_DIM)
+        surface.blit(cap, cap.get_rect(centerx=vol_rect.centerx,
+                                        top=vol_rect.bottom + 2))
+        self._dj_vol_rects[deck_idx] = vol_rect
+
+        # Transport buttons — 2 rows × 3 cols, fills space right of vol fader
+        btn_zone_x = inner_x + vol_w + 10
+        btn_zone_w = inner_w - vol_w - 10
+        btn_w = (btn_zone_w - 12) // 3  # 3 cols, 2 gaps of 6
+        btn_h = (vol_h - 6) // 2
+
+        dj_buttons = [
+            ("PLAY",  theme.GREEN,     20, 127),
+            ("CUE",   theme.YELLOW,    23, 127),
+            ("BEND-", theme.BUTTON_BG, 25, 127),
+            ("PAUSE", theme.BUTTON_BG, 20,   0),
+            ("SYNC",  theme.BLUE,      22, 127),
+            ("BEND+", theme.BUTTON_BG, 24, 127),
+        ]
+        for i, (lbl, bg, cc, val) in enumerate(dj_buttons):
+            row = i // 3
+            col = i % 3
+            bx = btn_zone_x + col * (btn_w + 6)
+            by = inner_y + row * (btn_h + 6)
+            rect = pygame.Rect(bx, by, btn_w, btn_h)
+            pygame.draw.rect(surface, bg, rect, border_radius=6)
+            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=6)
+            tsurf = f_small.render(lbl, True, theme.TEXT_BRIGHT)
+            surface.blit(tsurf, tsurf.get_rect(center=rect.center))
+            self._dj_btn_rects.append((rect, cc, val, deck_idx))
+
+        # ── FX Rack ──────────────────────────────────────────────────
+        fx_y = inner_y + vol_h + 22
+        fx_knobs = self._knobs.get(fx_tab, [])
+
+        # Read current FX state from existing knobs (live-synced from SP)
+        fx_on = False
+        fx_idx_val = 0
+        fx_max = max(0, fx_count_for_tab(fx_tab) - 1)
+        for knob, cc in fx_knobs:
+            if cc == 19:
+                fx_on = knob.value >= 64
+            elif cc == 83:
+                fx_idx_val = int(knob.value)
+        fx_name = fx_name_for_tab(fx_tab, fx_idx_val) or "(OFF)"
+
+        # Header row: [◀] [ FX NAME (lit if on) ] [▶]
+        hdr_h = 26
+        prev_rect = pygame.Rect(inner_x, fx_y, 28, hdr_h)
+        next_rect = pygame.Rect(inner_x + inner_w - 28, fx_y, 28, hdr_h)
+        name_rect = pygame.Rect(prev_rect.right + 4, fx_y,
+                                next_rect.left - prev_rect.right - 8, hdr_h)
+
+        for arr_rect, glyph in [(prev_rect, "<"), (next_rect, ">")]:
+            pygame.draw.rect(surface, theme.BUTTON_BG, arr_rect, border_radius=4)
+            pygame.draw.rect(surface, theme.BORDER, arr_rect, 1, border_radius=4)
+            gs = f_med.render(glyph, True, theme.TEXT_BRIGHT)
+            surface.blit(gs, gs.get_rect(center=arr_rect.center))
+
+        name_bg = accent if fx_on else theme.BG_LIGHTER
+        name_fg = theme.BG if fx_on else theme.TEXT
+        pygame.draw.rect(surface, name_bg, name_rect, border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER, name_rect, 1, border_radius=4)
+        # FX name + tiny ON/OFF chip on the right
+        ns = f_med.render(fx_name, True, name_fg)
+        surface.blit(ns, ns.get_rect(centery=name_rect.centery,
+                                      left=name_rect.x + 8))
+        chip_w = 32
+        chip_rect = pygame.Rect(name_rect.right - chip_w - 6,
+                                name_rect.y + 5, chip_w, hdr_h - 10)
+        chip_bg = theme.GREEN if fx_on else theme.BUTTON_BG
+        pygame.draw.rect(surface, chip_bg, chip_rect, border_radius=3)
+        chip_label = "ON" if fx_on else "OFF"
+        cs = f_small.render(chip_label, True, theme.BG if fx_on else theme.TEXT_DIM)
+        surface.blit(cs, cs.get_rect(center=chip_rect.center))
+
+        self._dj_fx_prev_rects[deck_idx] = prev_rect
+        self._dj_fx_next_rects[deck_idx] = next_rect
+        self._dj_fx_toggle_rects[deck_idx] = name_rect
+
+        # 6 control knobs (2 rows × 3 cols) below FX header
+        knobs_y = fx_y + hdr_h + 8
+        knob_radius = 16
+        ctrl_ccs = [16, 17, 18, 80, 81, 82]  # Ctrl 1-6
+        knob_cell_w = inner_w // 3
+        knob_row_h = 44
+
+        for i, target_cc in enumerate(ctrl_ccs):
+            row = i // 3
+            col = i % 3
+            kx = inner_x + col * knob_cell_w + knob_cell_w // 2
+            ky = knobs_y + row * knob_row_h + knob_radius + 2
+            for knob, cc in fx_knobs:
+                if cc == target_cc:
+                    knob.center = (kx, ky)
+                    knob.radius = knob_radius
+                    knob.draw(surface)
+                    break
+
+    def _draw_dj_crossfader(self, surface, rect, f_small, f_med):
+        """Full-width crossfader strip beneath both decks."""
+        pygame.draw.rect(surface, theme.KNOB_BG, rect, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
+        # Center line for reference
+        cy = rect.centery
+        pygame.draw.line(surface, theme.BORDER_LIGHT,
+                         (rect.centerx, rect.y + 4),
+                         (rect.centerx, rect.bottom - 4), 1)
+
+        thumb_x = rect.x + int((self._dj_xfade / 127.0) * rect.w)
+        thumb = pygame.Rect(thumb_x - 16, rect.y - 4, 32, rect.h + 8)
+        # Thumb color blends accent (left) and blue (right) by position
+        t = self._dj_xfade / 127.0
+        ta, tb = theme.ACCENT, theme.BLUE
+        thumb_color = (int(ta[0] + (tb[0]-ta[0]) * t),
+                       int(ta[1] + (tb[1]-ta[1]) * t),
+                       int(ta[2] + (tb[2]-ta[2]) * t))
+        pygame.draw.rect(surface, thumb_color, thumb, border_radius=4)
+        pygame.draw.rect(surface, theme.BG, thumb, 1, border_radius=4)
+
+        # End labels
+        a = f_small.render("A", True, theme.ACCENT)
+        b = f_small.render("B", True, theme.BLUE)
+        surface.blit(a, (rect.x + 8, cy - a.get_height() // 2))
+        surface.blit(b, (rect.right - 8 - b.get_width(),
+                          cy - b.get_height() // 2))
+        cap = f_small.render("CROSSFADER", True, theme.TEXT_DIM)
+        surface.blit(cap, cap.get_rect(centerx=rect.centerx, top=rect.bottom + 2))
+
+        self._dj_fader_rect = rect
+
+    def _dj_set_xfade(self, mx):
+        rect = self._dj_fader_rect
+        frac = (mx - rect.x) / max(1, rect.w)
+        val = int(max(0, min(127, frac * 127)))
+        self._dj_xfade = float(val)
+        if self.app.p6:
+            self.app.p6.send_cc(8, val, channel=0)  # crossfade lives on Ch1
+
+    def _dj_set_vol(self, deck_idx, my):
+        rect = self._dj_vol_rects[deck_idx]
+        if not rect:
+            return
+        frac = 1.0 - (my - rect.y) / max(1, rect.h)
+        val = int(max(0, min(127, frac * 127)))
+        self._dj_vol[deck_idx] = float(val)
+        if self.app.p6:
+            self.app.p6.send_cc(7, val, channel=deck_idx)
+
+    def _handle_dj_event(self, event):
+        """Handle every event on the DJ tab. Returns True if consumed."""
+        # Mouse-down: crossfader / vol fader / transport / FX header
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            mx, my = event.pos
+
+            # Crossfader (start drag)
+            if getattr(self, "_dj_fader_rect", None) and \
+                    self._dj_fader_rect.collidepoint(mx, my):
+                self._dj_drag = "xfade"
+                self._dj_set_xfade(mx)
+                return True
+
+            # Vol fader (start drag)
+            for d_idx, vrect in enumerate(self._dj_vol_rects or []):
+                if vrect and vrect.collidepoint(mx, my):
+                    self._dj_drag = ("vol", d_idx)
+                    self._dj_set_vol(d_idx, my)
+                    return True
+
+            # Transport buttons
+            for rect, cc, val, ch in self._dj_btn_rects or []:
                 if rect.collidepoint(mx, my):
                     if self.app.p6:
-                        ch = _SP404_CATEGORY_CHANNELS.get("dj_mode", 0)
                         self.app.p6.send_cc(cc, val, channel=ch)
+                    self._last_cc = cc
+                    self._last_cc_time = time.monotonic()
                     return True
+
+            # FX header — prev/next/toggle (per deck)
+            for d_idx in range(2):
+                ch = d_idx
+                fx_tab = "bus1_fx" if d_idx == 0 else "bus2_fx"
+                fx_knobs = self._knobs.get(fx_tab, [])
+
+                for rect, action in [
+                    (self._dj_fx_prev_rects[d_idx], "prev"),
+                    (self._dj_fx_next_rects[d_idx], "next"),
+                    (self._dj_fx_toggle_rects[d_idx], "toggle"),
+                ]:
+                    if rect and rect.collidepoint(mx, my):
+                        target_cc = 19 if action == "toggle" else 83
+                        for knob, cc in fx_knobs:
+                            if cc == target_cc:
+                                if action == "toggle":
+                                    new_val = 0 if knob.value >= 64 else 127
+                                elif action == "prev":
+                                    new_val = max(0, int(knob.value) - 1)
+                                else:  # next
+                                    new_val = min(int(knob.max_val),
+                                                  int(knob.value) + 1)
+                                knob.value = float(new_val)
+                                if self.app.p6:
+                                    self.app.p6.send_cc(target_cc, new_val,
+                                                        channel=ch)
+                                self._last_cc = target_cc
+                                self._last_cc_time = time.monotonic()
+                                return True
+
+        # Mouse-motion: continue active fader drag
+        if event.type == pygame.MOUSEMOTION and self._dj_drag is not None:
+            if self._dj_drag == "xfade":
+                self._dj_set_xfade(event.pos[0])
+                return True
+            if isinstance(self._dj_drag, tuple) and self._dj_drag[0] == "vol":
+                self._dj_set_vol(self._dj_drag[1], event.pos[1])
+                return True
+
+        # Mouse-up: end any drag
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self._dj_drag is not None:
+                self._dj_drag = None
+
+        # FX control knobs (CC#16-18, 80-82) — drag-aware via Knob.handle_event
+        for d_idx, fx_tab in enumerate(["bus1_fx", "bus2_fx"]):
+            ch = d_idx
+            for knob, cc in self._knobs.get(fx_tab, []):
+                if cc in (19, 83):  # toggle/select handled above
+                    continue
+                if knob.handle_event(event):
+                    if self.app.p6:
+                        self.app.p6.send_cc(cc, int(knob.value), channel=ch)
+                    self._last_cc = cc
+                    self._last_cc_time = time.monotonic()
+                    return True
+
+        # Consume any unmatched mouse event on the DJ tab so dj_mode knobs
+        # (which we parked offscreen) cannot accidentally fire.
+        if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION,
+                          pygame.MOUSEBUTTONUP):
+            return True
         return False
 
     # ── LFO Automation tab ───────────────────────────────────────────

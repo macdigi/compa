@@ -113,6 +113,70 @@ class P6SettingsScreen:
         self.app.auto_record = not self.app.auto_record
         save_config_key("P6_AUTO_RECORD", "1" if self.app.auto_record else "0")
 
+    # ── Recall buffer + pre-roll ────────────────────────────────────
+    def _get_recall_buffer_seconds(self) -> int:
+        return int(self.app.recorder.recall_buffer_seconds)
+
+    def _format_seconds(self, secs: int) -> str:
+        if secs < 60:
+            return f"{secs}s"
+        m, s = divmod(secs, 60)
+        return f"{m}m" if s == 0 else f"{m}m {s}s"
+
+    def _set_recall_buffer_seconds(self, val: int):
+        from ui.p6_app import save_config_key
+        # Variable step: smaller increments at low end, bigger at high end
+        # so the user can sweep the range without hundreds of taps.
+        from engine.p6_recorder import (RECALL_BUFFER_SECONDS_MIN,
+                                          RECALL_BUFFER_SECONDS_MAX)
+        val = max(RECALL_BUFFER_SECONDS_MIN,
+                  min(RECALL_BUFFER_SECONDS_MAX, int(val)))
+        applied = self.app.recorder.set_recall_buffer_seconds(val)
+        self.app.config["RECALL_BUFFER_SECONDS"] = str(applied)
+        save_config_key("RECALL_BUFFER_SECONDS", str(applied))
+        # Also re-persist pre-roll if it got clamped to the new buffer length
+        pr = int(self.app.recorder.record_pre_roll_seconds)
+        if str(pr) != str(self.app.config.get("RECORD_PRE_ROLL_SECONDS", "0")):
+            self.app.config["RECORD_PRE_ROLL_SECONDS"] = str(pr)
+            save_config_key("RECORD_PRE_ROLL_SECONDS", str(pr))
+
+    def _bump_recall_buffer(self, delta_sign: int):
+        cur = self._get_recall_buffer_seconds()
+        # Step size scales with magnitude — coarse at long lengths.
+        if cur < 60:
+            step = 15
+        elif cur < 300:
+            step = 30
+        else:
+            step = 60
+        self._set_recall_buffer_seconds(cur + step * delta_sign)
+
+    def _get_pre_roll_seconds(self) -> int:
+        return int(self.app.recorder.record_pre_roll_seconds)
+
+    def _format_pre_roll(self, secs: int) -> str:
+        return "OFF" if secs <= 0 else self._format_seconds(secs)
+
+    def _set_pre_roll_seconds(self, val: int):
+        from ui.p6_app import save_config_key
+        applied = int(self.app.recorder.set_record_pre_roll_seconds(max(0, int(val))))
+        self.app.config["RECORD_PRE_ROLL_SECONDS"] = str(applied)
+        save_config_key("RECORD_PRE_ROLL_SECONDS", str(applied))
+
+    def _bump_pre_roll(self, delta_sign: int):
+        cur = self._get_pre_roll_seconds()
+        # Smaller steps at low end (more useful in the 0-30s range).
+        if cur < 30:
+            step = 5
+        elif cur < 60:
+            step = 10
+        else:
+            step = 30
+        if delta_sign < 0 and cur <= 5:
+            self._set_pre_roll_seconds(0)
+        else:
+            self._set_pre_roll_seconds(cur + step * delta_sign)
+
     def _toggle_splash(self):
         from ui.p6_app import save_config_key
         current = self.app.config.get("SKIP_SPLASH", "0")
@@ -358,6 +422,17 @@ class P6SettingsScreen:
             {"label": "Threshold Level", "type": "adjust", "value": threshold,
              "action_dec": lambda: self._set_threshold(self._get_threshold() - 5),
              "action_inc": lambda: self._set_threshold(self._get_threshold() + 5)},
+            # Recall buffer length — rolling capture window (also caps pre-roll).
+            {"label": "Recall buffer length", "type": "adjust",
+             "value": self._format_seconds(self._get_recall_buffer_seconds()),
+             "action_dec": lambda: self._bump_recall_buffer(-1),
+             "action_inc": lambda: self._bump_recall_buffer(+1)},
+            # Pre-roll: every REC press silently includes this much of the
+            # prior recall buffer. OFF = clean cut at REC press.
+            {"label": "Pre-roll on REC", "type": "adjust",
+             "value": self._format_pre_roll(self._get_pre_roll_seconds()),
+             "action_dec": lambda: self._bump_pre_roll(-1),
+             "action_inc": lambda: self._bump_pre_roll(+1)},
             {"label": "Splash Screen", "type": "toggle", "value": not splash_off,
              "action": self._toggle_splash},
             {"label": "Color Theme", "type": "button",

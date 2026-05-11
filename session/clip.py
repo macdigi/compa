@@ -15,6 +15,45 @@ import numpy as np
 from .note import Note
 
 
+class FollowActionType(Enum):
+    NONE = "none"
+    STOP = "stop"
+    NEXT = "next"
+    PREVIOUS = "previous"
+    FIRST = "first"
+    LAST = "last"
+    ANY = "any"
+    OTHER = "other"
+    JUMP = "jump"
+
+
+@dataclass
+class FollowAction:
+    """Per-clip follow action.
+
+    After every `after_bars` of play, roll dice: with `chance` probability
+    fire `type`. If JUMP, target_scene picks the destination row.
+    """
+    type: FollowActionType = FollowActionType.NONE
+    chance: float = 1.0
+    after_bars: float = 1.0    # Live's "Length" multiplier
+    target_scene: int = -1
+
+    def to_dict(self) -> dict:
+        return {"type": self.type.value, "chance": self.chance,
+                "after_bars": self.after_bars,
+                "target_scene": self.target_scene}
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> "FollowAction":
+        if not d:
+            return cls()
+        return cls(type=FollowActionType(d.get("type", "none")),
+                   chance=float(d.get("chance", 1.0)),
+                   after_bars=float(d.get("after_bars", 1.0)),
+                   target_scene=int(d.get("target_scene", -1)))
+
+
 class LaunchQuantize(Enum):
     NONE = "none"
     GLOBAL = "global"
@@ -92,6 +131,7 @@ class Clip:
     velocity_amount: float = 0.0  # 0 = no effect, 1.0 = full
     ram_mode: bool = False
     hi_quality: bool = True
+    follow_action: FollowAction = field(default_factory=FollowAction)
 
     # Runtime state — not persisted
     _state: ClipState = field(default=ClipState.STOPPED, init=False, repr=False)
@@ -112,6 +152,7 @@ class Clip:
             "velocity_amount": self.velocity_amount,
             "ram_mode": self.ram_mode,
             "hi_quality": self.hi_quality,
+            "follow_action": self.follow_action.to_dict(),
         }
 
     @classmethod
@@ -129,6 +170,7 @@ class Clip:
             "velocity_amount": float(d.get("velocity_amount", 0.0)),
             "ram_mode": bool(d.get("ram_mode", False)),
             "hi_quality": bool(d.get("hi_quality", True)),
+            "follow_action": FollowAction.from_dict(d.get("follow_action")),
         }
 
 

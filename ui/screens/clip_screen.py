@@ -100,6 +100,13 @@ class ClipScreen:
                 cy = grid_top + r * cell_h
                 clip = track.clips[scene_idx] if scene_idx < len(track.clips) else None
                 rect = pygame.Rect(hx + 2, cy + 2, cell_w - 4, cell_h - 4)
+                if (engine is not None
+                        and engine.is_recording(ti, scene_idx)):
+                    pygame.draw.rect(surface, (200, 40, 40), rect,
+                                     border_radius=4)
+                    surface.blit(f_sm.render("REC", True, (255, 255, 255)),
+                                 (rect.x + 4, rect.y + 4))
+                    continue
                 if clip is None:
                     pygame.draw.rect(surface, (28, 28, 38), rect, border_radius=4)
                     pygame.draw.rect(surface, (50, 50, 60), rect, 1,

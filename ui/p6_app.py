@@ -46,7 +46,7 @@ from engine.push2 import Push2, find_push2_ports
 from engine.controller_actions import dispatch as _dispatch_action
 from engine.master_clock import MasterClock
 from engine.ableton_link import AbletonLinkBridge
-from engine.link_audio import LinkAudioBroadcaster
+from engine.link_audio import LinkAudioBroadcaster, LinkAudioReceiver
 from engine.network_midi import NetworkMidi
 try:
     from engine.push2_display import Push2Display
@@ -79,6 +79,13 @@ def load_config() -> dict:
         "AUDIO_DEVICE_HINT": "iD4",
         "LOCAL_SAMPLE_CACHE": os.path.join(PROJECT_ROOT, "samples"),
         "P6_AUTO_RECORD": "1",
+        # Recall buffer length (seconds) — rolling buffer of recent audio
+        # always being captured for "forgot to hit record". Configurable.
+        "RECALL_BUFFER_SECONDS": "60",
+        # Default pre-roll for every REC press (seconds). 0 = off (clean
+        # start at REC). Anything > 0 silently includes the prior N seconds
+        # from the recall buffer. Capped at RECALL_BUFFER_SECONDS.
+        "RECORD_PRE_ROLL_SECONDS": "0",
     }
     config_path = os.path.join(PROJECT_ROOT, "setup", "config.env")
     if os.path.exists(config_path):
@@ -312,6 +319,12 @@ class P6App:
         # outs so SP/P-6/etc. follow Compa (and therefore Link) tempo.
         self.send_midi_clock = self.config.get(
             "LINK_MIDI_CLOCK_OUT", "1") == "1"
+        # Per-device gate for the master_clock 0xF8 broadcast — each
+        # device card on the session screen has a LINK toggle that
+        # decides whether Compa drives its tempo or the device runs on
+        # its own clock. Persisted as DEVICE_CLOCK_<KEY> in config.env.
+        # Defaults to enabled (matches pre-toggle behavior).
+        self._device_clock_enabled: dict[str, bool] = {}
         self.master_clock.add_listener(self._broadcast_midi_clock)
         self.master_clock.start()
 
@@ -395,6 +408,11 @@ class P6App:
 
         # ── Monitor output (which device your headphones are on) ─────
         self.monitor_output: str = ""  # Device short_name for headphone out
+        # Active OUT-routing source — when set, the device whose audio
+        # is being piped out to monitor_output. Pressing OUT on a card
+        # marks that card as the source and Compa picks the first OTHER
+        # connected device as the destination.
+        self._monitor_source: str = ""
         self._monitor_route: AudioRoute | None = None
 
         # ── LFO automation engine ────────────────────────────────────
@@ -514,9 +532,19 @@ class P6App:
             self.sp404_lib = None
 
         # ── Recorder ─────────────────────────────────────────────────
+        try:
+            _recall_secs = int(self.config.get("RECALL_BUFFER_SECONDS", "60"))
+        except (TypeError, ValueError):
+            _recall_secs = 60
+        try:
+            _pre_roll_secs = float(self.config.get("RECORD_PRE_ROLL_SECONDS", "0"))
+        except (TypeError, ValueError):
+            _pre_roll_secs = 0.0
         self.recorder = P6Recorder(
             recording_dir=self.config["P6_RECORDING_DIR"],
             device_hint=self.config["AUDIO_DEVICE_HINT"],
+            recall_buffer_seconds=_recall_secs,
+            record_pre_roll_seconds=_pre_roll_secs,
         )
 
         # ── Link Audio broadcaster ────────────────────────────────────
@@ -537,6 +565,12 @@ class P6App:
             # (which feeds the broadcaster) actually runs even when the
             # user hasn't entered a record/monitor screen yet.
             self.recorder.start_monitoring()
+        # Receive direction (Live → Compa) — subscribes to a remote Link
+        # Audio channel and pipes it to a USB output device. Wired up
+        # to the same LinkAudio instance so we stay one peer in Live.
+        self.link_rx = LinkAudioReceiver(self.link_audio)
+        # Which device card has RX active (empty = off). UI mirrors MON.
+        self._link_rx_target: str = ""
 
         # ── Network MIDI bridge ──────────────────────────────────────
         # rtpmidid daemon — shares all USB MIDI controllers (Push 2,
@@ -598,6 +632,7 @@ class P6App:
             # Wide screen: full labels
             nav_labels = [
                 ("SESSION", "session"),
+                ("CLIPS",   "clips"),
                 ("RECORD",  "record"),
                 ("SAMPLE",  "sample"),
                 ("RADIO",   "radio"),
@@ -608,6 +643,7 @@ class P6App:
             # Medium screen: short labels
             nav_labels = [
                 ("SES", "session"),
+                ("CLP", "clips"),
                 ("REC", "record"),
                 ("SMP", "sample"),
                 ("RAD", "radio"),
@@ -618,6 +654,7 @@ class P6App:
             # Tiny screen: icons/minimal
             nav_labels = [
                 ("S", "session"),
+                ("C", "clips"),
                 ("R", "record"),
                 ("F", "sample"),
                 ("~", "radio"),
@@ -2076,7 +2113,7 @@ class P6App:
                     tab_key = tabs[idx][0]
                     if tab_key == "keys":
                         new_mode = "keys"
-                    elif tab_key in ("pattern", "sequence"):
+                    elif tab_key == "pattern":
                         new_mode = "pattern"
                     elif tab_key == "dj":
                         new_mode = "dj"
@@ -2330,6 +2367,18 @@ class P6App:
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
+        # Push 2 Clip button (CC 113) → toggle Compa 2 Clips screen.
+        # Press goes to clips; press again from clips returns to the
+        # last device-workspace screen.
+        if name == "clip" and value > 0:
+            if self.current_screen_name == "clips":
+                # Bounce back to whatever the user was on before
+                back = getattr(self, "_pre_clips_screen", "session")
+                self.switch_screen(back)
+            else:
+                self._pre_clips_screen = self.current_screen_name
+                self.switch_screen("clips")
+            return
         # Compa 2 takes over when on Clips screen.
         if (self.current_screen_name == "clips"
                 and self.push2_control is not None
@@ -2573,7 +2622,7 @@ class P6App:
             except Exception:
                 pass
         elif name == "new":
-            # CHAIN tab: append a chain step. PATTERN/SEQUENCE tab in
+            # CHAIN tab: append a chain step. PATTERN tab in
             # pattern mode: clear the current pattern's step grid —
             # but require two presses within ~3 seconds so an
             # accidental tap doesn't wipe a take. First press arms
@@ -2596,7 +2645,7 @@ class P6App:
                             except Exception:
                                 pass
                             chain.steps.append(ChainStep(pattern=pat, bars=4))
-                    elif tab_key in ("pattern", "sequence"):
+                    elif tab_key == "pattern":
                         now = time.monotonic()
                         pending = getattr(
                             self, "_push2_new_confirm_until", 0.0)
@@ -3265,10 +3314,13 @@ class P6App:
         # Auto-apply hardware theme
         theme.apply_theme_for_device(short_name)
 
-        # Switch audio monitoring to the focused device
+        # Switch audio monitoring to the focused device — but skip
+        # the recorder rebind when an OUT route is active so the
+        # routed audio doesn't get hijacked by a focus tap.
         dev = self.device_manager.active
         if dev and dev.audio_hint:
-            self.recorder.switch_device(dev.audio_hint)
+            if not getattr(self, "_monitor_source", ""):
+                self.recorder.switch_device(dev.audio_hint)
             # Clear playback device cache so next play() retargets to new focus
             if hasattr(self.recorder, 'clear_playback_cache'):
                 self.recorder.clear_playback_cache()
@@ -3358,6 +3410,111 @@ class P6App:
         if self.audio_route:
             self.audio_route.stop()
             self.audio_route = None
+
+    # ── Audio output coordinator ────────────────────────────────
+
+    def _release_device(self, device_idx: int) -> None:
+        """Stop any audio routing currently holding this output device.
+
+        Three things compete for a device's OutputStream: MON (monitor
+        a USB device through another), RX (Link Audio → USB), and the
+        radio. Only one can hold the stream. Whoever's about to open it
+        calls this to make whoever has it step aside.
+        """
+        if device_idx is None:
+            return
+        # RX
+        if getattr(self, "_link_rx_target", ""):
+            rx_dev = getattr(self.link_rx, "_out_device", None)
+            if rx_dev is not None and rx_dev == device_idx:
+                print(f"Releasing device {device_idx} from RX", flush=True)
+                self.stop_link_rx()
+        # MON
+        if getattr(self, "_monitor_source", "") and self.monitor_output:
+            from engine.audio_router import find_device_index
+            mon_p = self.device_manager.connected.get(self.monitor_output)
+            if mon_p and getattr(mon_p, "audio_hint", None):
+                mon_idx = find_device_index(mon_p.audio_hint)
+                if mon_idx is not None and mon_idx == device_idx:
+                    print(f"Releasing device {device_idx} from MON", flush=True)
+                    self.stop_monitor_route()
+        # Radio
+        radio_screen = self.screens.get("radio")
+        if radio_screen and hasattr(radio_screen, "_radio"):
+            radio = radio_screen._radio
+            if radio.is_playing and getattr(radio, "_output_device", None) == device_idx:
+                print(f"Releasing device {device_idx} from Radio", flush=True)
+                radio.stop()
+
+    def stop_monitor_route(self) -> None:
+        """Stop active MON routing and restore focus binding."""
+        if not getattr(self, "_monitor_source", ""):
+            return
+        self._monitor_source = ""
+        self.recorder.stop_monitor_output()
+        self.monitor_output = ""
+        focus = self.device_manager.focus_key
+        focus_p = self.device_manager.connected.get(focus) if focus else None
+        if focus_p and getattr(focus_p, "audio_hint", None):
+            self.recorder.switch_device(focus_p.audio_hint)
+        print("MON: stopped (handoff)", flush=True)
+
+    def start_radio(self, url: str, name: str = "") -> bool:
+        """Start radio playback. Routes to the currently focused device
+        and auto-releases any MON/RX route holding that device's output."""
+        radio_screen = self.screens.get("radio")
+        if not radio_screen or not hasattr(radio_screen, "_radio"):
+            return False
+        radio = radio_screen._radio
+        # Always retarget to the focused device on each play. Radio is
+        # tab-separate from the session screen so users don't have an
+        # easy way to see/change radio's target — making it follow
+        # focus removes the surprise of "I'm on the P-6 card but the
+        # station's playing through the SP".
+        focus_key = self.device_manager.focus_key
+        focus_p = self.device_manager.connected.get(focus_key) if focus_key else None
+        hint = getattr(focus_p, "audio_hint", "") or ""
+        radio._output_device = None  # force re-find with the focus hint
+        radio._find_output_device(hint)
+        target_idx = getattr(radio, "_output_device", None)
+        if target_idx is not None:
+            self._release_device(target_idx)
+        return radio.play(url, name)
+
+    # ── Link Audio receive routing (Live → Compa) ────────────────
+
+    def start_link_rx(self, device_key: str) -> bool:
+        """Subscribe to a Link Audio channel and play it through this
+        device's USB output. Returns True on success."""
+        connected = self.device_manager.connected
+        profile = connected.get(device_key)
+        if not profile or not getattr(profile, "audio_hint", None):
+            return False
+        from engine.audio_router import find_device_index
+        dst_idx = find_device_index(profile.audio_hint)
+        if dst_idx is None:
+            return False
+        dst_rate = 48000
+        try:
+            import sounddevice as sd
+            info = sd.query_devices(dst_idx)
+            dst_rate = int(info.get("default_samplerate", 48000))
+        except Exception:
+            pass
+        # MON / Radio can't share the same USB output device — release
+        # whoever holds it before we open our own stream.
+        self._release_device(dst_idx)
+        self.stop_link_rx()
+        if self.link_rx.start(dst_idx, dst_rate):
+            self._link_rx_target = device_key
+            print(f"Link RX → {device_key} @ {dst_rate}Hz", flush=True)
+            return True
+        return False
+
+    def stop_link_rx(self) -> None:
+        if self._link_rx_target:
+            self.link_rx.stop()
+            self._link_rx_target = ""
 
     # ── Monitor output routing ───────────────────────────────────
 
@@ -3500,6 +3657,9 @@ class P6App:
 
             engine = ClipEngine(sample_rate=44100, max_frames=512)
             engine.set_session(session)
+            # Wire the existing P6Recorder so audio tracks can record from
+            # whatever USB input is monitored (SP-404 / P-6 / etc.)
+            engine.recorder = self.recorder
             self.clip_engine = engine
 
             # Audio stream (own OutputStream, not shared with audio_engine)
@@ -3539,22 +3699,55 @@ class P6App:
         except Exception as e:
             print(f"Compa 2 init failed: {e}", flush=True)
 
+    def is_device_clock_enabled(self, device_key: str) -> bool:
+        """Whether master_clock should push 0xF8 to this device.
+
+        Defaults to True. Persisted as DEVICE_CLOCK_<KEY> in config.env.
+        """
+        cache = getattr(self, "_device_clock_enabled", None)
+        if cache is None:
+            return True
+        if device_key in cache:
+            return cache[device_key]
+        cfg_key = f"DEVICE_CLOCK_{device_key.replace('-', '').replace(' ', '')}"
+        val = self.config.get(cfg_key, "1") == "1"
+        cache[device_key] = val
+        return val
+
+    def set_device_clock_enabled(self, device_key: str, enabled: bool) -> None:
+        """Toggle Compa's clock send for a device. Persisted."""
+        enabled = bool(enabled)
+        self._device_clock_enabled[device_key] = enabled
+        cfg_key = f"DEVICE_CLOCK_{device_key.replace('-', '').replace(' ', '')}"
+        save_config_key(cfg_key, "1" if enabled else "0")
+
     def _broadcast_midi_clock(self) -> None:
         """Send a single 0xF8 MIDI Clock byte to every connected device.
 
         Called 24x per beat by master_clock. Tempo follows Link via the
-        link.add_tempo_listener hook in __init__. Toggleable via the
-        send_midi_clock flag (Settings → Link → Send MIDI Clock).
+        link.add_tempo_listener hook in __init__. Toggleable globally
+        via send_midi_clock (Settings → Link → Send MIDI Clock) and
+        per-device via the LINK toggle on each session-screen card.
         """
         if not getattr(self, "send_midi_clock", True):
             return
-        for conn in self._midi_connections.values():
+        for short_name, conn in self._midi_connections.items():
+            if not self.is_device_clock_enabled(short_name):
+                continue
             out = getattr(conn, "_out", None)
             if out is not None:
                 try:
                     out.send_message([0xF8])
                 except Exception:
                     pass
+        # Push 2 needs MIDI clock too — tempo-synced LED animations
+        # (pulse / blink channels 1–15) only advance on incoming clock.
+        push2 = getattr(self, "push2", None)
+        if push2 is not None:
+            try:
+                push2._send_both([0xF8])
+            except Exception:
+                pass
 
     # ── Hot-plug detection ───────────────────────────────────────────
 
@@ -3629,14 +3822,29 @@ class P6App:
                     self.device_manager._focus_key = None
                     self.device_manager._active_device = None
 
-        # Recorder hot-plug: if we're not monitoring (typically because no
-        # USB audio device was present at boot), retry device detection.
-        # PortAudio caches its device list at init time, so we have to
-        # terminate + re-initialize sounddevice to pick up newly plugged
-        # cards. This is the recurring "scope shows No audio" bug — the
-        # recorder gave up at startup and never tried again.
+        # Recorder hot-plug retry — with exponential backoff so a missing
+        # audio device doesn't spam PortAudio terminate/reinit + journal logs
+        # every 5 seconds forever. Backoff resets to 0 whenever the USB
+        # topology actually changes (a device was added or removed), so a
+        # newly plugged interface is detected on the very next tick.
         rec = getattr(self, "recorder", None)
-        if rec is not None and not getattr(rec, "_monitoring", False):
+        now_mono = time.monotonic()
+
+        # Reset backoff on any topology change (cheap signal something moved)
+        if new_devices or removed_devices:
+            self._rec_retry_next_at = 0.0
+            self._rec_retry_attempts = 0
+
+        # Initialize lazy state (first call after __init__)
+        if not hasattr(self, "_rec_retry_next_at"):
+            self._rec_retry_next_at = 0.0
+            self._rec_retry_attempts = 0
+            self._rec_retry_last_log = 0.0
+
+        if (rec is not None and not getattr(rec, "_monitoring", False)
+                and now_mono >= self._rec_retry_next_at):
+            self._rec_retry_attempts += 1
+            success = False
             try:
                 import sounddevice as _sd
                 try:
@@ -3649,10 +3857,24 @@ class P6App:
                 if rec.available:
                     rec.start_monitoring()
                     if rec._monitoring:
+                        success = True
                         print("Recorder hot-plug: monitoring restored",
                               flush=True)
             except Exception as _e:
                 print(f"Recorder hot-plug retry failed: {_e}", flush=True)
+
+            if success:
+                self._rec_retry_attempts = 0
+                self._rec_retry_next_at = 0.0
+            else:
+                # Exponential backoff: 5s, 10s, 20s, 40s, then 60s ceiling
+                backoff = min(60.0, 5.0 * (2 ** max(0, self._rec_retry_attempts - 1)))
+                self._rec_retry_next_at = now_mono + backoff
+                # Rate-limit "no audio" log to ≤1 line/minute
+                if now_mono - self._rec_retry_last_log > 60.0:
+                    print(f"Recorder: no audio device (next retry in {backoff:.0f}s)",
+                          flush=True)
+                    self._rec_retry_last_log = now_mono
 
     def switch_screen(self, name: str, context: dict | None = None):
         """Switch to a screen, optionally passing context data.
@@ -3898,6 +4120,36 @@ class P6App:
             os.remove("/tmp/compa_screenshot_request")
             pygame.image.save(self.screen, "/tmp/compa_screen.png")
             print("Screenshot captured", flush=True)
+
+        # Check for remote screen-switch request: file contains target name
+        if os.path.exists("/tmp/compa_switch_screen"):
+            try:
+                with open("/tmp/compa_switch_screen") as _f:
+                    target = _f.read().strip()
+            except Exception:
+                target = ""
+            try:
+                os.remove("/tmp/compa_switch_screen")
+            except Exception:
+                pass
+            if target:
+                self.switch_screen(target)
+
+        # Capture Push 2 OLED → /tmp/compa_push2.png (Compa 2 path).
+        if os.path.exists("/tmp/compa_push2_screenshot"):
+            os.remove("/tmp/compa_push2_screenshot")
+            try:
+                ctrl = self.push2_control
+                if ctrl is not None:
+                    img = ctrl.active_mode.draw_oled(960, 160)
+                    if img is not None:
+                        img.save("/tmp/compa_push2.png")
+                        print("Push 2 OLED captured", flush=True)
+                # Fallback: ask the existing Push2Renderer
+                elif self.push2_renderer is not None:
+                    self.push2_renderer.save_screenshot("/tmp/compa_push2.png")
+            except Exception as e:
+                print(f"Push 2 screenshot failed: {e}", flush=True)
 
         # Video recording triggers — main touchscreen + Push 2 LCD
         # mirror are started/stopped together so the two streams stay

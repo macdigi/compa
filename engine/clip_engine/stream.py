@@ -34,9 +34,39 @@ class ClipStream:
     def running(self) -> bool:
         return self._running
 
+    def _find_output_device(self) -> tuple[Optional[int], int]:
+        """Walk a preference list of audio outputs and return (idx, rate)
+        for the first one that opens. Mirrors radio_stream's logic so
+        ClipStream lands on the same working device the user is hearing.
+        """
+        if not _HAVE_SD:
+            return None, self.sr
+        devices = sd.query_devices()
+        hints = ["SP-404", "P-6", "USB Audio", "dmix", "front",
+                 "sysdefault", "default", "Headphones", "hdmi", "vc4"]
+        for hint in hints:
+            for i, dev in enumerate(devices):
+                name = dev.get("name", "")
+                if (hint.lower() in name.lower()
+                        and dev.get("max_output_channels", 0) >= 2):
+                    native_rate = int(dev.get("default_samplerate", 44100))
+                    for rate in (self.sr, native_rate, 48000):
+                        try:
+                            s = sd.OutputStream(device=i, samplerate=rate,
+                                               channels=2, dtype="float32",
+                                               blocksize=self.block_size)
+                            s.start(); s.stop(); s.close()
+                            return i, rate
+                        except Exception:
+                            continue
+        return None, self.sr
+
     def start(self, device: Optional[int] = None) -> bool:
         if self._running or not _HAVE_SD:
             return self._running
+        if device is None:
+            device, picked_rate = self._find_output_device()
+            self.sr = picked_rate
         try:
             self._stream = sd.OutputStream(
                 samplerate=self.sr,
@@ -50,7 +80,12 @@ class ClipStream:
             self._stream.start()
             self._running = True
             self.engine.active = True
-            print(f"ClipStream: started (sr={self.sr} block={self.block_size})",
+            try:
+                dev_name = sd.query_devices(device).get("name", "?") if device is not None else "default"
+            except Exception:
+                dev_name = str(device)
+            print(f"ClipStream: started on '{dev_name}' "
+                  f"(sr={self.sr} block={self.block_size})",
                   flush=True)
             return True
         except Exception as e:

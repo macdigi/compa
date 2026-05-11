@@ -23,6 +23,53 @@ except ImportError:
     sd = None
     sf = None
 
+
+class _LinearResampler:
+    """Stateful linear-interpolation resampler.
+
+    Quality is OK for monitoring (linear interp introduces some aliasing
+    above ~src_rate/2, which on music is a soft top-end smear — fine for
+    "is this drum hitting?" monitoring, not mastering). Tracks fractional
+    phase across chunks so we don't get clicks at chunk boundaries.
+    """
+
+    def __init__(self, src_rate: int, dst_rate: int, channels: int):
+        self.src_rate = int(src_rate)
+        self.dst_rate = int(dst_rate)
+        self.ratio = self.src_rate / self.dst_rate  # input frames per output frame
+        self.channels = int(channels)
+        self.tail = np.zeros((1, channels), dtype=np.float32)
+        self.frac = 0.0  # cumulative fractional input position [0, ratio)
+
+    def process(self, indata: np.ndarray) -> np.ndarray:
+        n_in = indata.shape[0]
+        if n_in == 0 or self.src_rate == self.dst_rate:
+            return indata.copy()
+        ext = np.concatenate([self.tail, indata], axis=0)  # (n_in+1, ch)
+        # Generous upper bound on output frame count, then filter strictly
+        # to positions < n_in so we never read past the end of indata.
+        n_out_cap = int(np.ceil((n_in - self.frac) / self.ratio)) + 1
+        if n_out_cap < 0:
+            n_out_cap = 0
+        positions = self.frac + np.arange(n_out_cap) * self.ratio
+        positions = positions[positions < n_in]
+        n_out = positions.size
+        if n_out == 0:
+            self.tail = indata[-1:].copy()
+            return np.zeros((0, indata.shape[1]), dtype=np.float32)
+        ext_pos = positions + 1.0
+        floors = np.floor(ext_pos).astype(np.int32)
+        fracs = (ext_pos - floors)[:, None]
+        ceils = np.minimum(floors + 1, ext.shape[0] - 1)
+        out = (1.0 - fracs) * ext[floors] + fracs * ext[ceils]
+        # Carry phase: leftover after consuming this chunk
+        new_frac = self.frac + n_out * self.ratio - n_in
+        if new_frac < 0:
+            new_frac = 0.0
+        self.frac = float(new_frac)
+        self.tail = indata[-1:].copy()
+        return out.astype(np.float32)
+
 try:
     import samplerate as _sr
 except ImportError:
@@ -33,7 +80,9 @@ log = logging.getLogger(__name__)
 DEFAULT_SAMPLE_RATE = 44100  # P-6 on Pi ALSA only supports 44.1kHz
 P6_CHANNELS = 2
 WAVEFORM_POINTS = 800  # Match screen width for display
-RECALL_BUFFER_SECONDS = 60  # Rolling buffer for "forgot to press record"
+RECALL_BUFFER_SECONDS = 60  # Default rolling buffer length — runtime configurable
+RECALL_BUFFER_SECONDS_MIN = 15
+RECALL_BUFFER_SECONDS_MAX = 1800  # 30 min absolute hard cap (RAM safety)
 
 
 class P6Recorder:
@@ -44,11 +93,26 @@ class P6Recorder:
     real-time level/waveform data for UI display.
     """
 
-    def __init__(self, recording_dir: str, device_hint: str = "P-6"):
+    def __init__(self, recording_dir: str, device_hint: str = "P-6",
+                 recall_buffer_seconds: int = RECALL_BUFFER_SECONDS,
+                 record_pre_roll_seconds: float = 0.0):
         self._recording_dir = recording_dir
         self._device_hint = device_hint
         self._device_index: Optional[int] = None
         self._sample_rate = DEFAULT_SAMPLE_RATE
+
+        # Recall buffer length (configurable). The rolling window of audio
+        # always being captured for "forgot to hit record" recall. Lifting
+        # this from a constant lets the user trade RAM for length.
+        self._recall_buffer_seconds = max(RECALL_BUFFER_SECONDS_MIN,
+                                           min(RECALL_BUFFER_SECONDS_MAX,
+                                               int(recall_buffer_seconds)))
+        # Default pre-roll for start_recording — when > 0, every REC press
+        # automatically prepends this many seconds from the recall buffer.
+        # The "forgot to hit record" case becomes impossible.
+        self._record_pre_roll_seconds = max(0.0,
+                                             min(float(self._recall_buffer_seconds),
+                                                 float(record_pre_roll_seconds)))
 
         os.makedirs(recording_dir, exist_ok=True)
 
@@ -74,10 +138,25 @@ class P6Recorder:
         # Monitoring
         self._monitoring = False
 
-        # Monitor output — forward audio to a second device (headphones)
+        # Monitor output — forward audio to a second device (headphones).
+        # Two USB audio devices have independent crystal clocks that drift
+        # against each other, so we can't write input frames straight into
+        # the output stream — that produces classic "play a chunk, drop a
+        # chunk" glitching as the buffers under/overrun. Instead we run a
+        # ring buffer between them: input callback pushes, output callback
+        # pulls. Drift gets absorbed in the buffer fill level (oldest frames
+        # dropped on overflow, silence emitted on underflow).
         self._monitor_out_stream: Optional["sd.OutputStream"] = None
         self._monitor_out_device: Optional[int] = None
         self._monitor_out_rate: int = 0
+        self._monitor_out_buf: Optional[np.ndarray] = None
+        self._monitor_out_buf_frames: int = 0
+        self._monitor_out_buf_lock = threading.Lock()
+        self._monitor_out_write: int = 0  # cumulative frames written
+        self._monitor_out_read: int = 0   # cumulative frames read
+        # Resampler (only used when input/output rates can't be matched —
+        # e.g. P-6 is 44100-only and SP-404 is 48000-only)
+        self._monitor_resampler: Optional["_LinearResampler"] = None
 
         # Threshold recording
         self._threshold = 0.02
@@ -85,8 +164,8 @@ class P6Recorder:
         self._silence_timeout = 3.0
         self._silence_start = 0.0
 
-        # Recall buffer — rolling circular buffer of last N seconds
-        self._recall_buf_frames = RECALL_BUFFER_SECONDS * self._sample_rate
+        # Recall buffer — rolling circular buffer sized from configured length
+        self._recall_buf_frames = self._recall_buffer_seconds * self._sample_rate
         self._recall_buf = np.zeros((self._recall_buf_frames, P6_CHANNELS), dtype=np.float32)
         self._recall_write_pos = 0
         self._recall_total_written = 0  # total frames ever written (for knowing how full)
@@ -109,7 +188,7 @@ class P6Recorder:
 
         self._find_device()
 
-    def _find_device(self) -> None:
+    def _find_device(self, preferred_rate: int = 0) -> None:
         """Find the audio input device (P-6 or audio interface) and probe sample rate."""
         if sd is None:
             log.warning("sounddevice not available")
@@ -160,12 +239,20 @@ class P6Recorder:
                 candidates.append((i, name))
 
         if not candidates:
-            print(f"No audio input matching '{self._device_hint}'", flush=True)
+            # Silenced from per-attempt to debug — the hot-plug retry in
+            # P6App._check_hotplug is the single source of user-visible
+            # "no audio device" logging, with rate limiting + backoff.
+            log.debug("No audio input matching '%s'", self._device_hint)
             return
 
-        # Try each candidate with sample rate probing
+        # Try each candidate with sample rate probing. When a preferred
+        # rate is supplied (e.g. matching another device we'll be routing
+        # to), try it first so the resulting input rate matches.
+        rate_order = [44100, 48000, 96000]
+        if preferred_rate:
+            rate_order = [preferred_rate] + [r for r in rate_order if r != preferred_rate]
         for dev_idx, dev_name in candidates:
-            for rate in [44100, 48000, 96000]:
+            for rate in rate_order:
                 try:
                     s = sd.InputStream(device=dev_idx, samplerate=rate,
                                       channels=P6_CHANNELS, dtype="float32",
@@ -223,8 +310,8 @@ class P6Recorder:
 
         self._device_hint = hint
         self._device_index = None
-        self._find_device()
-        print(f"switch_device('{hint}'): idx={self._device_index}", flush=True)
+        self._find_device(preferred_rate=preferred_rate)
+        print(f"switch_device('{hint}'): idx={self._device_index} rate={self._sample_rate}", flush=True)
 
         if self._device_index is None:
             # Revert on failure
@@ -237,7 +324,7 @@ class P6Recorder:
 
         # Resize recall buffer if sample rate changed
         if self._sample_rate != old_rate:
-            self._recall_buf_frames = RECALL_BUFFER_SECONDS * self._sample_rate
+            self._recall_buf_frames = self._recall_buffer_seconds * self._sample_rate
             self._recall_buf = np.zeros((self._recall_buf_frames, P6_CHANNELS), dtype=np.float32)
             self._recall_write_pos = 0
             self._recall_total_written = 0
@@ -329,56 +416,100 @@ class P6Recorder:
             log.error("Failed to start monitoring: %s", e)
             self._stream = None
 
+    def _monitor_output_callback(self, outdata: np.ndarray, frames: int,
+                                  time_info, status) -> None:
+        """Pull `frames` of audio from the ring buffer for the output device."""
+        if status and status.output_underflow:
+            # Brief silence is fine — buffer will refill on the next input tick
+            pass
+        with self._monitor_out_buf_lock:
+            buf = self._monitor_out_buf
+            if buf is None:
+                outdata.fill(0)
+                return
+            n = self._monitor_out_buf_frames
+            avail = self._monitor_out_write - self._monitor_out_read
+            take = min(frames, max(0, avail))
+            if take > 0:
+                r = self._monitor_out_read % n
+                if r + take <= n:
+                    outdata[:take] = buf[r:r + take]
+                else:
+                    first = n - r
+                    outdata[:first] = buf[r:n]
+                    outdata[first:take] = buf[:take - first]
+                self._monitor_out_read += take
+            if take < frames:
+                outdata[take:].fill(0)
+
     def start_monitor_output(self, device_idx: int, sample_rate: int = 0) -> bool:
         """Start forwarding audio to a second output device (headphones).
 
-        The recorder's audio callback will write to this output stream
-        in addition to recording/buffering. No second input stream needed.
-        Opens at the recorder's own sample rate so no resampling is needed
-        in the audio callback — ALSA plughw handles any conversion.
+        Uses a ring buffer between the input callback (which pushes) and
+        the output stream's callback (which pulls). This decouples the
+        two devices' clocks so drift doesn't manifest as periodic dropouts.
         """
         self.stop_monitor_output()
         if sd is None:
             return False
 
-        # Use the recorder's input rate — avoids resampling in the callback
-        out_rate = self._sample_rate
+        # Try the recorder's input rate first; fall back to the caller's
+        # requested rate (the destination device's preferred rate). Same
+        # rate on both sides means we don't need to resample in callback.
+        rates = [self._sample_rate]
+        if sample_rate and sample_rate != self._sample_rate:
+            rates.append(sample_rate)
 
-        try:
-            self._monitor_out_rate = out_rate
-            self._monitor_out_device = device_idx
-
-            self._monitor_out_stream = sd.OutputStream(
-                device=device_idx,
-                samplerate=out_rate,
-                channels=P6_CHANNELS,
-                dtype="float32",
-                blocksize=2048,
-                latency="high",  # Larger buffer = fewer glitches
-            )
-            self._monitor_out_stream.start()
-            log.info("Monitor output started: device %d @ %dHz", device_idx, out_rate)
-            return True
-        except Exception as e:
-            # If source rate doesn't work, try the requested rate
-            log.warning("Monitor at %dHz failed, trying %dHz", out_rate, sample_rate)
+        for rate in rates:
             try:
-                self._monitor_out_rate = sample_rate
+                # 500ms ring buffer absorbs clock drift between two USB
+                # devices (their crystals don't tick at the same Hz).
+                buf_frames = max(int(0.5 * rate), 8192)
+                # Prefill ~150ms with silence — input pushes ~93ms at a
+                # time on Pi audio, so this guarantees the output never
+                # sees an empty buffer between input arrivals (which is
+                # what produced the residual crackle/dropouts).
+                prefill_frames = int(0.15 * rate)
+                with self._monitor_out_buf_lock:
+                    self._monitor_out_buf = np.zeros(
+                        (buf_frames, P6_CHANNELS), dtype=np.float32)
+                    self._monitor_out_buf_frames = buf_frames
+                    self._monitor_out_write = prefill_frames
+                    self._monitor_out_read = 0
+                self._monitor_out_rate = rate
+                self._monitor_out_device = device_idx
+
                 self._monitor_out_stream = sd.OutputStream(
                     device=device_idx,
-                    samplerate=sample_rate,
+                    samplerate=rate,
                     channels=P6_CHANNELS,
                     dtype="float32",
-                    blocksize=4096,
+                    blocksize=512,
                     latency="high",
+                    callback=self._monitor_output_callback,
                 )
                 self._monitor_out_stream.start()
-                log.info("Monitor output started: device %d @ %dHz (fallback)", device_idx, sample_rate)
+                # If the output device locked at a different rate than
+                # the recorder's input, set up a resampler. Otherwise
+                # clear any stale resampler from a previous routing.
+                if rate != self._sample_rate:
+                    self._monitor_resampler = _LinearResampler(
+                        self._sample_rate, rate, P6_CHANNELS)
+                    print(f"Monitor: resampling {self._sample_rate}→{rate}Hz",
+                          flush=True)
+                else:
+                    self._monitor_resampler = None
+                print(f"Monitor: output @ {rate}Hz (buf {buf_frames} frames)",
+                      flush=True)
                 return True
-            except Exception as e2:
-                log.error("Monitor output failed: %s", e2)
+            except Exception as e:
+                log.warning("Monitor output @ %dHz failed: %s", rate, e)
                 self._monitor_out_stream = None
-                return False
+
+        with self._monitor_out_buf_lock:
+            self._monitor_out_buf = None
+        log.error("Monitor output: no rate worked for device %d", device_idx)
+        return False
 
     def stop_monitor_output(self):
         """Stop the monitor output stream."""
@@ -391,6 +522,12 @@ class P6Recorder:
             self._monitor_out_stream = None
             self._monitor_out_device = None
             log.info("Monitor output stopped")
+        with self._monitor_out_buf_lock:
+            self._monitor_out_buf = None
+            self._monitor_out_buf_frames = 0
+            self._monitor_out_write = 0
+            self._monitor_out_read = 0
+        self._monitor_resampler = None
 
     def stop_monitoring(self) -> None:
         """Stop the input stream."""
@@ -408,13 +545,20 @@ class P6Recorder:
     # ── Recording ───────────────────────────────────────────────────────
 
     def start_recording(self, session_name: str = "",
-                        metadata: Optional[dict] = None) -> Optional[str]:
+                        metadata: Optional[dict] = None,
+                        pre_roll_seconds: Optional[float] = None) -> Optional[str]:
         """Start recording to a new WAV file.
 
         Args:
             session_name: Optional prefix for the filename.
             metadata: Optional dict with bpm_at_record, pattern_at_record, etc.
                       Saved as sidecar JSON when recording stops.
+            pre_roll_seconds: Prepend this many seconds from the recall buffer
+                      to the new file before live audio starts. None = use the
+                      recorder's default (set at construction); 0 = disabled;
+                      >0 = include up to that much (capped at buffer fill).
+                      Use float("inf") or any number ≥ buffer length to dump
+                      the entire current recall buffer (Recall + Continue).
         """
         if sf is None:
             log.error("soundfile not available")
@@ -425,6 +569,11 @@ class P6Recorder:
             self.start_monitoring()
             if self._stream is None:
                 return None
+
+        # Resolve pre-roll: caller's value wins, else fall back to default
+        if pre_roll_seconds is None:
+            pre_roll_seconds = self._record_pre_roll_seconds
+        pre_roll_seconds = max(0.0, float(pre_roll_seconds))
 
         # Generate filename with device prefix
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -451,14 +600,115 @@ class P6Recorder:
             log.error("Failed to create WAV file: %s", e)
             return None
 
+        # Pre-roll: if requested, dump the tail of the recall buffer into the
+        # new file as the first frames. Snapshot the buffer state without
+        # the audio lock since numpy reads on a fixed-size array are safe
+        # against concurrent writes (we may get a torn frame at the seam,
+        # but that's a single-block hiccup, not corruption).
+        pre_roll_frames_written = 0
+        if pre_roll_seconds > 0.0 and self._recall_total_written > 0:
+            wanted = int(pre_roll_seconds * self._sample_rate)
+            filled = min(self._recall_total_written, self._recall_buf_frames)
+            take = min(wanted, filled)
+            if take > 0:
+                pos = self._recall_write_pos
+                if self._recall_total_written >= self._recall_buf_frames:
+                    # Buffer wrapped — take the most recent `take` frames
+                    # ending at write_pos (= now). That's the trailing
+                    # `take` of the ordered buffer.
+                    start = (pos - take) % self._recall_buf_frames
+                    if start + take <= self._recall_buf_frames:
+                        ordered = self._recall_buf[start:start + take]
+                    else:
+                        first = self._recall_buf_frames - start
+                        ordered = np.concatenate([
+                            self._recall_buf[start:],
+                            self._recall_buf[:take - first],
+                        ])
+                else:
+                    # Buffer hasn't wrapped — take the most recent `take`
+                    # frames ending at write_pos.
+                    start = max(0, pos - take)
+                    ordered = self._recall_buf[start:pos].copy()
+                try:
+                    writer.write(ordered)
+                    pre_roll_frames_written = len(ordered)
+                except Exception as e:
+                    log.error("Pre-roll write failed: %s", e)
+
         with self._lock:
             self._writer = writer
             self._current_file = filepath
-            self._samples_written = 0
+            self._samples_written = pre_roll_frames_written
             self._recording = True
 
-        log.info("Recording started: %s", filepath)
+        # Tag pre-roll into metadata so DAWs / users can see it
+        if pre_roll_frames_written > 0:
+            pr_secs = pre_roll_frames_written / self._sample_rate
+            self._record_metadata["pre_roll_seconds"] = round(pr_secs, 2)
+            log.info("Recording started: %s (pre-roll %.1fs)", filepath, pr_secs)
+        else:
+            log.info("Recording started: %s", filepath)
         return filepath
+
+    def recall_and_continue(self, session_name: str = "",
+                             metadata: Optional[dict] = None) -> Optional[str]:
+        """Start a recording that begins with the entire current recall
+        buffer, then continues with live audio. Convenience wrapper around
+        start_recording(pre_roll_seconds=<full buffer>)."""
+        return self.start_recording(
+            session_name=session_name,
+            metadata=metadata,
+            pre_roll_seconds=float(self._recall_buffer_seconds),
+        )
+
+    @property
+    def recall_buffer_seconds(self) -> int:
+        """Configured length of the rolling recall buffer."""
+        return self._recall_buffer_seconds
+
+    @property
+    def record_pre_roll_seconds(self) -> float:
+        """Default pre-roll length applied to every start_recording call."""
+        return self._record_pre_roll_seconds
+
+    def set_recall_buffer_seconds(self, seconds: int) -> int:
+        """Resize the recall buffer (clamped to MIN/MAX). Briefly stops
+        monitoring to swap the underlying numpy array safely. Returns the
+        clamped value actually applied. The buffer fill is reset on resize
+        — we don't try to preserve old audio across the resize because that
+        adds complexity without real benefit (resize is a settings action,
+        not something done mid-take)."""
+        seconds = max(RECALL_BUFFER_SECONDS_MIN,
+                       min(RECALL_BUFFER_SECONDS_MAX, int(seconds)))
+        if seconds == self._recall_buffer_seconds:
+            return seconds
+        was_monitoring = self._monitoring
+        if was_monitoring:
+            self.stop_monitoring()
+        self._recall_buffer_seconds = seconds
+        self._recall_buf_frames = seconds * self._sample_rate
+        self._recall_buf = np.zeros((self._recall_buf_frames, P6_CHANNELS),
+                                     dtype=np.float32)
+        self._recall_write_pos = 0
+        self._recall_total_written = 0
+        # Re-clamp the pre-roll default — can't pre-roll longer than the buffer
+        if self._record_pre_roll_seconds > seconds:
+            self._record_pre_roll_seconds = float(seconds)
+        log.info("Recall buffer resized to %ds (%d frames @ %dHz)",
+                 seconds, self._recall_buf_frames, self._sample_rate)
+        if was_monitoring:
+            self.start_monitoring()
+        return seconds
+
+    def set_record_pre_roll_seconds(self, seconds: float) -> float:
+        """Set the default pre-roll length applied to every REC press.
+        Clamped to [0, recall_buffer_seconds]. Returns the clamped value."""
+        seconds = max(0.0, min(float(self._recall_buffer_seconds),
+                                float(seconds)))
+        self._record_pre_roll_seconds = seconds
+        log.info("Record pre-roll set to %.1fs", seconds)
+        return seconds
 
     def stop_recording(self) -> Optional[str]:
         """Stop recording and close the WAV file."""
@@ -550,12 +800,33 @@ class P6Recorder:
         self._recall_write_pos = (pos + frames) % buf_len
         self._recall_total_written += frames
 
-        # Forward to monitor output (headphones on another device)
-        if self._monitor_out_stream and self._monitor_out_stream.active:
-            try:
-                self._monitor_out_stream.write(indata)
-            except Exception:
-                pass  # Don't crash the audio callback
+        # Forward to monitor output (headphones on another device).
+        # Resample to the output device's rate (no-op if matched), then
+        # push into the ring buffer; the output stream's callback drains
+        # it. If the ring buffer fills (input device clock runs faster
+        # than output's), drop oldest frames to keep latency bounded.
+        if self._monitor_out_buf is not None:
+            mon_data = indata
+            rs = self._monitor_resampler
+            if rs is not None:
+                mon_data = rs.process(indata)
+            n_mon = mon_data.shape[0]
+            if n_mon > 0:
+                with self._monitor_out_buf_lock:
+                    buf = self._monitor_out_buf
+                    if buf is not None:
+                        n = self._monitor_out_buf_frames
+                        avail_write = n - (self._monitor_out_write - self._monitor_out_read)
+                        if avail_write < n_mon:
+                            self._monitor_out_read += (n_mon - avail_write)
+                        w = self._monitor_out_write % n
+                        if w + n_mon <= n:
+                            buf[w:w + n_mon] = mon_data
+                        else:
+                            first = n - w
+                            buf[w:n] = mon_data[:first]
+                            buf[:n_mon - first] = mon_data[first:]
+                        self._monitor_out_write += n_mon
 
         # Forward to Link Audio broadcaster (sends to Live 12.4 etc. over LAN)
         if self.link_broadcaster is not None:

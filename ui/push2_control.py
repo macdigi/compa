@@ -120,9 +120,23 @@ class Push2Control:
         self.selected_scene = scene
         self.request_redraw()
 
-    def launch_clip(self, track: int, scene: int) -> None:
+    def launch_clip(self, track: int, scene: int,
+                    immediate: bool = False) -> None:
         beat = self._beat()
-        self.engine.launch_clip(track, scene, beat)
+        if immediate:
+            # Override quantize for this launch — pretend the clip's
+            # quantize is NONE so it fires on the next callback.
+            clip = self.session.get_clip(track, scene)
+            if clip is not None:
+                from session.clip import LaunchQuantize
+                saved = clip.launch_quantize
+                clip.launch_quantize = LaunchQuantize.NONE
+                self.engine.launch_clip(track, scene, beat)
+                clip.launch_quantize = saved
+            else:
+                self.engine.launch_clip(track, scene, beat)
+        else:
+            self.engine.launch_clip(track, scene, beat)
         self.selected_track = track
         self.selected_scene = scene
         self.request_redraw()
@@ -138,6 +152,131 @@ class Push2Control:
     def launch_scene(self, scene: int) -> None:
         self.engine.launch_scene(scene, self._beat())
         self.selected_scene = scene
+        self.request_redraw()
+
+    def arm_recording(self, track: int, scene: int,
+                      length_bars: int = 4) -> None:
+        """Record from the input recorder into an audio clip slot."""
+        ok = self.engine.arm_recording(
+            track=track, scene=scene,
+            link_beat=self._beat(),
+            bpm=self.session.bpm,
+            length_bars=length_bars,
+            time_sig_num=self.session.time_signature_num,
+        )
+        if not ok:
+            print("arm_recording: recorder unavailable", flush=True)
+        else:
+            print(f"arm_recording: track {track+1} scene {scene+1}, "
+                  f"{length_bars} bars", flush=True)
+        self.selected_track = track
+        self.selected_scene = scene
+        self.request_redraw()
+
+    def add_track(self, drum: bool = False) -> None:
+        """Append a new track at the end of the session.
+
+        drum=True  → MIDI track with a Drum Rack instrument.
+        drum=False → MIDI track with a SynthVoice (lead preset).
+        """
+        from session.track import Track, TrackType, InstrumentRef
+        from engine.push2driver.palette import track_color_index
+        sess = self.session
+        idx = len(sess.tracks)
+        if drum:
+            name = f"Drums {idx+1}"
+            instr = InstrumentRef(kind="drum_rack",
+                                   name="Drum Rack")
+        else:
+            name = f"Synth {idx+1}"
+            instr = InstrumentRef(kind="synth_voice", name="Synth",
+                                   params={"preset": "lead"})
+        track = Track(
+            id=idx, name=name, type=TrackType.MIDI,
+            color=track_color_index(idx), instrument=instr,
+            clips=[None] * len(sess.scenes),
+        )
+        sess.tracks.append(track)
+        # Rebuild engine instruments so the new track has audio
+        try:
+            self.engine._instantiate_instruments()
+        except Exception as e:
+            print(f"add_track: instrument build failed: {e}", flush=True)
+        self.selected_track = idx
+        self._persist()
+        self.request_redraw()
+
+    def add_scene(self) -> None:
+        """Append a new empty scene at the end."""
+        from session.scene import Scene
+        sess = self.session
+        new_idx = len(sess.scenes)
+        sess.scenes.append(Scene(name=f"Scene {new_idx+1}"))
+        # Each track grows its clip-slot list to match
+        for t in sess.tracks:
+            while len(t.clips) < len(sess.scenes):
+                t.clips.append(None)
+        self._persist()
+        self.request_redraw()
+
+    def remove_track(self, track_idx: int) -> None:
+        """Delete a track. Stops its clips first."""
+        sess = self.session
+        if not (0 <= track_idx < len(sess.tracks)):
+            return
+        try:
+            self.engine.stop_clip(track_idx, self._beat())
+        except Exception:
+            pass
+        del sess.tracks[track_idx]
+        # Re-id remaining tracks so persistence stays sane
+        for i, t in enumerate(sess.tracks):
+            t.id = i
+        try:
+            self.engine._instantiate_instruments()
+        except Exception:
+            pass
+        if self.selected_track is not None and self.selected_track >= len(sess.tracks):
+            self.selected_track = max(0, len(sess.tracks) - 1)
+        self._persist()
+        self.request_redraw()
+
+    def _persist(self) -> None:
+        try:
+            from session.persistence import save_session
+            save_session(self.session, "default")
+        except Exception:
+            pass
+
+    def capture_midi_to_clip(self) -> None:
+        """Live 12.4 'Capture MIDI' — drop the recently played MIDI
+        on the selected track into the next empty clip slot."""
+        sess = self.session
+        track = self.selected_track or 0
+        if track >= len(sess.tracks):
+            return
+        clip = self.engine.capture.capture_clip(
+            ending_beat=self._beat(),
+            bpm=sess.bpm,
+            track_filter=track,
+            time_sig_num=sess.time_signature_num,
+        )
+        if clip is None:
+            return
+        # Find next empty slot on this track
+        for s in range(len(sess.tracks[track].clips)):
+            if sess.tracks[track].clips[s] is None:
+                sess.tracks[track].clips[s] = clip
+                self.selected_scene = s
+                self._persist()
+                self.request_redraw()
+                return
+        # No empty slot: append a new scene at the end + put it there
+        self.add_scene()
+        new_idx = len(sess.scenes) - 1
+        sess.tracks[track].clips[new_idx] = clip
+        self.selected_scene = new_idx
+        self._persist()
         self.request_redraw()
 
     def duplicate_clip(self, track: int, scene: int) -> None:
