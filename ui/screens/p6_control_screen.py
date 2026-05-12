@@ -1185,18 +1185,22 @@ class P6ControlScreen:
         self._dj_fx_next_rects[deck_idx] = next_rect
         self._dj_fx_toggle_rects[deck_idx] = name_rect
 
-        # 6 control knobs (2 rows × 3 cols) below FX header
+        # 6 control knobs (2 rows × 3 cols) below FX header.
+        # Scale knob size + row spacing to fill the remaining deck height
+        # so the rack feels right on 1080p (compa-pi5) while still fitting
+        # the 480-pixel Pi 7" display (compa-2).
         knobs_y = fx_y + hdr_h + 8
-        knob_radius = 16
         ctrl_ccs = [16, 17, 18, 80, 81, 82]  # Ctrl 1-6
         knob_cell_w = inner_w // 3
-        knob_row_h = 44
+        remaining_h = max(110, (y + h) - knobs_y - 10)
+        knob_row_h = max(54, remaining_h // 2)
+        knob_radius = max(16, min(38, (knob_row_h - 24) // 2))
 
         for i, target_cc in enumerate(ctrl_ccs):
             row = i // 3
             col = i % 3
             kx = inner_x + col * knob_cell_w + knob_cell_w // 2
-            ky = knobs_y + row * knob_row_h + knob_radius + 2
+            ky = knobs_y + row * knob_row_h + knob_radius + 4
             for knob, cc in fx_knobs:
                 if cc == target_cc:
                     knob.center = (kx, ky)
