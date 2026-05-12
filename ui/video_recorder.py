@@ -190,16 +190,41 @@ class VideoRecorder:
     def capture(self, surface: pygame.Surface):
         """Push one frame. Called from the main draw loop after flip().
 
-        Throttles to self._fps — the UI may draw at 30 fps but we only
-        feed every Nth frame into ffmpeg so the encoder doesn't fall
-        behind on the Pi 3B.
+        Wall-clock-aware: ffmpeg is configured with `-r self._fps` on
+        the rawvideo input, so it timestamps each incoming frame at
+        1/_fps spacing regardless of when it actually arrived. If the
+        main loop is slower than _fps (variable UI load, audio thread
+        contention, hot-plug events, etc.), the resulting MJPEG plays
+        back FASTER than real time because there are fewer frames in
+        the file than wall-clock seconds × _fps.
+
+        Fix: each call we compute how many frames SHOULD exist by now
+        (= elapsed × _fps) and write duplicate copies of the current
+        frame to catch up. The stream duration then equals wall-clock
+        duration exactly — no setpts correction needed downstream, no
+        drift between OBS audio and Compa screen at edit time.
+
+        Catch-up is capped at 1 sec of duplicates per call so a long
+        stall (e.g. recorder-thread starvation during a re-encode)
+        can't explode ffmpeg's stdin buffer with hundreds of frames
+        in one shot — we accept losing the stalled span and stay
+        synced going forward.
         """
         if self._proc is None or self._proc.stdin is None:
             return
         now = time.monotonic()
-        if now - self._last_capture < self._frame_interval:
-            return  # too soon — skip this frame to stay on target fps
-        self._last_capture = now
+        elapsed = now - self._start_time
+        target_frames = int(elapsed * self._fps)
+        if target_frames <= self._frames:
+            return  # not yet — wait for next call
+
+        catch_up = target_frames - self._frames
+        if catch_up > self._fps:
+            # Long stall — skip ahead instead of writing a flood of
+            # duplicates. Lose the stalled span, stay real-time.
+            self._frames = target_frames - self._fps
+            catch_up = self._fps
+
         try:
             # tostring returns RGB bytes in left-to-right, top-to-bottom order
             # pygame 2.x renamed to tobytes but tostring still works
@@ -207,8 +232,10 @@ class VideoRecorder:
                 data = pygame.image.tobytes(surface, "RGB")
             else:
                 data = pygame.image.tostring(surface, "RGB")
-            self._proc.stdin.write(data)
-            self._frames += 1
+            for _ in range(catch_up):
+                self._proc.stdin.write(data)
+            self._frames += catch_up
+            self._last_capture = now  # kept for diagnostics only
         except BrokenPipeError:
             # ffmpeg died — stop silently
             log.warning("ffmpeg pipe broke after %d frames", self._frames)
