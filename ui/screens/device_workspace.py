@@ -861,6 +861,34 @@ class DeviceWorkspaceScreen:
                 surf = f_small.render(f"P{p + 1}", True, tc)
                 surface.blit(surf, surf.get_rect(center=r.center))
 
+        # Relabel knobs each frame to match the active effect's
+        # parameter names AND value formatters. Falls through to the
+        # generic "Bx Ctrl N" + raw int when the effect isn't in the
+        # SP404_EFFECT_PARAMS table (e.g. user-assigned Direct FX
+        # slots, OFF state). Mirrors what the standalone Control
+        # screen does — this is the "smart Push 2-style labels"
+        # fix promised in the SP-404 deep-dive scene.
+        try:
+            from engine.sp404_effect_params import (ctrl_label,
+                                                     format_value)
+            _CTRL_CC_TO_IDX = {16: 0, 17: 1, 18: 2,
+                                80: 3, 81: 4, 82: 5}
+            for knob, cc, _ch in self._knobs:
+                idx = _CTRL_CC_TO_IDX.get(cc)
+                if idx is None:
+                    continue
+                lbl = ctrl_label(fx_name, idx)
+                if lbl:
+                    knob.label = lbl
+                # Default-arg capture so each knob keeps the right
+                # (effect, ctrl_idx) pair.
+                knob.format_func = (
+                    lambda v, _fx=fx_name, _i=idx:
+                        format_value(_fx, _i, int(v))
+                )
+        except Exception:
+            pass
+
         # Knobs
         for knob, cc, ch in self._knobs:
             knob.draw(surface)
