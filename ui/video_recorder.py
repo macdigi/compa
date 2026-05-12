@@ -267,6 +267,7 @@ class VideoRecorder:
         print(f"Re-encoding {frames} frames at {actual_fps:.1f} fps → H.264...",
               flush=True)
 
+        encode_ok = False
         try:
             result = subprocess.run(
                 [
@@ -274,29 +275,61 @@ class VideoRecorder:
                     "-r", f"{actual_fps:.3f}",
                     "-i", self._mjpeg_tmp,
                     "-c:v", "libx264",
-                    "-preset", "medium",
+                    # preset 'fast' instead of 'medium' — re-encode time
+                    # is what drove the 14-min take 4 over the timeout cliff.
+                    # 'fast' is ~2x faster, file is ~10% larger, quality
+                    # delta is invisible for UI screen content.
+                    "-preset", "fast",
                     "-crf", "20",
                     "-pix_fmt", "yuv420p",
                     "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                     "-r", f"{actual_fps:.3f}",
                     self._output,
                 ],
-                capture_output=True, text=True, timeout=180,
+                capture_output=True, text=True,
+                # 30-minute hard cap. A long take + slow preset can
+                # legitimately need a few minutes; 3 minutes was too
+                # tight. If we hit 30 min we have bigger problems.
+                timeout=1800,
             )
-            if result.returncode != 0:
+            if result.returncode == 0:
+                encode_ok = True
+            else:
                 log.error("re-encode failed: %s", result.stderr[:500])
                 print(f"Re-encode failed: {result.stderr[:200]}", flush=True)
         except subprocess.TimeoutExpired:
-            log.error("re-encode timed out after 3 minutes")
-            print("Re-encode timed out", flush=True)
+            log.error("re-encode timed out after 30 minutes")
+            print("Re-encode timed out — MJPEG source preserved", flush=True)
         except Exception as e:
             log.error("re-encode error: %s", e)
 
-        # Clean up the MJPEG intermediate
-        try:
-            os.remove(self._mjpeg_tmp)
-        except Exception:
-            pass
+        # Clean up the MJPEG intermediate — ONLY on successful re-encode.
+        # On any failure (timeout, error, bad output), the MJPEG IS the
+        # recording and must be preserved. The Compa screen take 4 was
+        # lost because this cleanup ran unconditionally on timeout.
+        if encode_ok:
+            try:
+                os.remove(self._mjpeg_tmp)
+            except Exception:
+                pass
+        else:
+            # Rename to a recovery-friendly name so future runs don't
+            # clobber it via the start() pre-cleanup.
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            recovery_name = os.path.join(
+                os.path.dirname(self._mjpeg_tmp),
+                f"recovered_{self._label}_{ts}.mkv")
+            try:
+                os.rename(self._mjpeg_tmp, recovery_name)
+                msg = (f"Re-encode failed — MJPEG source kept as "
+                       f"{recovery_name} (re-encode manually with ffmpeg)")
+                log.warning(msg)
+                print(msg, flush=True)
+                # Surface this as the "saved" file so the user has
+                # something playable (MJPEG MKV plays in VLC/QT/etc).
+                self._output = recovery_name
+            except Exception as e:
+                log.error("recovery rename failed: %s", e)
 
         if os.path.exists(self._output):
             size_mb = os.path.getsize(self._output) / (1024 * 1024)
