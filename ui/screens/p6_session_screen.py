@@ -630,7 +630,16 @@ class P6SessionScreen:
                 else:
                     recent = np.concatenate([buf[-(display_frames - wpos):], buf[:wpos]])
 
-                if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
+                # Noise gate at ~-42 dB. Some USB devices (notably the
+                # Roland P-6) have an idle USB-out noise floor around
+                # -53 dB peak — high enough to push the previous 0.001
+                # threshold and draw a continuously wiggling "static"
+                # waveform that looked like a bug. The SP-404, by
+                # comparison, idles at -90 dB and was already invisible.
+                # 0.008 (= -42 dB) gates both noise floors while still
+                # showing any real audio (typical playback is -30 dB and
+                # higher, well above the gate).
+                if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.008:
                     mono = recent.mean(axis=1) if recent.ndim > 1 else recent
 
                     w = wave_rect.width - 4
