@@ -80,8 +80,14 @@ class VideoRecorder:
         whatever pace ffmpeg wants (not real-time), producing a
         final MP4 that matches wall-clock duration exactly.
 
-        The MJPEG intermediate is written to /dev/shm (tmpfs) so no
-        SD card wear, then deleted after re-encoding.
+        The MJPEG intermediate writes directly to the videos
+        directory (SD card), not /dev/shm (RAM). The old tmpfs path
+        works for ~10 min takes but past that the RAM pressure
+        causes the touchscreen UI thread to stutter AND can kill
+        one of two parallel ffmpegs silently — we lost a 28-min
+        take this way (2026-05-11). Modern UHS-I SD cards sustain
+        ~30 MB/s; MJPEG at 1080p30 is ~2 MB/s. Plenty of headroom.
+        The intermediate is deleted after re-encoding.
 
         If output_path is None, each call to start() generates a new
         timestamped filename under DEFAULT_VIDEO_DIR so recordings
@@ -100,7 +106,13 @@ class VideoRecorder:
         # Caller can also pass a fixed path to override.
         self._fixed_output = output_path
         self._output: Optional[str] = output_path
-        self._mjpeg_tmp = f"/dev/shm/compa_capture_{label}.mkv"
+        # MJPEG intermediate goes directly on disk in the videos dir.
+        # Leading underscore marks it as a temp file (cleaned up after
+        # re-encode). If the re-encode fails, this file IS the recording
+        # and is recoverable — no more /dev/shm RAM-eviction races.
+        os.makedirs(DEFAULT_VIDEO_DIR, exist_ok=True)
+        self._mjpeg_tmp = os.path.join(DEFAULT_VIDEO_DIR,
+                                        f"_capture_{label}.mkv")
         self._proc: Optional[subprocess.Popen] = None
         self._frames = 0
         self._start_time = 0.0
@@ -165,8 +177,8 @@ class VideoRecorder:
             self._frames = 0
             self._start_time = time.monotonic()
             self._last_capture = 0.0
-            log.info("Video recording started (MJPEG intermediate)")
-            print("Video recording: /dev/shm/compa_capture.mkv → re-encode on stop",
+            log.info("Video recording started (MJPEG intermediate → disk)")
+            print(f"Video recording: {self._mjpeg_tmp} → re-encode on stop",
                   flush=True)
             return True
         except Exception as e:
