@@ -200,6 +200,7 @@ class DeviceWorkspaceScreen:
                 ("pattern", "PATTERN"),
                 ("looper", "LOOPER"),
                 ("dj", "DJ"),
+                ("lfo", "LFO"),
             ]
             if not self.app.twister.connected:
                 tabs = [t for t in tabs if t[0] != "twister"]
@@ -399,8 +400,28 @@ class DeviceWorkspaceScreen:
                 self._handle_pattern_clicks(mx, my)
             elif tab_key == "chain":
                 self._handle_chain_tab_clicks(mx, my)
+            elif tab_key == "looper":
+                ctrl = self._ensure_control_synced()
+                if ctrl is not None:
+                    try:
+                        ctrl._handle_looper_click(mx, my)
+                    except Exception as e:
+                        print(f"[workspace] looper click failed: {e}",
+                              flush=True)
             elif tab_key == "dj":
-                self._handle_dj_clicks(mx, my)
+                # DJ handler is event-based (consumes motion/up too); the
+                # bulk of the work happens in the outer event delegation
+                # below. This branch is intentionally empty for click-only
+                # paths so the standalone handler does the routing.
+                pass
+            elif tab_key == "lfo":
+                ctrl = self._ensure_control_synced()
+                if ctrl is not None:
+                    try:
+                        ctrl._handle_lfo_click(mx, my)
+                    except Exception as e:
+                        print(f"[workspace] lfo click failed: {e}",
+                              flush=True)
             elif tab_key == "keys":
                 self._handle_keys_clicks(mx, my)
 
@@ -421,6 +442,19 @@ class DeviceWorkspaceScreen:
                 if knob.handle_event(event):
                     if self.app.p6:
                         self.app.p6.send_cc(cc, int(knob.value), channel=ch)
+
+        # DJ panel needs full event stream for crossfader drag + per-deck
+        # volume faders + FX knob drag. Delegate every event (including
+        # MOUSEMOTION and MOUSEBUTTONUP) to the standalone Control screen.
+        # The standalone `_handle_dj_event` returns True for any consumed
+        # mouse event on the DJ tab — we trust it and don't fall through.
+        if tab_key == "dj":
+            ctrl = self._ensure_control_synced()
+            if ctrl is not None:
+                try:
+                    ctrl._handle_dj_event(event)
+                except Exception as e:
+                    print(f"[workspace] dj event failed: {e}", flush=True)
 
     def _handle_sp404_clicks(self, mx, my):
         from engine.sp404_effects import fx_count_for_tab
@@ -542,17 +576,22 @@ class DeviceWorkspaceScreen:
         # ── Header ───────────────────────────────────────────────────
         self._draw_header(surface, f_large, f_small)
 
+        # Resolve active tab early — LOOPER/DJ/LFO use full-bleed layouts
+        # taken from the standalone Control screen, so we suppress the
+        # oscilloscope (which would otherwise overlap their hero buttons).
+        tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
+        full_bleed = tab_key in ("looper", "dj", "lfo")
+
         # ── Oscilloscope ─────────────────────────────────────────────
-        midi = self.app._midi_connections.get(self._device_key)
-        self._draw_oscilloscope(surface, f_hero, f_small, f_tiny, midi)
+        if not full_bleed:
+            midi = self.app._midi_connections.get(self._device_key)
+            self._draw_oscilloscope(surface, f_hero, f_small, f_tiny, midi)
 
         # ── Tab Content (hidden when scope is fullscreen) ────────────
         if self._scope_fullscreen:
             # Just show HUD over fullscreen scope
             self._draw_hud(surface, f_small)
             return
-
-        tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
 
         if tab_key == "control":
             if self._device_key == "SP-404MKII":
@@ -571,6 +610,8 @@ class DeviceWorkspaceScreen:
             self._draw_looper(surface, f_large, f_med, f_small)
         elif tab_key == "dj":
             self._draw_dj(surface, f_large, f_med, f_small)
+        elif tab_key == "lfo":
+            self._draw_lfo(surface, f_med, f_small)
         elif tab_key == "keys":
             self._draw_keyboard_tab(surface, f_med, f_small, f_tiny)
         else:
@@ -1501,77 +1542,66 @@ class DeviceWorkspaceScreen:
         surf = f_small.render("No control parameters available", True, theme.TEXT_DIM)
         surface.blit(surf, (20, y + 28))
 
-    def _draw_looper(self, surface, f_large, f_med, f_small):
-        y = self._controls_top + 6
-        btn_w = min(140, (theme.SCREEN_WIDTH - 60) // 3)
-        btn_h = min(50, self._controls_h // 3)
+    # ── Rich panel delegators ────────────────────────────────────────
+    #
+    # The standalone CONTROL screen (F2) already has fully-built Looper /
+    # DJ / LFO panels with status badges, transport, split-deck consoles,
+    # crossfaders, FX racks, modulation visualisers, etc. Rather than
+    # duplicate that logic into the workspace, we call those draw + event
+    # functions directly here. `_ensure_control_synced()` makes sure the
+    # standalone screen's CC map + knob state matches the focused device
+    # before we hand off — without it the rich DJ deck FX racks would
+    # show whatever device the standalone screen was last focused on.
 
-        buttons = [
-            ("REC", theme.RED), ("OVERDUB", theme.YELLOW), ("STOP", theme.BUTTON_BG),
-            ("DELETE", (120, 40, 40)), ("UNDO", theme.ACCENT_DIM), ("REDO", theme.ACCENT_DIM),
-        ]
-        for i, (label, bg) in enumerate(buttons):
-            r, c = i // 3, i % 3
-            x = 20 + c * (btn_w + 8)
-            rect = pygame.Rect(x, y + r * (btn_h + 8), btn_w, btn_h)
-            pygame.draw.rect(surface, bg, rect, border_radius=8)
-            pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
-            surf = f_med.render(label, True, theme.TEXT_BRIGHT)
-            surface.blit(surf, surf.get_rect(center=rect.center))
+    def _ensure_control_synced(self):
+        ctrl = self.app.screens.get("control")
+        if ctrl is None:
+            return None
+        cached_key = getattr(self, "_ctrl_last_synced_key", None)
+        if cached_key != self._device_key:
+            try:
+                ctrl.rebuild_for_device()
+                ctrl._sync_knobs()
+            except Exception as e:
+                print(f"[workspace] control sync failed: {e}", flush=True)
+            self._ctrl_last_synced_key = self._device_key
+        return ctrl
+
+    def _draw_looper(self, surface, f_large, f_med, f_small):
+        """SP-404 Looper — delegated to standalone CONTROL screen."""
+        ctrl = self._ensure_control_synced()
+        if ctrl is None:
+            return
+        try:
+            ctrl._draw_looper_tab(surface, f_small, f_med)
+        except Exception as e:
+            f = theme.font("small")
+            surf = f.render(f"Looper render error: {e}", True, theme.RED)
+            surface.blit(surf, (20, self._controls_top + 20))
 
     def _draw_dj(self, surface, f_large, f_med, f_small):
-        """SP-404 DJ Mode — dual deck controls with crossfader."""
-        f_tiny = theme.font("tiny")
-        top = self._controls_top + 4
-        ctrl_h = self._controls_h - 8
-        half_w = (theme.SCREEN_WIDTH - 30) // 2
+        """SP-404 DJ split-deck console — delegated to standalone CONTROL screen."""
+        ctrl = self._ensure_control_synced()
+        if ctrl is None:
+            return
+        try:
+            ctrl._draw_dj_tab(surface, f_small, f_med)
+        except Exception as e:
+            f = theme.font("small")
+            surf = f.render(f"DJ render error: {e}", True, theme.RED)
+            surface.blit(surf, (20, self._controls_top + 20))
 
-        # ── Deck labels ─────────────────────────────────────────────
-        surf = f_med.render("DECK A (Ch1)", True, self._device_color)
-        surface.blit(surf, (14, top))
-        surf = f_med.render("DECK B (Ch2)", True, self._device_color)
-        surface.blit(surf, (half_w + 20, top))
-
-        # ── Buttons per deck ────────────────────────────────────────
-        btn_h = min(38, (ctrl_h - 60) // 3)
-        btn_w = min(120, half_w // 2 - 8)
-
-        for deck, ch in enumerate([0, 1]):
-            dx = 14 + deck * (half_w + 6)
-            by = top + 26
-
-            buttons = [
-                ("PLAY / PAUSE", 20, 127, theme.GREEN),
-                ("CUE",          23, 127, theme.YELLOW),
-                ("SYNC",         22, 127, theme.BLUE),
-                ("BEND +",       24, 127, theme.ACCENT_DIM),
-                ("BEND -",       25, 127, theme.ACCENT_DIM),
-            ]
-            for i, (label, cc, val, color) in enumerate(buttons):
-                col = i % 2
-                row = i // 2
-                x = dx + col * (btn_w + 6)
-                y = by + row * (btn_h + 4)
-                r = pygame.Rect(x, y, btn_w, btn_h)
-                pygame.draw.rect(surface, color, r, border_radius=6)
-                surf = f_tiny.render(label, True, theme.BG)
-                surface.blit(surf, surf.get_rect(center=r.center))
-
-        # ── Crossfader (bottom, full width) ─────────────────────────
-        xf_y = top + ctrl_h - 30
-        xf_rect = pygame.Rect(14, xf_y, theme.SCREEN_WIDTH - 28, 24)
-        pygame.draw.rect(surface, theme.BG_LIGHTER, xf_rect, border_radius=4)
-        # Crossfade position from live CC
-        xf_val = self.app.live_cc.get(0, {}).get(8, 64)
-        xf_pos = int((xf_val / 127.0) * (xf_rect.width - 20))
-        handle = pygame.Rect(xf_rect.x + xf_pos, xf_y - 2, 20, 28)
-        pygame.draw.rect(surface, self._device_color, handle, border_radius=4)
-        surf = f_tiny.render("A", True, theme.TEXT_DIM)
-        surface.blit(surf, (xf_rect.x + 4, xf_y + 4))
-        surf = f_tiny.render("CROSSFADE", True, theme.TEXT_DIM)
-        surface.blit(surf, surf.get_rect(centerx=xf_rect.centerx, top=xf_y + 4))
-        surf = f_tiny.render("B", True, theme.TEXT_DIM)
-        surface.blit(surf, (xf_rect.right - 14, xf_y + 4))
+    def _draw_lfo(self, surface, f_med, f_small):
+        """LFO modulation panel — delegated to standalone CONTROL screen."""
+        ctrl = self._ensure_control_synced()
+        if ctrl is None:
+            return
+        try:
+            ctrl._draw_lfo_tab(surface, f_small, f_med)
+        except Exception as e:
+            f = theme.font("small")
+            surf = f.render(f"LFO render error: {e}", True, theme.RED)
+            surface.blit(surf, (20, self._controls_top + 20))
 
     # ── KEYS tab (chromatic keyboard) ────────────────────────────────
 
