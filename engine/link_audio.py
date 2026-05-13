@@ -440,53 +440,136 @@ class LinkAudioReceiver:
                 self._rpos += take
             if take < frames:
                 outdata[take:].fill(0)
+            # Diagnostic: log output flow every 1 sec.
+            self._diag_out_frames = getattr(self, "_diag_out_frames", 0) + take
+            try:
+                p = float(np.max(np.abs(outdata))) if take > 0 else 0.0
+                if p > getattr(self, "_diag_out_peak", 0.0):
+                    self._diag_out_peak = p
+            except Exception:
+                pass
+            now = time.monotonic()
+            last = getattr(self, "_diag_out_last_log", 0.0)
+            if now - last >= 1.0:
+                ofr = self._diag_out_frames
+                opk = getattr(self, "_diag_out_peak", 0.0)
+                print(f"Link RX tx: {ofr} frames/sec out, peak={opk:.3f}, ring_avail={avail}",
+                      flush=True)
+                self._diag_out_frames = 0
+                self._diag_out_peak = 0.0
+                self._diag_out_last_log = now
 
     # ── Recv worker (network → ring buffer) ────────────────────────
 
     def _recv_worker(self) -> None:
+        """Subscribe to ALL non-self channels and sum-mix them into the
+        ring buffer. Live can expose multiple Link Audio channels (one
+        per armed track) and the user shouldn't have to guess which
+        channel name to pick — we just take everything and mix.
+        """
         link = getattr(self._broadcaster, "_link", None)
         pla = getattr(self._broadcaster, "_pla", None)
         if link is None or pla is None:
             return
         self_peer_name = self._broadcaster.peer_name
-        # Phase 1: wait for a non-self channel to appear
-        while not self._worker_stop.is_set() and self._source is None:
-            try:
-                channels = link.channels()
-            except Exception as e:
-                print(f"Link RX: channels() failed: {e}", flush=True)
-                channels = []
-            for ch in channels:
+        # Track all active subscriptions: {channel_id: (AudioSource, name, peer)}
+        sources: dict = {}
+        # Diagnostic counters
+        diag_frames = 0
+        diag_peak = 0.0
+        diag_last_log = time.monotonic()
+        last_scan = 0.0
+
+        while not self._worker_stop.is_set():
+            now = time.monotonic()
+            # Re-scan channels every 1 sec so we pick up new channels
+            # as Live (or other peers) expose them mid-session.
+            if now - last_scan >= 1.0:
+                last_scan = now
                 try:
-                    if ch.peer_name != self_peer_name:
-                        self._source = pla.AudioSource(link, ch.id)
-                        self._channel_id = ch.id
-                        self._channel_name = ch.name
-                        print(f"Link RX: subscribed to '{ch.name}' "
-                              f"from peer '{ch.peer_name}'", flush=True)
-                        break
+                    channels = link.channels()
                 except Exception as e:
-                    print(f"Link RX: subscribe failed: {e}", flush=True)
-            if self._source is None:
-                self._worker_stop.wait(0.5)
-        # Phase 2: drain buffers from the source
-        source = self._source
-        while not self._worker_stop.is_set() and source is not None:
+                    print(f"Link RX: channels() failed: {e}", flush=True)
+                    channels = []
+                visible_ids = set()
+                for ch in channels:
+                    if ch.peer_name == self_peer_name:
+                        continue
+                    visible_ids.add(ch.id)
+                    if ch.id not in sources:
+                        try:
+                            src = pla.AudioSource(link, ch.id)
+                            sources[ch.id] = (src, ch.name, ch.peer_name)
+                            print(f"Link RX: subscribed to '{ch.name}' "
+                                  f"from peer '{ch.peer_name}' "
+                                  f"(now {len(sources)} channels mixed)",
+                                  flush=True)
+                        except Exception as e:
+                            print(f"Link RX: subscribe failed: {e}", flush=True)
+                # Drop any subscriptions for channels that disappeared
+                for cid in list(sources.keys()):
+                    if cid not in visible_ids:
+                        _, name, peer = sources.pop(cid)
+                        print(f"Link RX: channel '{name}' from '{peer}' disappeared", flush=True)
+
+            if not sources:
+                self._worker_stop.wait(0.2)
+                continue
+
+            # Pull from each source with a short timeout; sum into a
+            # per-tick mix buffer. Each source.read returns when its
+            # next packet arrives OR the timeout expires.
+            mixed = None
+            mix_channels_with_audio = 0
+            for cid, (src, name, peer) in list(sources.items()):
+                try:
+                    got = src.read(0.05)  # short timeout, poll-style
+                except Exception as e:
+                    print(f"Link RX: read failed on '{name}': {e}", flush=True)
+                    sources.pop(cid, None)
+                    continue
+                if got is None:
+                    continue
+                arr_int16, _info = got
+                f32 = arr_int16.astype(np.float32) / 32768.0
+                if self._resampler is not None:
+                    f32 = self._resampler.process(f32)
+                if f32.shape[0] <= 0:
+                    continue
+                if mixed is None:
+                    mixed = f32.copy()
+                else:
+                    # Match shape — if different lengths, use the shorter
+                    m = min(mixed.shape[0], f32.shape[0])
+                    mixed = mixed[:m] + f32[:m]
+                # Did this channel carry signal?
+                if np.max(np.abs(f32)) > 1e-4:
+                    mix_channels_with_audio += 1
+
+            if mixed is None or mixed.shape[0] == 0:
+                # Periodic log even with no data so user sees we're alive
+                if now - diag_last_log >= 1.0:
+                    print(f"Link RX rx: 0 frames/sec ({len(sources)} channels subscribed)", flush=True)
+                    diag_frames = 0; diag_peak = 0.0; diag_last_log = now
+                continue
+
+            n_in = mixed.shape[0]
+            # Soft-clip if mix exceeds [-1, 1] (rare unless many channels carrying signal)
+            np.clip(mixed, -1.0, 1.0, out=mixed)
+
+            diag_frames += n_in
             try:
-                got = source.read(0.1)  # 100ms timeout
-            except Exception as e:
-                print(f"Link RX: read failed: {e}", flush=True)
-                break
-            if got is None:
-                continue
-            arr_int16, _info = got
-            # Convert int16 → float32 in [-1, 1]
-            f32 = arr_int16.astype(np.float32) / 32768.0
-            if self._resampler is not None:
-                f32 = self._resampler.process(f32)
-            n_in = f32.shape[0]
-            if n_in <= 0:
-                continue
+                p = float(np.max(np.abs(mixed)))
+                if p > diag_peak: diag_peak = p
+            except Exception:
+                pass
+            if now - diag_last_log >= 1.0:
+                print(f"Link RX rx: {diag_frames} frames/sec, peak={diag_peak:.3f} "
+                      f"({mix_channels_with_audio}/{len(sources)} ch with audio)",
+                      flush=True)
+                diag_frames = 0; diag_peak = 0.0; diag_last_log = now
+
+            f32 = mixed  # alias for the writer block below
             with self._ring_lock:
                 buf = self._ring
                 if buf is None:
