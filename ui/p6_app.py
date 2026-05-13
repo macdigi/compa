@@ -3330,9 +3330,25 @@ class P6App:
         # Switch audio monitoring to the focused device — but skip
         # the recorder rebind when an OUT route is active so the
         # routed audio doesn't get hijacked by a focus tap.
+        #
+        # ALSO skip the rebind while screen-recording is active: the
+        # PortAudio stream close in the audio recorder calls into
+        # ALSA's kernel-side cleanup which under recording load can
+        # block in uninterruptible sleep, taking the main loop with
+        # it. The main loop is what feeds the screen-capture ffmpeg
+        # pipe, so the symptom is a frozen Compa UI for the entire
+        # duration of the audio-device handoff. Since the OBS rig on
+        # the Mac is the actual audio source during filming, we lose
+        # nothing of value by leaving the Compa-side monitor on the
+        # previous device until the screen recording stops — the
+        # user can re-tap focus to re-sync audio monitoring once the
+        # take is wrapped.
         dev = self.device_manager.active
         if dev and dev.audio_hint:
-            if not getattr(self, "_monitor_source", ""):
+            video_rec = getattr(self, "video_recorder", None)
+            screen_recording = bool(video_rec and getattr(video_rec, "recording", False))
+            if (not getattr(self, "_monitor_source", "")
+                    and not screen_recording):
                 self.recorder.switch_device(dev.audio_hint)
             # Clear playback device cache so next play() retargets to new focus
             if hasattr(self.recorder, 'clear_playback_cache'):
@@ -3342,7 +3358,7 @@ class P6App:
             if radio_screen and hasattr(radio_screen, '_radio'):
                 if hasattr(radio_screen._radio, 'retarget'):
                     radio_screen._radio.retarget(dev.audio_hint)
-            if not self.recorder._monitoring:
+            if not self.recorder._monitoring and not screen_recording:
                 self.recorder.start_monitoring()
 
         # Retarget Twister to the focused device's MIDI
