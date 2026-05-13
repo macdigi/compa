@@ -138,6 +138,13 @@ class P6Recorder:
         # Monitoring
         self._monitoring = False
 
+        # When True, switch_device() and stop_monitoring() become no-ops.
+        # Set during screen-recording so the ALSA input stream can't be
+        # torn down mid-recording (PortAudio close blocks in uninterruptible
+        # sleep under recording load → main loop hangs → Compa freezes).
+        # Set via block_audio_changes(); cleared when recording stops.
+        self._block_audio_changes = False
+
         # Monitor output — forward audio to a second device (headphones).
         # Two USB audio devices have independent crystal clocks that drift
         # against each other, so we can't write input frames straight into
@@ -288,6 +295,16 @@ class P6Recorder:
     def sample_rate(self) -> int:
         return self._sample_rate
 
+    def block_audio_changes(self, blocked: bool) -> None:
+        """Toggle the audio-thread-stability guard.
+
+        While True, switch_device() and stop_monitoring() are no-ops so
+        the input stream can't be torn down. Call with True before
+        starting screen-recording, False after stopping. Prevents ALSA
+        close from blocking the main loop under recording load.
+        """
+        self._block_audio_changes = blocked
+
     def switch_device(self, hint: str, preferred_rate: int = 0) -> bool:
         """Switch to a different audio input device.
 
@@ -296,6 +313,9 @@ class P6Recorder:
 
         Returns True if a device was found and switched to.
         """
+        if self._block_audio_changes:
+            log.debug("switch_device('%s') blocked — screen-recording active", hint)
+            return True  # Pretend success; do not touch the stream
         was_monitoring = self._monitoring
         if self._recording:
             self.stop_recording()
@@ -531,6 +551,9 @@ class P6Recorder:
 
     def stop_monitoring(self) -> None:
         """Stop the input stream."""
+        if self._block_audio_changes:
+            log.debug("stop_monitoring blocked — screen-recording active")
+            return
         if self._recording:
             self.stop_recording()
         if self._stream:

@@ -4188,6 +4188,16 @@ class P6App:
         # frame-aligned for the compositor downstream. Push 2 recorder
         # only runs when the Push 2 hardware is actually connected.
         def _start_recorders():
+            # Freeze the audio-input rebinding plumbing for the duration
+            # of the screen recording. ALSA close calls during recording
+            # block in uninterruptible kernel sleep and hang the main
+            # loop. The recorder no-ops switch_device + stop_monitoring
+            # while this flag is set, so the audio thread + oscilloscope
+            # keep running on whatever device was active when we hit go.
+            try:
+                self.recorder.block_audio_changes(True)
+            except Exception as e:
+                print(f"block_audio_changes(True) failed: {e}", flush=True)
             self.video_recorder.start()
             if getattr(self, 'push2_renderer', None):
                 self.push2_recorder.start()
@@ -4196,6 +4206,11 @@ class P6App:
             self.video_recorder.stop()
             if self.push2_recorder.recording:
                 self.push2_recorder.stop()
+            # Re-enable normal audio device handoff after the take wraps.
+            try:
+                self.recorder.block_audio_changes(False)
+            except Exception as e:
+                print(f"block_audio_changes(False) failed: {e}", flush=True)
 
         if os.path.exists("/tmp/compa_record_start"):
             os.remove("/tmp/compa_record_start")
