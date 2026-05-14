@@ -32,11 +32,16 @@ _PORT_LINE = re.compile(r"^\s+(\d+)\s+'([^']*)'\s*$")
 
 class NetworkMidi:
     def __init__(self) -> None:
-        self._enabled = self._is_active()
+        # Checked once at startup, cached. If rtpmidid isn't installed
+        # (older image flash, manual install missing it), every call
+        # to start() short-circuits instead of spamming systemctl.
+        self._installed = self._unit_exists()
+        self._enabled = self._installed and self._is_active()
         self._peer_count = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._poller: Optional[threading.Thread] = None
+        self._install_warned = False
         if self._enabled:
             self._refresh_peers()
             self._start_poller()
@@ -46,11 +51,22 @@ class NetworkMidi:
         return self._enabled
 
     @property
+    def installed(self) -> bool:
+        return self._installed
+
+    @property
     def peer_count(self) -> int:
         with self._lock:
             return self._peer_count
 
     def start(self) -> bool:
+        if not self._installed:
+            if not self._install_warned:
+                print("[NetworkMidi] rtpmidid not installed — reflash the "
+                      "Compa image or re-run setup/install.sh to enable "
+                      "Network MIDI", flush=True)
+                self._install_warned = True
+            return False
         if self._enabled and self._is_active():
             return True
         try:
@@ -92,6 +108,17 @@ class NetworkMidi:
             r = subprocess.run(
                 ["systemctl", "is-active", "--quiet", SERVICE_NAME],
                 timeout=5,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _unit_exists() -> bool:
+        try:
+            r = subprocess.run(
+                ["systemctl", "cat", SERVICE_NAME],
+                capture_output=True, timeout=5,
             )
             return r.returncode == 0
         except Exception:

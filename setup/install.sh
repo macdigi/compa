@@ -27,6 +27,12 @@ COMPA_USER="${COMPA_USER:-pi}"
 COMPA_DIR="${COMPA_DIR:-/home/${COMPA_USER}/compa}"
 COMPA_SOURCE_DIR="${COMPA_SOURCE_DIR:-}"
 
+# Pinned upstream rtpmidid release — powers the Network MIDI toggle.
+# Not in apt, so we fetch the prebuilt .deb from davidmoreno/rtpmidid.
+# Bump together with checking dependency compatibility against the
+# Pi OS Lite base (currently Debian trixie / arm64).
+RTPMIDID_VERSION="${RTPMIDID_VERSION:-26.01}"
+
 # Chroot mode — when set to 1 we skip every "live" systemd action
 # (start/restart, udevadm trigger, systemctl is-active checks).
 # Used by pi-gen during the Compa OS image build, where there's no
@@ -92,6 +98,35 @@ apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     >/dev/null
 ok "System packages installed"
+
+# ── Phase 1b: rtpmidid (Network MIDI daemon) ────────────────────────
+# Backs the Network MIDI toggle in Compa Settings — shares every USB
+# MIDI controller plugged into Compa as a Bonjour-advertised RTP-MIDI
+# session, so a Mac on the same LAN sees them in Audio MIDI Setup →
+# Network. Not in Debian's apt repo, so we install the upstream .deb
+# from davidmoreno/rtpmidid pinned to ${RTPMIDID_VERSION}. The .deb's
+# postinst enables rtpmidid.service automatically (symlink for chroot
+# builds, normal systemctl enable on live installs).
+log "Installing rtpmidid (Network MIDI daemon)"
+if dpkg -s rtpmidid >/dev/null 2>&1; then
+    ok "rtpmidid already installed"
+else
+    RTPMIDID_DEB_URL="https://github.com/davidmoreno/rtpmidid/releases/download/v${RTPMIDID_VERSION}/rtpmidid-debian-trixie-arm64-${RTPMIDID_VERSION}.deb"
+    RTPMIDID_DEB_PATH="/tmp/rtpmidid-${RTPMIDID_VERSION}.deb"
+    # apt-get install of a local .deb resolves dependencies the same
+    # way as a repo package — much safer than raw `dpkg -i`, which
+    # leaves the system half-installed if a dep is missing.
+    if curl -fsSL --max-time 60 -o "$RTPMIDID_DEB_PATH" "$RTPMIDID_DEB_URL"; then
+        if apt-get install -y --no-install-recommends "$RTPMIDID_DEB_PATH" >/dev/null 2>&1; then
+            ok "rtpmidid v${RTPMIDID_VERSION} installed (Network MIDI ready)"
+        else
+            warn "rtpmidid .deb downloaded but install failed — Network MIDI toggle will stay disabled until you re-run install.sh"
+        fi
+        rm -f "$RTPMIDID_DEB_PATH"
+    else
+        warn "Could not fetch rtpmidid v${RTPMIDID_VERSION} — Network MIDI toggle will stay disabled until you re-run install.sh"
+    fi
+fi
 
 # ── Phase 2: Repo clone or pull ─────────────────────────────────────
 log "Setting up repository at ${COMPA_DIR}"

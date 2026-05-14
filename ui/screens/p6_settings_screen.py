@@ -547,7 +547,7 @@ class P6SettingsScreen:
                            "value": "NETWORK MIDI"})
         nm = getattr(self.app, "network_midi", None)
         nm_enabled = self.app.config.get("NETWORK_MIDI_ENABLED", "0") == "1"
-        if nm is not None:
+        if nm is not None and nm.installed:
             if nm.enabled:
                 peers = nm.peer_count
                 if peers > 0:
@@ -565,8 +565,12 @@ class P6SettingsScreen:
                 "action": self._toggle_network_midi,
             })
         else:
+            # No toggle here — tapping it would just spam sudo systemctl
+            # start rtpmidid into the journal. Tell the user how to fix.
             self._rows.append({"label": "  rtpmidid not installed",
                                "type": "info", "value": "—"})
+            self._rows.append({"label": "  Reflash image or re-run install.sh",
+                               "type": "info", "value": ""})
 
         # MIDI Controller Mapping
         self._rows.append({"label": "", "type": "section", "value": "MIDI CONTROLLER"})

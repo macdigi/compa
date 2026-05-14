@@ -19,6 +19,14 @@ affect what a user sees.
   preview the in-progress feature; will re-enable by default once
   it's ready to ship.
 
+- **Network MIDI works out of the box on a fresh flash** — the
+  rtpmidid daemon that powers the Network MIDI toggle is now baked
+  into the Compa image (pinned to v26.01). No more "toggle does
+  nothing, journal fills up with start failed" on a brand-new Pi.
+  Existing Pis: re-run `setup/install.sh` to pick it up. If for any
+  reason rtpmidid is still missing, Settings → Network MIDI now shows
+  "rtpmidid not installed" instead of offering a non-working toggle.
+
 ## v0.2.0 — 2026-05-10
 
 **Recall buffer enhancements — three ways to never miss a take**
