@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import queue
 import threading
 import time
 from datetime import datetime
@@ -193,7 +194,44 @@ class P6Recorder:
         # Compa's input audio over the LAN.
         self.link_broadcaster = None
 
+        # ── Recorder worker thread ──────────────────────────────────────
+        # EVERY recorder operation the UI can trigger — switch_device,
+        # start/stop_recording, recall_buffer, recall_and_continue,
+        # start/stop_monitoring — does blocking I/O: PortAudio stream
+        # open/close (blocks in ALSA kernel state under load) and big
+        # synchronous WAV writes (the recall buffer is tens of MB). Those
+        # public methods used to run inline on the pygame main loop, so a
+        # block there froze the UI *and* the screen-capture frame feed.
+        # Now the public methods just enqueue; this single worker thread
+        # runs the actual `_impl` work serially. The main loop never does
+        # recorder I/O — it can't freeze on it. The worker can block all
+        # it likes; nothing user-visible depends on it returning fast.
+        self._cmd_queue: "queue.Queue" = queue.Queue()
+        self._worker = threading.Thread(
+            target=self._worker_loop, daemon=True, name="recorder-worker")
+        self._worker.start()
+
         self._find_device()
+
+    def _enqueue(self, fn, *args, **kwargs) -> None:
+        """Hand a recorder operation to the worker thread. Returns at once."""
+        self._cmd_queue.put((fn, args, kwargs))
+
+    def _worker_loop(self) -> None:
+        """Serially run queued recorder operations off the main loop."""
+        while True:
+            item = self._cmd_queue.get()
+            if item is None:  # shutdown sentinel
+                self._cmd_queue.task_done()
+                break
+            fn, args, kwargs = item
+            try:
+                fn(*args, **kwargs)
+            except Exception as e:
+                log.error("recorder worker: %s failed: %s",
+                          getattr(fn, "__name__", fn), e)
+            finally:
+                self._cmd_queue.task_done()
 
     def _find_device(self, preferred_rate: int = 0) -> None:
         """Find the audio input device (P-6 or audio interface) and probe sample rate."""
@@ -306,27 +344,37 @@ class P6Recorder:
         self._block_audio_changes = blocked
 
     def switch_device(self, hint: str, preferred_rate: int = 0, user_initiated: bool = False) -> bool:
-        """Switch to a different audio input device.
+        """Switch to a different audio input device (enqueued).
 
-        Stops monitoring, re-detects with the new hint, resizes the
-        recall buffer for the new sample rate, then restarts monitoring.
+        The real work runs on the recorder worker thread — stream
+        open/close blocks under load and must never run on the main
+        loop. Returns immediately; `True` just means "queued".
+        """
+        self._enqueue(self._switch_device_impl, hint, preferred_rate, user_initiated)
+        return True
 
-        When `user_initiated=True`, the call bypasses the
-        screen-recording guard — direct card-tap is always honored.
-        Internal/auto-switches still respect the guard.
+    def _switch_device_impl(self, hint: str, preferred_rate: int = 0,
+                            user_initiated: bool = False) -> bool:
+        """Worker-thread body of switch_device. Stops monitoring,
+        re-detects with the new hint, resizes the recall buffer for the
+        new sample rate, then restarts monitoring.
 
-        Returns True if a device was found and switched to.
+        When `user_initiated=True`, bypasses the screen-recording guard —
+        a direct card-tap is always honored; internal/auto-switches still
+        respect it.
         """
         if self._block_audio_changes and not user_initiated:
             log.debug("switch_device('%s') blocked — screen-recording active (auto)", hint)
             return True  # Pretend success; do not touch the stream
         was_monitoring = self._monitoring
         if self._recording:
-            self.stop_recording()
-        self.stop_monitoring()
+            self._stop_recording_impl()
+        # force=user_initiated: a deliberate card-tap switch must close
+        # the old stream even mid-recording, or the rebind no-ops and we
+        # keep capturing the previous device's (silent) input.
+        self._stop_monitoring_impl(force=user_initiated)
 
         # Small delay to let ALSA release the previous device
-        import time
         time.sleep(0.15)
 
         old_hint = self._device_hint
@@ -343,7 +391,7 @@ class P6Recorder:
             self._device_hint = old_hint
             self._find_device()
             if was_monitoring:
-                self.start_monitoring()
+                self._start_monitoring_impl()
             return False
 
         # Resize recall buffer if sample rate changed
@@ -356,7 +404,7 @@ class P6Recorder:
                      self._sample_rate, self._recall_buf_frames)
 
         if was_monitoring:
-            self.start_monitoring()
+            self._start_monitoring_impl()
 
         log.info("Switched audio input to '%s' @ %dHz", hint, self._sample_rate)
         return True
@@ -416,7 +464,12 @@ class P6Recorder:
     # ── Stream management ───────────────────────────────────────────────
 
     def start_monitoring(self) -> None:
-        """Start the input stream for level metering (without recording)."""
+        """Start the input stream for level metering (enqueued — the
+        PortAudio open can stall under load, so it runs on the worker)."""
+        self._enqueue(self._start_monitoring_impl)
+
+    def _start_monitoring_impl(self) -> None:
+        """Worker-thread body: open the input stream for level metering."""
         if self._stream is not None:
             return
         if not self.available:
@@ -553,28 +606,67 @@ class P6Recorder:
             self._monitor_out_read = 0
         self._monitor_resampler = None
 
-    def stop_monitoring(self) -> None:
-        """Stop the input stream."""
-        if self._block_audio_changes:
+    def stop_monitoring(self, force: bool = False) -> None:
+        """Stop the input stream (enqueued — `_stream.close()` blocks in
+        ALSA kernel state under load and must never run on the main loop)."""
+        self._enqueue(self._stop_monitoring_impl, force)
+
+    def _stop_monitoring_impl(self, force: bool = False) -> None:
+        """Worker-thread body: tear down the input stream.
+
+        The `_block_audio_changes` guard normally no-ops this so an
+        internal/auto switch can't tear the stream down mid-recording. A
+        `force=True` call comes from a deliberate user action (a card tap
+        via switch_device(user_initiated=True)) — that switch has
+        committed, so the old stream MUST close or the rebind silently
+        fails and we keep capturing the previous device.
+
+        Close is SYNCHRONOUS. This method runs on the recorder worker
+        thread, which is already off the pygame main loop — a blocking
+        close here can't freeze the UI. And synchronous is REQUIRED for
+        correctness: _switch_device_impl runs stop -> probe -> open in
+        sequence on this same worker thread, so the old stream must be
+        fully closed before the new one opens on the same USB device.
+        An earlier daemon-thread reap closed the old stream concurrently
+        with the new open — that race left the new SP-404 stream
+        delivering pure-silence buffers (peak 0.0000). Closing inline
+        serializes it and kills the race.
+        """
+        if self._block_audio_changes and not force:
             log.debug("stop_monitoring blocked — screen-recording active")
             return
         if self._recording:
-            self.stop_recording()
-        if self._stream:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+            self._stop_recording_impl()
+        stream = self._stream
+        self._stream = None
         self._monitoring = False
+        if stream is None:
+            return
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
 
     # ── Recording ───────────────────────────────────────────────────────
 
     def start_recording(self, session_name: str = "",
                         metadata: Optional[dict] = None,
                         pre_roll_seconds: Optional[float] = None) -> Optional[str]:
-        """Start recording to a new WAV file.
+        """Start recording to a new WAV file (enqueued).
+
+        Creating the file and — for Recall+Continue — writing the entire
+        recall buffer as pre-roll are big synchronous writes; they run on
+        the recorder worker thread, never the main loop. Returns at once.
+        """
+        self._enqueue(self._start_recording_impl, session_name, metadata,
+                      pre_roll_seconds)
+        return None
+
+    def _start_recording_impl(self, session_name: str = "",
+                              metadata: Optional[dict] = None,
+                              pre_roll_seconds: Optional[float] = None) -> Optional[str]:
+        """Worker-thread body of start_recording.
 
         Args:
             session_name: Optional prefix for the filename.
@@ -590,10 +682,13 @@ class P6Recorder:
         if sf is None:
             log.error("soundfile not available")
             return None
+        if self._recording:
+            log.debug("start_recording: already recording — ignoring")
+            return None
 
         # Ensure monitoring is active
         if self._stream is None:
-            self.start_monitoring()
+            self._start_monitoring_impl()
             if self._stream is None:
                 return None
 
@@ -681,13 +776,12 @@ class P6Recorder:
     def recall_and_continue(self, session_name: str = "",
                              metadata: Optional[dict] = None) -> Optional[str]:
         """Start a recording that begins with the entire current recall
-        buffer, then continues with live audio. Convenience wrapper around
-        start_recording(pre_roll_seconds=<full buffer>)."""
-        return self.start_recording(
-            session_name=session_name,
-            metadata=metadata,
-            pre_roll_seconds=float(self._recall_buffer_seconds),
-        )
+        buffer, then continues with live audio (enqueued). Convenience
+        wrapper — the worker runs start_recording with a full-buffer
+        pre-roll, so the big buffer write never touches the main loop."""
+        self._enqueue(self._start_recording_impl, session_name, metadata,
+                      float(self._recall_buffer_seconds))
+        return None
 
     @property
     def recall_buffer_seconds(self) -> int:
@@ -711,8 +805,12 @@ class P6Recorder:
         if seconds == self._recall_buffer_seconds:
             return seconds
         was_monitoring = self._monitoring
+        # _impl directly — this is a synchronous settings call that needs
+        # the array swapped before it returns. _stop_monitoring_impl still
+        # honors the screen-recording guard (no-op mid-take), so it can't
+        # block the main loop here.
         if was_monitoring:
-            self.stop_monitoring()
+            self._stop_monitoring_impl()
         self._recall_buffer_seconds = seconds
         self._recall_buf_frames = seconds * self._sample_rate
         self._recall_buf = np.zeros((self._recall_buf_frames, P6_CHANNELS),
@@ -725,7 +823,7 @@ class P6Recorder:
         log.info("Recall buffer resized to %ds (%d frames @ %dHz)",
                  seconds, self._recall_buf_frames, self._sample_rate)
         if was_monitoring:
-            self.start_monitoring()
+            self._start_monitoring_impl()
         return seconds
 
     def set_record_pre_roll_seconds(self, seconds: float) -> float:
@@ -738,7 +836,13 @@ class P6Recorder:
         return seconds
 
     def stop_recording(self) -> Optional[str]:
-        """Stop recording and close the WAV file."""
+        """Stop recording and close the WAV file (enqueued — the WAV
+        close + sidecar write run on the worker, off the main loop)."""
+        self._enqueue(self._stop_recording_impl)
+        return None
+
+    def _stop_recording_impl(self) -> Optional[str]:
+        """Worker-thread body: close the WAV file and write the sidecar."""
         filepath = None
         duration = 0.0
 
@@ -972,10 +1076,20 @@ class P6Recorder:
         return filled / self._sample_rate
 
     def recall_buffer(self, session_name: str = "") -> Optional[str]:
-        """Save the recall buffer to a WAV file.
+        """Save the recall buffer to a WAV file (enqueued).
 
-        Returns the filepath, or None on failure.
+        The buffer is tens of MB — writing it is a big synchronous
+        soundfile write that froze the main loop when RCL was pressed
+        mid-take. It now runs on the recorder worker thread. Returns at
+        once; the worker logs the saved path and fires
+        on_recording_complete so the Recordings tab picks it up.
         """
+        self._enqueue(self._recall_buffer_impl, session_name)
+        return None
+
+    def _recall_buffer_impl(self, session_name: str = "") -> Optional[str]:
+        """Worker-thread body: snapshot the recall buffer and write it
+        to a WAV file. Returns the filepath, or None on failure."""
         if sf is None:
             return None
 
@@ -1017,6 +1131,15 @@ class P6Recorder:
             }
             self.save_metadata(filepath, meta)
             log.info("Recall saved: %s (%.1fs)", filepath, duration)
+            print(f"Recall saved: {filepath} ({duration:.1f}s)", flush=True)
+            # Notify the app so the Recordings tab picks it up immediately,
+            # same as a normal stop_recording. Without this the recall file
+            # only appears on a manual rescan.
+            if self.on_recording_complete:
+                try:
+                    self.on_recording_complete(filepath, duration)
+                except Exception as e:
+                    log.error("on_recording_complete (recall) failed: %s", e)
             return filepath
         except Exception as e:
             log.error("Recall save failed: %s", e)
@@ -1075,10 +1198,12 @@ class P6Recorder:
             return
         self.stop_playback()
 
-        # Pause monitoring so we don't fight for USB bandwidth
+        # Pause monitoring so we don't fight for USB bandwidth.
+        # _impl directly — playback setup runs synchronously and needs the
+        # input stream released before it opens the output stream.
         was_monitoring = self._monitoring
         if was_monitoring:
-            self.stop_monitoring()
+            self._stop_monitoring_impl()
 
         # Playback state flags (accessed from UI thread)
         self._playback_stop = False
@@ -1198,7 +1323,7 @@ class P6Recorder:
                 self._playing_back = False
                 if was_monitoring:
                     try:
-                        self.start_monitoring()
+                        self._start_monitoring_impl()
                     except Exception:
                         pass
 
@@ -1269,4 +1394,9 @@ class P6Recorder:
     def shutdown(self) -> None:
         """Clean shutdown."""
         self.stop_playback()
-        self.stop_monitoring()
+        self._stop_monitoring_impl()
+        # Stop the recorder worker thread.
+        try:
+            self._cmd_queue.put(None)
+        except Exception:
+            pass
