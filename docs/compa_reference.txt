@@ -369,6 +369,20 @@ MIDI Clock Relay
   clock from the master through Compa. Disable relay to let each
   device run independently.
 
+Share USB MIDI on LAN
+  The master Network MIDI toggle. When on, Compa broadcasts itself on
+  the local network so a Mac (Audio MIDI Setup -> Network) or PC
+  (rtpMIDI driver) can connect a session and receive MIDI from any
+  USB controller plugged into Compa. Status shows "sharing" plus a
+  live peer count. See the NETWORK MIDI section for the full setup.
+
+Bypass local - send to network only
+  One toggle per connected USB MIDI controller. Off (default): the
+  controller drives the focused SP-404 / P-6 locally. On: its MIDI is
+  sent only to the connected computer over the network and no longer
+  triggers the focused device -- so you can dedicate one controller
+  to a DAW while the rest of your gear keeps working normally.
+
 Touch Calibration
   Run the touch calibration wizard if the touchscreen is not
   registering taps accurately. Follow the on-screen prompts to tap
@@ -743,6 +757,54 @@ Radio Audio Path
   audio recording is handled on a separate path. This means you can
   monitor radio on your speakers while simultaneously recording from
   a USB device without crosstalk or routing conflicts.
+
+
+== NETWORK MIDI ==
+
+Network MIDI shares any USB MIDI controller plugged into Compa with a
+computer on the same network -- no MIDI interface, no USB cable to the
+computer, just WiFi (Ethernet is steadier if you can run it).
+
+It is built on rtpmidid, an RTP-MIDI (AppleMIDI) implementation, and
+is baked into the Compa image. On a fresh flash it works out of the
+box; on an older Pi, re-run setup/install.sh to pick it up.
+
+TURNING IT ON
+  Settings -> NETWORK MIDI -> "Share USB MIDI on LAN". Status reads
+  "sharing - ready", then a peer count once a computer connects.
+
+CONNECTING FROM A MAC
+  Built in, no install. Audio MIDI Setup -> Window -> Show MIDI Studio
+  -> double-click the Network icon. Under My Sessions, create or pick
+  a session and tick Enabled. Compa appears in the Directory list --
+  select it, click Connect, and it moves into Participants. In your
+  DAW the session then shows up as a normal MIDI input port.
+
+CONNECTING FROM WINDOWS
+  Windows has no built-in RTP-MIDI. Install the free rtpMIDI driver
+  from Tobias Erichsen; same workflow and same protocol after that.
+
+BYPASS LOCAL -- DEDICATE A CONTROLLER TO THE COMPUTER
+  By default a USB controller plugged into Compa keeps doing its
+  normal job: triggering pads on the focused SP-404 / P-6. With
+  Network MIDI sharing on, its events ALSO go to the network, so the
+  controller drives both at once -- rarely what you want for a clean
+  DAW session.
+
+  The "Bypass local - send to network only" toggle fixes that. It
+  shows up per controller, both under Settings -> NETWORK MIDI and on
+  the controller's CONFIGURE screen. Flip it on and that controller
+  stops triggering the focused device entirely -- its MIDI goes only
+  to the connected computer(s). Flip it off and local control comes
+  straight back.
+
+  It is per controller, so one controller can be bypassed to Ableton
+  over the network while another keeps driving Compa locally. The
+  toggle state is saved and survives a restart.
+
+  Note: a controller with more pads than the focused device has --
+  e.g. a 16-pad grid driving the 6-pad P-6 -- will only map its first
+  pads to that device when running locally.
 
 
 == FORMAT CONVERSION REFERENCE ==

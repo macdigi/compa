@@ -12,20 +12,50 @@ affect what a user sees.
 
 ## Unreleased
 
-- **Clips tab hidden by default** — the Compa 2 clip launcher is still
-  incomplete and shouldn't be tappable yet. The nav button, F10
-  shortcut, and Push 2 Clip-button routing are all gated by a new
-  `CLIPS_TAB_ENABLED` config flag (default off). Flip to `1` to
-  preview the in-progress feature; will re-enable by default once
-  it's ready to ship.
+(nothing yet — this section fills up as new commits land)
+
+## v0.3.0 — 2026-05-14
+
+**Network MIDI bypass — dedicate a controller to your computer**
+
+- New per-controller toggle: **Settings → Network MIDI → "Bypass
+  local · send to network only"** (also on each controller's
+  CONFIGURE screen). Flip it on and that controller's MIDI goes
+  straight to your Mac/PC over the network — it stops triggering the
+  focused SP-404 / P-6. Flip it off and it's back to driving Compa
+  locally. So your MIDI Fighter, keyboard, or pad controller can
+  play Ableton over WiFi while the rest of your gear keeps working
+  as normal.
 
 - **Network MIDI works out of the box on a fresh flash** — the
-  rtpmidid daemon that powers the Network MIDI toggle is now baked
-  into the Compa image (pinned to v26.01). No more "toggle does
-  nothing, journal fills up with start failed" on a brand-new Pi.
-  Existing Pis: re-run `setup/install.sh` to pick it up. If for any
-  reason rtpmidid is still missing, Settings → Network MIDI now shows
-  "rtpmidid not installed" instead of offering a non-working toggle.
+  rtpmidid daemon that powers Network MIDI is now baked into the
+  Compa image (pinned to v26.01). No more "toggle does nothing,
+  journal fills up with start failed" on a brand-new Pi. Existing
+  Pis: re-run `setup/install.sh` to pick it up. If rtpmidid is still
+  missing for any reason, Settings → Network MIDI now shows
+  "rtpmidid not installed" instead of offering a dead toggle.
+
+**Stability — no more freezes during recording**
+
+- **Compa no longer locks up under load.** Every recorder action —
+  switching the focused card, hitting Recall or +REC, starting or
+  stopping a recording, monitoring — now runs off the UI thread.
+  Hammering card switches or the recall buffer during a screen
+  recording used to freeze the whole screen; it doesn't anymore.
+
+- **Recording and the oscilloscope reliably follow the focused
+  card.** Rapid switching between the SP-404 and P-6 could leave
+  Compa capturing silence from the wrong device — the audio input
+  now hands off cleanly every time.
+
+**Other**
+
+- **Clips tab hidden by default** — the Compa 2 clip launcher is
+  still incomplete and shouldn't be tappable yet. The nav button,
+  F10 shortcut, and Push 2 Clip-button routing are gated by a new
+  `CLIPS_TAB_ENABLED` config flag (default off). Flip to `1` to
+  preview the in-progress feature; re-enabled by default once it's
+  ready to ship.
 
 ## v0.2.0 — 2026-05-10
 
