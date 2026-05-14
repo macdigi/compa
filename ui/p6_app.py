@@ -3307,11 +3307,15 @@ class P6App:
             channel = getattr(focused_midi, 'ch_sampler', 10)
             kb.set_target(focused_midi, channel, pitchbend_mode=False)
 
-    def switch_focus(self, short_name: str) -> bool:
+    def switch_focus(self, short_name: str, user_initiated: bool = False) -> bool:
         """Switch which device the UI controls.
 
         Updates DeviceManager focus, rebuilds MIDI router, switches
         audio monitoring, and retargets Twister to the new device.
+
+        `user_initiated=True` (from a card tap) bypasses the
+        screen-recording audio guard so the demo can re-bind the
+        oscilloscope mid-take.
         """
         if not self.device_manager.set_focus(short_name):
             return False
@@ -3348,8 +3352,8 @@ class P6App:
             video_rec = getattr(self, "video_recorder", None)
             screen_recording = bool(video_rec and getattr(video_rec, "recording", False))
             if (not getattr(self, "_monitor_source", "")
-                    and not screen_recording):
-                self.recorder.switch_device(dev.audio_hint)
+                    and (not screen_recording or user_initiated)):
+                self.recorder.switch_device(dev.audio_hint, user_initiated=user_initiated)
             # Clear playback device cache so next play() retargets to new focus
             if hasattr(self.recorder, 'clear_playback_cache'):
                 self.recorder.clear_playback_cache()
@@ -3358,7 +3362,7 @@ class P6App:
             if radio_screen and hasattr(radio_screen, '_radio'):
                 if hasattr(radio_screen._radio, 'retarget'):
                     radio_screen._radio.retarget(dev.audio_hint)
-            if not self.recorder._monitoring and not screen_recording:
+            if not self.recorder._monitoring and (not screen_recording or user_initiated):
                 self.recorder.start_monitoring()
 
         # Retarget Twister to the focused device's MIDI

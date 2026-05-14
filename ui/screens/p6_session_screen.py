@@ -119,8 +119,9 @@ class P6SessionScreen:
                             self.app.switch_screen("device_workspace",
                                                    context={"device": dev_name})
                         else:
-                            # Single tap → focus + start monitoring
-                            self.app.switch_focus(dev_name)
+                            # Single tap → focus + start monitoring (user-initiated
+                            # — bypasses the screen-recording audio guard)
+                            self.app.switch_focus(dev_name, user_initiated=True)
                         self._last_card_tap = now
                         self._last_card_name = dev_name
                         return

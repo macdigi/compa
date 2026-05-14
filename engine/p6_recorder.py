@@ -305,16 +305,20 @@ class P6Recorder:
         """
         self._block_audio_changes = blocked
 
-    def switch_device(self, hint: str, preferred_rate: int = 0) -> bool:
+    def switch_device(self, hint: str, preferred_rate: int = 0, user_initiated: bool = False) -> bool:
         """Switch to a different audio input device.
 
         Stops monitoring, re-detects with the new hint, resizes the
         recall buffer for the new sample rate, then restarts monitoring.
 
+        When `user_initiated=True`, the call bypasses the
+        screen-recording guard — direct card-tap is always honored.
+        Internal/auto-switches still respect the guard.
+
         Returns True if a device was found and switched to.
         """
-        if self._block_audio_changes:
-            log.debug("switch_device('%s') blocked — screen-recording active", hint)
+        if self._block_audio_changes and not user_initiated:
+            log.debug("switch_device('%s') blocked — screen-recording active (auto)", hint)
             return True  # Pretend success; do not touch the stream
         was_monitoring = self._monitoring
         if self._recording:
