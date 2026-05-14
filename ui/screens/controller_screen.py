@@ -115,6 +115,19 @@ class ControllerScreen:
 
         prof = binding.profile
 
+        # Pinned banner row: Network MIDI bypass toggle for THIS controller.
+        # When ON, this controller's MIDI is sent over the network only
+        # (no local pad triggers / focus-device control). rtpmidid handles
+        # the broadcast — we just suppress local dispatch.
+        self._rows.append({
+            "type": "bypass",
+            "label": "Bypass to Network MIDI",
+            "sub": ("On — events go to network peers only"
+                    if prof.network_bypass else
+                    "Off — controls focused device locally"),
+            "on": prof.network_bypass,
+        })
+
         for action_id in self._actions_for_tab(self._tab):
             label = controller_actions.action_label(action_id)
             src = prof.sources_by_action.get(action_id)
@@ -227,6 +240,19 @@ class ControllerScreen:
         if not (0 <= idx < len(self._rows)):
             return
         row = self._rows[int(idx)]
+
+        # Bypass-to-Network toggle: any tap on the banner row flips it
+        if row.get("type") == "bypass":
+            mapper = self._mapper()
+            binding = self._active_binding()
+            if mapper and binding:
+                new_state = not row.get("on", False)
+                mapper.set_network_bypass(binding, new_state)
+                self._set_msg("Bypass ON — events sent to network only"
+                              if new_state else
+                              "Bypass OFF — local control restored")
+            return
+
         if row.get("type") != "mapping":
             return
 
@@ -370,6 +396,30 @@ class ControllerScreen:
                     surface.blit(f_tiny.render(row["sub"], True,
                                                theme.TEXT_DIM),
                                  (20, ry + 22))
+                continue
+
+            if row["type"] == "bypass":
+                # Header-style banner: label left, status sub-text below,
+                # pill toggle right. Tap anywhere on row to toggle.
+                is_on = row.get("on", False)
+                surface.blit(f_small.render(row["label"], True,
+                                            theme.TEXT_BRIGHT),
+                             (20, ry + 4))
+                surface.blit(f_tiny.render(row.get("sub", ""), True,
+                                           theme.TEXT_DIM),
+                             (20, ry + 22))
+                pill_w, pill_h = 64, row_h - 12
+                pill_rect = pygame.Rect(theme.SCREEN_WIDTH - pill_w - 16,
+                                        ry + 6, pill_w, pill_h)
+                pill_bg = theme.YELLOW if is_on else theme.BG_LIGHTER
+                pygame.draw.rect(surface, pill_bg, pill_rect,
+                                 border_radius=pill_h // 2)
+                pygame.draw.rect(surface, theme.BORDER, pill_rect, 1,
+                                 border_radius=pill_h // 2)
+                pill_label = "ON" if is_on else "OFF"
+                pill_tc = theme.BG if is_on else theme.TEXT
+                pl = f_tiny.render(pill_label, True, pill_tc)
+                surface.blit(pl, pl.get_rect(center=pill_rect.center))
                 continue
 
             if row["type"] == "mapping":

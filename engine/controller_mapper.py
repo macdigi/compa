@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -148,6 +149,11 @@ class Profile:
     source_path: str = ""  # file this profile was loaded from (for debug)
     # user_override flag: True if this mapping came from an override file
     overridden_actions: set = field(default_factory=set)
+    # Network MIDI bypass: when True, this controller's MIDI events
+    # are NOT dispatched to local Compa actions — they're left for
+    # rtpmidid to broadcast over the network only. Persisted per-port
+    # in the override JSON. Default OFF.
+    network_bypass: bool = False
 
     def match_port(self, port_name: str) -> bool:
         lower = port_name.lower()
@@ -212,6 +218,61 @@ def _load_profile_file(path: str) -> Optional[Profile]:
         return None
 
 
+# ── ALSA seq helpers (rtpmidid bridging) ────────────────────────────
+#
+# These are only ever called from a background daemon thread (see
+# ControllerMapper._route_bypass_worker) — never the pygame UI thread.
+# `aconnect` is a short-lived process that releases its ALSA seq client
+# on exit, so it does not leak (unlike a leaked rtmidi.MidiIn).
+
+# rtmidi port names on Linux ALSA look like
+#   "Midi Fighter Spectra:Midi Fighter Spectra MIDI 1 16:0"
+# We want the trailing "16:0" to feed `aconnect`.
+_ALSA_ID_RE = re.compile(r"(\d+:\d+)\s*$")
+
+
+def _parse_alsa_port_id(port_name: str) -> Optional[str]:
+    m = _ALSA_ID_RE.search(port_name)
+    return m.group(1) if m else None
+
+
+def _list_rtpmidid_peer_ports() -> list[str]:
+    """Return "client:port" strings for active rtpmidid peer sessions.
+
+    rtpmidid's ALSA seq layout: port 0 = "Network Export" (host-level
+    aggregator that does NOT forward USB devices to peers), port 1 =
+    announce listener, port 2+ = one per connected RTP-MIDI peer
+    (Mac / Windows sessions). We bridge controllers straight to the
+    port-2+ peer ports — that's the only route that actually reaches
+    the remote DAW.
+    """
+    try:
+        r = subprocess.run(["aconnect", "-l"], capture_output=True,
+                           text=True, timeout=3)
+    except Exception:
+        return []
+    if r.returncode != 0:
+        return []
+    rtpmidid_client: Optional[int] = None
+    peers: list[str] = []
+    for line in r.stdout.splitlines():
+        if line.startswith("client "):
+            m = re.match(r"client (\d+):\s*'([^']+)'", line)
+            if not m:
+                continue
+            if m.group(2) == "rtpmidid":
+                rtpmidid_client = int(m.group(1))
+            elif rtpmidid_client is not None:
+                break  # past rtpmidid's section
+            continue
+        if rtpmidid_client is None:
+            continue
+        m = re.match(r"^\s+(\d+)\s+'", line)
+        if m and int(m.group(1)) >= 2:
+            peers.append(f"{rtpmidid_client}:{m.group(1)}")
+    return peers
+
+
 def _apply_override_to_profile(prof: Profile, override_path: str):
     """Overlay an override JSON onto an existing profile in place."""
     try:
@@ -220,6 +281,9 @@ def _apply_override_to_profile(prof: Profile, override_path: str):
     except Exception as e:
         log.debug("override %s not loaded: %s", override_path, e)
         return
+    # Top-level per-port flags
+    if "network_bypass" in data:
+        prof.network_bypass = bool(data["network_bypass"])
     for entry in data.get("mappings", []):
         action_id = entry.get("action")
         if not action_id:
@@ -257,6 +321,7 @@ class ActiveBinding:
         self._midi_in = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        midi_in = None
         try:
             midi_in = rtmidi.MidiIn()
             midi_in.open_port(port_index)
@@ -264,6 +329,14 @@ class ActiveBinding:
             self._midi_in = midi_in
         except Exception as e:
             log.warning("failed to open %s: %s", port_name, e)
+            # open_port() can fail after MidiIn() already grabbed an
+            # ALSA seq client — release it so we don't leak.
+            if midi_in is not None:
+                try:
+                    midi_in.delete()
+                except Exception:
+                    pass
+            self._midi_in = None
 
     def start(self):
         if self._midi_in is None:
@@ -279,6 +352,13 @@ class ActiveBinding:
         if self._midi_in is not None:
             try:
                 self._midi_in.close_port()
+            except Exception:
+                pass
+            # close_port() alone leaves the ALSA seq client allocated —
+            # .delete() actually frees it. Without this, every
+            # controller hot-unplug / rescan leaked a client.
+            try:
+                self._midi_in.delete()
             except Exception:
                 pass
             self._midi_in = None
@@ -307,12 +387,22 @@ class ActiveBinding:
             return
         src, value = parsed
 
-        # MIDI Learn — capture and return without dispatching
+        # MIDI Learn — capture and return without dispatching. Allow
+        # learn capture even in bypass mode so users can still re-map
+        # actions for future local use without flipping bypass off.
         if self.mapper._learn_target is not None:
             # Ignore all-zero note-off at the start (treat as release)
             if src.kind == "note" and value == 0:
                 return
             self.mapper._capture_learn(self, src)
+            return
+
+        # Network MIDI bypass — this controller is dedicated to RTP-MIDI.
+        # rtpmidid is subscribed to the same ALSA seq port at the kernel
+        # level and continues forwarding events to network peers; we just
+        # skip the local action dispatch so pads / knobs don't trigger
+        # the focused device while we're sending over the network.
+        if self.profile.network_bypass:
             return
 
         # Dispatch — look up the action for this source on this profile
@@ -407,12 +497,23 @@ class ControllerMapper:
             time.sleep(2.0)
 
     def _scan_once(self):
+        # ALSA seq client hygiene: rtmidi.MidiIn() opens a sequencer
+        # client. If get_ports() raises (e.g. ALSA seq is under memory
+        # pressure), the old code skipped .delete() and leaked the
+        # client every 2 s — spiralling into "Cannot allocate memory"
+        # exhaustion. The finally block guarantees release on every path.
+        midi_in = None
         try:
             midi_in = rtmidi.MidiIn()
             ports = midi_in.get_ports()
-            midi_in.delete()
         except Exception:
             return
+        finally:
+            if midi_in is not None:
+                try:
+                    midi_in.delete()
+                except Exception:
+                    pass
 
         active_port_names = set()
         for i, name in enumerate(ports):
@@ -431,6 +532,7 @@ class ControllerMapper:
                         mappings=dict(prof.mappings),
                         sources_by_action=dict(prof.sources_by_action),
                         source_path=prof.source_path,
+                        network_bypass=prof.network_bypass,
                     )
                     # Apply overrides for this specific port
                     override_path = self._override_path(name)
@@ -444,6 +546,12 @@ class ControllerMapper:
                     log.info("claimed port: %s → profile %s", name, inst.name)
                     print(f"ControllerMapper: {name} → {inst.name}",
                           flush=True)
+                    # Re-apply a persisted bypass: if this controller
+                    # was left in network-bypass mode, re-wire it to any
+                    # rtpmidid peers that are already connected. Off the
+                    # UI thread — same as the live toggle path.
+                    if inst.network_bypass:
+                        self._spawn_bypass_router(name, True)
                     break
 
         # Drop bindings whose ports are gone
@@ -543,6 +651,76 @@ class ControllerMapper:
         prof.overridden_actions.add(action_id)
         self._save_override(binding.port_name, prof)
 
+    def set_network_bypass(self, binding: ActiveBinding, on: bool) -> None:
+        """Toggle Network MIDI bypass for a single controller binding.
+
+        When ON:
+          1. ActiveBinding._handle_message skips local action dispatch —
+             the controller's pads/knobs no longer trigger the focused
+             device (SP-404 / P-6).
+          2. A background worker `aconnect`s the controller's ALSA seq
+             port to every connected rtpmidid peer session, so its MIDI
+             lands in the remote DAW. rtpmidid's host-level "Network
+             Export" port does NOT forward USB devices to peers, so the
+             direct per-peer bridge is required.
+
+        When OFF (default): the worker tears those bridges down and
+        local dispatch resumes.
+
+        The aconnect work runs OFF the pygame UI thread — doing it
+        inline previously froze the whole app. Persisted per-port in
+        the override JSON; survives restarts (re-applied on binding
+        creation in _scan_once). No-op if already in the requested
+        state.
+        """
+        on = bool(on)
+        if binding.profile.network_bypass == on:
+            return
+        binding.profile.network_bypass = on
+        self._save_override(binding.port_name, binding.profile)
+        log.info("network_bypass[%s] = %s", binding.port_name, on)
+        self._spawn_bypass_router(binding.port_name, on)
+
+    def _spawn_bypass_router(self, port_name: str, enable: bool) -> None:
+        """Fire-and-forget daemon thread that runs the aconnect bridges.
+        Kept off the UI thread so a slow `aconnect` can never stall the
+        pygame loop."""
+        t = threading.Thread(
+            target=self._route_bypass_worker,
+            args=(port_name, enable),
+            name="bypass-router",
+            daemon=True,
+        )
+        t.start()
+
+    @staticmethod
+    def _route_bypass_worker(port_name: str, enable: bool) -> None:
+        src = _parse_alsa_port_id(port_name)
+        if not src:
+            log.debug("bypass-router: no alsa id in %r", port_name)
+            return
+        peers = _list_rtpmidid_peer_ports()
+        if not peers:
+            log.info("bypass-router: no rtpmidid peers connected yet "
+                     "(%s) — connect a Network MIDI session on the Mac",
+                     port_name)
+            return
+        for peer in peers:
+            cmd = ["aconnect"] + ([] if enable else ["-d"]) + [src, peer]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=3)
+                if r.returncode == 0:
+                    log.info("bypass-router: %s %s %s",
+                             "wired" if enable else "unwired", src, peer)
+                else:
+                    # already-connected / already-disconnected both
+                    # return non-zero — harmless.
+                    log.debug("bypass-router: aconnect rc=%d (%s)",
+                              r.returncode, r.stderr.strip())
+            except Exception as e:
+                log.warning("bypass-router: aconnect failed: %s", e)
+
     def reset_overrides(self, binding: ActiveBinding):
         """Delete the override file for this port and reload from ship profile."""
         path = self._override_path(binding.port_name)
@@ -558,6 +736,7 @@ class ControllerMapper:
                 binding.profile.sources_by_action = dict(
                     ship.sources_by_action)
                 binding.profile.overridden_actions.clear()
+                binding.profile.network_bypass = False
                 break
 
     def _save_override(self, port_name: str, profile: Profile):
@@ -596,6 +775,7 @@ class ControllerMapper:
             payload = {
                 "port_name": port_name,
                 "profile": profile.name,
+                "network_bypass": bool(profile.network_bypass),
                 "mappings": override_entries,
             }
             with open(path, "w") as f:

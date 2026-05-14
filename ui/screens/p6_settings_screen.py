@@ -564,6 +564,34 @@ class P6SettingsScreen:
                 "value": nm_enabled,
                 "action": self._toggle_network_midi,
             })
+
+            # Per-controller "Bypass local → send to network only" toggles.
+            # When ON, this controller stops triggering the focused
+            # device (no SP / P-6 pad fires) — its MIDI is routed straight
+            # to every connected Network MIDI peer (Mac / Windows session).
+            # When OFF (default), the controller drives the focused
+            # device locally and stays off the network.
+            cm = getattr(self.app, "controller_mapper", None)
+            if cm is not None and nm.enabled:
+                cm_bindings = cm.connected_controllers()
+                if cm_bindings:
+                    self._rows.append({
+                        "label": "  Bypass local · send to network only",
+                        "type": "info", "value": "",
+                    })
+                    for b in cm_bindings:
+                        # Default-arg closure pins the binding for each row
+                        def _make_toggle(_b=b, _cm=cm):
+                            def _do():
+                                _cm.set_network_bypass(
+                                    _b, not _b.profile.network_bypass)
+                            return _do
+                        self._rows.append({
+                            "label": f"    {b.profile.name}",
+                            "type": "toggle",
+                            "value": b.profile.network_bypass,
+                            "action": _make_toggle(),
+                        })
         else:
             # No toggle here — tapping it would just spam sudo systemctl
             # start rtpmidid into the journal. Tell the user how to fix.
