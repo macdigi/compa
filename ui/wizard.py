@@ -111,7 +111,7 @@ def run_wizard(screen: pygame.Surface, clock: pygame.time.Clock, app):
     surf = f_large.render("Welcome to Compa", True, theme.TEXT_BRIGHT)
     screen.blit(surf, (sw // 2 - surf.get_width() // 2, text_y))
 
-    surf = f_med.render("P-6 Companion", True, theme.TEXT_DIM)
+    surf = f_med.render("SP-404 MK2 + P-6 Companion", True, theme.TEXT_DIM)
     screen.blit(surf, (sw // 2 - surf.get_width() // 2, text_y + 34))
 
     _draw_step_indicator(0, total_steps)
@@ -286,20 +286,93 @@ def run_wizard(screen: pygame.Surface, clock: pygame.time.Clock, app):
         if choice == -1:
             return
         if choice == 0:
-            # Run ts_calibrate
-            env = os.environ.copy()
-            env["TSLIB_TSDEVICE"] = env.get("TSLIB_TSDEVICE", "/dev/input/touchscreen")
-            env["TSLIB_FBDEVICE"] = env.get("TSLIB_FBDEVICE", "/dev/fb0")
-            env["TSLIB_CALIBFILE"] = "/etc/pointercal"
-            try:
-                proc = subprocess.Popen(["sudo", "ts_calibrate"], env=env)
-                proc.wait(timeout=60)
-            except Exception as e:
-                print(f"Calibration: {e}", flush=True)
+            # In-app calibration: 4 corners + center, capture taps,
+            # compute affine matrix, save to ~/.config/compa/touch_calibration.json.
+            # (Replaces the old ts_calibrate subprocess which only handles
+            # resistive ADS7846-class panels — it hangs on modern HID
+            # touchscreens, taking over the framebuffer and freezing the wizard.)
+            from engine.touch_calibration import compute_matrix, TouchCalibration
 
-            # Brief pause after calibration
+            INSET = 60
+            R_OUT = 28
+            R_IN = 6
+            cal_targets = [
+                (INSET, INSET),
+                (sw - INSET, INSET),
+                (sw - INSET, sh - INSET),
+                (INSET, sh - INSET),
+                (sw // 2, sh // 2),
+            ]
+            cal_raw = []
+            cal_aborted = False
+            for idx, (tx, ty) in enumerate(cal_targets):
+                # Draw target + progress
+                screen.fill(theme.BG)
+                title_s = f_title.render("Touch Calibration",
+                                         True, theme.ACCENT)
+                screen.blit(title_s, (sw // 2 - title_s.get_width() // 2,
+                                      sh // 2 - 110))
+                prog_s = f_small.render(f"{idx} / {len(cal_targets)}",
+                                        True, theme.TEXT)
+                screen.blit(prog_s, (sw // 2 - prog_s.get_width() // 2,
+                                     sh // 2 - 75))
+                hint_s = f_small.render("Tap each target as it appears",
+                                        True, theme.TEXT_DIM)
+                screen.blit(hint_s, (sw // 2 - hint_s.get_width() // 2,
+                                     sh // 2 - 55))
+                pygame.draw.circle(screen, theme.ACCENT_BRIGHT,
+                                   (tx, ty), R_OUT, 3)
+                pygame.draw.line(screen, theme.ACCENT_BRIGHT,
+                                 (tx - R_OUT, ty), (tx + R_OUT, ty), 1)
+                pygame.draw.line(screen, theme.ACCENT_BRIGHT,
+                                 (tx, ty - R_OUT), (tx, ty + R_OUT), 1)
+                pygame.draw.circle(screen, theme.TEXT_BRIGHT,
+                                   (tx, ty), R_IN)
+                _flip(screen)
+
+                # Wait for tap (raw — no calibration applied yet)
+                tap = None
+                while tap is None:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            cal_aborted = True
+                            break
+                        if (event.type == pygame.KEYDOWN
+                                and event.key == pygame.K_ESCAPE):
+                            cal_aborted = True
+                            break
+                        if (event.type == pygame.MOUSEBUTTONDOWN
+                                and event.button == 1):
+                            tap = event.pos
+                            break
+                        if event.type == pygame.FINGERDOWN:
+                            tap = (int(event.x * sw), int(event.y * sh))
+                            break
+                    if cal_aborted:
+                        break
+                    clock.tick(fps)
+                if cal_aborted:
+                    break
+                cal_raw.append(tap)
+
+            # Compute + save matrix
             screen.fill(theme.BG)
-            surf = f_med.render("Calibration complete", True, theme.GREEN)
+            if not cal_aborted and len(cal_raw) == len(cal_targets):
+                try:
+                    matrix = compute_matrix(cal_raw, cal_targets)
+                    cal = TouchCalibration()
+                    cal.save(matrix)
+                    if hasattr(app, "touch_calibration"):
+                        app.touch_calibration.load()
+                    surf = f_med.render("Calibration saved",
+                                        True, theme.GREEN)
+                except Exception as e:
+                    print(f"Calibration: {e}", flush=True)
+                    surf = f_med.render("Calibration failed — skipped",
+                                        True, theme.YELLOW)
+            else:
+                surf = f_med.render("Calibration cancelled",
+                                    True, theme.TEXT_DIM)
             screen.blit(surf, (sw // 2 - surf.get_width() // 2, sh // 2))
             _flip(screen)
             pygame.time.wait(1500)

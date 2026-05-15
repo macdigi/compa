@@ -84,6 +84,9 @@ apt-get install -y --no-install-recommends \
     libsdl2-mixer-2.0-0 \
     libsdl2-image-2.0-0 \
     libsdl2-ttf-2.0-0 \
+    libegl1 \
+    libgles2 \
+    libegl-mesa0 \
     libportaudio2 \
     libsndfile1 \
     libusb-1.0-0 \
@@ -181,7 +184,9 @@ sudo -u "${COMPA_USER}" "${COMPA_DIR}/venv/bin/pip" install \
     --quiet --disable-pip-version-check \
     sounddevice \
     soundfile \
-    pyusb
+    pyusb \
+    aalink \
+    pylinkaudio
 ok "Python packages installed"
 
 # ── Phase 4: Fonts ──────────────────────────────────────────────────

@@ -14,6 +14,37 @@ affect what a user sees.
 
 (nothing yet — this section fills up as new commits land)
 
+## v0.3.1 — 2026-05-15
+
+**First-boot wizard — actually works on a fresh flash now**
+
+- **Compa now boots into the wizard.** The v0.3.0 image was missing
+  the EGL graphics libraries (`libegl1`, `libgles2`, `libegl-mesa0`),
+  so pygame crashed on every boot trying to initialize the display
+  and the Pi sat at a terminal `compa login:` prompt instead. The
+  image build now installs them. Existing v0.3.0 Pis: a one-time
+  `sudo apt install libegl1 libgles2 libegl-mesa0` fixes it without
+  re-flashing.
+
+- **Touchscreen calibration in the wizard no longer freezes.** The
+  "Calibrate Now" button was calling the legacy `ts_calibrate` tool,
+  which only handles resistive ADS7846 panels — on a modern HID
+  touchscreen it would hang for 60 s, take over the framebuffer, and
+  crash the wizard. The wizard now uses the same in-app calibration
+  flow Settings has had since v0.1.1 (four corners + center, affine
+  least-squares fit, saved to `~/.config/compa/touch_calibration.json`).
+
+- **Welcome card now says "SP-404 MK2 + P-6 Companion"** instead of
+  just "P-6 Companion" — Compa supports both samplers (plus any
+  USB-class-compliant device), and the wizard's intro card should
+  say so.
+
+- **`pylinkaudio` and `aalink` are now in the image's venv.** Same
+  gap as v0.1.1 — the install script wasn't pip-installing them
+  even though they're in `requirements.txt`. Without them, Compa
+  printed "pylinkaudio not installed — Link Audio broadcast disabled"
+  at startup. Now baked in so Link Audio works on a fresh flash.
+
 ## v0.3.0 — 2026-05-14
 
 **Network MIDI bypass — dedicate a controller to your computer**
