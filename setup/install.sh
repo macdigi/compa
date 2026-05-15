@@ -186,7 +186,7 @@ sudo -u "${COMPA_USER}" "${COMPA_DIR}/venv/bin/pip" install \
     soundfile \
     pyusb \
     aalink \
-    pylinkaudio
+    git+https://github.com/macdigi/pylinkaudio.git
 ok "Python packages installed"
 
 # ── Phase 4: Fonts ──────────────────────────────────────────────────
