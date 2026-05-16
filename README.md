@@ -10,6 +10,12 @@
   <a href="https://raredata.net"><img src="https://img.shields.io/badge/by-RARE%20DATA-000000?style=flat-square" alt="RARE DATA"></a>
 </p>
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=sNWSUpfMyio"><strong>▶ Watch the full 1-hour walkthrough</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://raredata.net/compa">Download Compa OS</a>
+</p>
+
 ---
 
 Compa is a touchscreen companion for the **Roland SP-404 MKII and P-6**. It runs on a Raspberry Pi and turns the two grooveboxes into a tighter, more playable setup — direct control over both devices from one screen, a chromatic keyboard that plays either one melodically, live recording with a 60-second recall buffer, and a full kit-building pipeline that exports to **Akai MPC (.xpm)**, **Akai Force**, and **Ableton Live (.adg)**.
