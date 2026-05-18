@@ -3,7 +3,7 @@
 # Run as regular user (pi), NOT root
 set -e
 
-echo "=== Pi Sampler: Network Mount Setup ==="
+echo "=== Compa: Network Mount Setup ==="
 
 # Load config
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,7 +15,7 @@ MOUNT_POINT="/mnt/samples"
 if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
     echo ">>> Generating SSH key pair..."
     mkdir -p "$HOME/.ssh"
-    ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N "" -C "pi-sampler"
+    ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N "" -C "compa"
     echo ""
 fi
 
