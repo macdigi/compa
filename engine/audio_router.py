@@ -87,6 +87,10 @@ class AudioRoute:
         return "?"
 
     @property
+    def source_device(self) -> int:
+        return self._src_dev
+
+    @property
     def dest_name(self) -> str:
         if sd and self._dst_dev is not None:
             try:
@@ -94,6 +98,10 @@ class AudioRoute:
             except Exception:
                 pass
         return "?"
+
+    @property
+    def dest_device(self) -> int:
+        return self._dst_dev
 
     def start(self) -> bool:
         """Start the audio route. Returns True on success."""

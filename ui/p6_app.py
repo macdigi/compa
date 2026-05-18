@@ -3432,8 +3432,23 @@ class P6App:
         if src_idx is None or dst_idx is None:
             return False
 
-        src_rate = src_profile.supported_sample_rates[0] if src_profile.supported_sample_rates else 44100
-        dst_rate = dst_profile.supported_sample_rates[0] if dst_profile.supported_sample_rates else 44100
+        def _probe_rate(device_idx: int, fallback_rates: list[int]) -> int:
+            try:
+                import sounddevice as sd
+                info = sd.query_devices(device_idx)
+                rate = int(info.get("default_samplerate", 0))
+                if rate > 0:
+                    return rate
+            except Exception:
+                pass
+            return fallback_rates[-1] if fallback_rates else 44100
+
+        # Route ownership is coordinated the same way MON/RX/Radio are:
+        # free the destination output before opening our OutputStream.
+        self._release_device(dst_idx)
+
+        src_rate = _probe_rate(src_idx, src_profile.supported_sample_rates)
+        dst_rate = _probe_rate(dst_idx, dst_profile.supported_sample_rates)
 
         self.audio_route = AudioRoute(src_idx, src_rate, dst_idx, dst_rate)
         return self.audio_route.start()
@@ -3449,13 +3464,20 @@ class P6App:
     def _release_device(self, device_idx: int) -> None:
         """Stop any audio routing currently holding this output device.
 
-        Three things compete for a device's OutputStream: MON (monitor
-        a USB device through another), RX (Link Audio → USB), and the
-        radio. Only one can hold the stream. Whoever's about to open it
-        calls this to make whoever has it step aside.
+        Four things compete for a device's OutputStream: MON (monitor
+        a USB device through another), RX (Link Audio → USB), direct
+        device-to-device routing, and the radio. Only one can hold the
+        stream. Whoever's about to open it calls this to make whoever
+        has it step aside.
         """
         if device_idx is None:
             return
+        # Direct route
+        if self.audio_route and self.audio_route.is_active:
+            route_dst = getattr(self.audio_route, "dest_device", None)
+            if route_dst is not None and route_dst == device_idx:
+                print(f"Releasing device {device_idx} from audio route", flush=True)
+                self.stop_audio_route()
         # RX
         if getattr(self, "_link_rx_target", ""):
             rx_dev = getattr(self.link_rx, "_out_device", None)
