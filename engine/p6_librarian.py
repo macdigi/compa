@@ -63,6 +63,15 @@ def _p6_label_match(label: str) -> bool:
     return lab in ("P6", "AIRAP6", "ROLANDP6")
 
 
+def _p6_usb_status(info: dict) -> str:
+    raw = (info.get("lsusb_raw") or "").lower()
+    if "0582:0300" in raw:
+        return "P-6 storage USB is visible, but no mountable block device is ready yet"
+    if "p-6" in raw or "0582:02fe" in raw:
+        return "P-6 connected in normal audio/MIDI mode — hold SAMPLING + power for storage"
+    return ""
+
+
 def _partition_label(part) -> str:
     label = part.label or "(no label)"
     fs = part.fs_type or "?"
@@ -167,6 +176,9 @@ class P6Librarian:
         nm = len(info["mounted"])
         nu = len(info["unmounted"])
         if nm == 0 and nu == 0:
+            usb_status = _p6_usb_status(info)
+            if usb_status:
+                return usb_status
             return "P-6: no USB storage detected — hold SAMPLING + power on"
         candidates = [p for p in info["unmounted"] if _p6_label_match(p.label)]
         if candidates:

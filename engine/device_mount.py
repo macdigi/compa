@@ -32,6 +32,8 @@ _LSBLK_PAIR_RE = re.compile(r'(\w+)="([^"]*)"')
 _LAST_MOUNT_ERRORS: dict[str, str] = {}
 _LAST_MOUNT_ATTEMPTS: dict[str, float] = {}
 _MOUNT_RETRY_AFTER = 8.0
+COMPA_MOUNT_BASE = "/mnt/compa"
+COMPA_MOUNT_HELPER = "/usr/local/sbin/compa-storage-mount"
 
 
 @dataclass
@@ -114,6 +116,7 @@ def list_removable_mounts() -> list[RemovableMount]:
         "/media/compa",
         "/run/media/pi",
         "/run/media/compa",
+        COMPA_MOUNT_BASE,
         "/mnt",
     ]
     # Also enumerate /media/* for any user
@@ -141,6 +144,8 @@ def list_removable_mounts() -> list[RemovableMount]:
             for entry in os.listdir(root):
                 candidate = os.path.join(root, entry)
                 if candidate in seen_paths:
+                    continue
+                if candidate == COMPA_MOUNT_BASE:
                     continue
                 if not os.path.isdir(candidate):
                     continue
@@ -323,11 +328,6 @@ def list_unmounted_partitions() -> list[Partition]:
 
 
 # ── Active mounting ────────────────────────────────────────────────
-
-# Where we create our own mount points (owned by Compa)
-COMPA_MOUNT_BASE = "/mnt/compa"
-COMPA_MOUNT_HELPER = "/usr/local/sbin/compa-storage-mount"
-
 
 def active_mount_partition(
     part: Partition,

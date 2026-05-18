@@ -82,6 +82,24 @@ def _sp404_label_match(label: str) -> bool:
     return "SP404" in lab or "SP404MKII" in lab
 
 
+def _sp404_storage_candidate(part) -> bool:
+    label = (part.label or "").upper().replace("-", "").replace("_", "")
+    model = (getattr(part, "model", "") or "").upper().replace("-", "").replace("_", "")
+    vendor = (getattr(part, "vendor", "") or "").upper()
+    return (
+        "SP404" in label
+        or "SP404" in model
+        or ("ROLAND" in vendor and "SP404" in model)
+    )
+
+
+def _sp404_usb_status(info: dict) -> str:
+    raw = (info.get("lsusb_raw") or "").lower()
+    if "sp-404" in raw or "sp404" in raw or "0582:02e7" in raw or "0582:0281" in raw:
+        return "SP-404 connected in normal mode — enter Utility -> USB Storage for file access"
+    return ""
+
+
 def _partition_label(part) -> str:
     label = part.label or "(no label)"
     fs = part.fs_type or "?"
@@ -176,8 +194,11 @@ class SP404Librarian:
         nm = len(info["mounted"])
         nu = len(info["unmounted"])
         if nm == 0 and nu == 0:
+            usb_status = _sp404_usb_status(info)
+            if usb_status:
+                return usb_status
             return "SP-404: no USB storage detected — Utility → USB storage"
-        candidates = [p for p in info["unmounted"] if _sp404_label_match(p.label)]
+        candidates = [p for p in info["unmounted"] if _sp404_storage_candidate(p)]
         if candidates:
             p = candidates[0]
             err = info.get("mount_errors", {}).get(p.device, "")
@@ -203,7 +224,7 @@ class SP404Librarian:
                 pass
             lines.append("")
         else:
-            candidates = [p for p in info["unmounted"] if _sp404_label_match(p.label)]
+            candidates = [p for p in info["unmounted"] if _sp404_storage_candidate(p)]
             if candidates:
                 lines.append("SP-404 STORAGE DETECTED BUT NOT MOUNTED")
                 lines.append(f"  device: {_partition_label(candidates[0])}")
