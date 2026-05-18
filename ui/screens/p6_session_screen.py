@@ -139,38 +139,6 @@ class P6SessionScreen:
             else:
                 self.app.start_link_rx(dev_name)
             return
-        if action == "set_audio_route":
-            route = getattr(self.app, "audio_route", None)
-            if route and route.is_active:
-                try:
-                    from engine.audio_router import find_device_index
-                    src_profile = self.app.device_manager.connected.get(dev_name)
-                    src_idx = (find_device_index(src_profile.audio_hint)
-                               if src_profile and getattr(src_profile, "audio_hint", None)
-                               else None)
-                except Exception:
-                    src_idx = None
-                if src_idx is not None and getattr(route, "source_device", None) == src_idx:
-                    self.app.stop_audio_route()
-                    return
-            connected = self.app.device_manager.connected
-            src = connected.get(dev_name)
-            if not src or not getattr(src, "audio_hint", None):
-                print(f"Audio route: {dev_name} has no audio device", flush=True)
-                return
-            dest = None
-            for k, p in connected.items():
-                if k != dev_name and getattr(p, "audio_hint", None):
-                    dest = k
-                    break
-            if not dest:
-                print("Audio route: no other device to route to", flush=True)
-                return
-            if self.app.start_audio_route(dev_name, dest):
-                print(f"Audio route: {dev_name} → {dest}", flush=True)
-            else:
-                print(f"Audio route failed: {dev_name} → {dest}", flush=True)
-            return
         if action == "set_monitor":
             # MON on card X = "send X's audio out so I can hear it on
             # whichever other device my headphones are plugged into."
@@ -443,19 +411,6 @@ class P6SessionScreen:
 
             # ── Row 2: Connection + audio specs + headphone button ────
             is_monitor_out = (short_name == getattr(self.app, "_monitor_source", ""))
-            route = getattr(self.app, "audio_route", None)
-            is_audio_out = False
-            if route and route.is_active:
-                try:
-                    from engine.audio_router import find_device_index
-                    src_idx = (find_device_index(profile.audio_hint)
-                               if getattr(profile, "audio_hint", None) else None)
-                    is_audio_out = (
-                        src_idx is not None
-                        and getattr(route, "source_device", None) == src_idx
-                    )
-                except Exception:
-                    is_audio_out = False
             if is_connected:
                 pygame.draw.circle(surface, theme.GREEN, (cx + 4, cy + 5), 3)
             else:
@@ -478,20 +433,6 @@ class P6SessionScreen:
                 surf = f_tiny.render("MON", True, theme.TEXT_DIM)
             surface.blit(surf, surf.get_rect(center=hp_rect.center))
             self._card_buttons.append((hp_rect, short_name, "set_monitor"))
-
-            # OUT — direct device-to-device audio route. Pressing OUT on
-            # a card routes that device into the first other connected
-            # device with audio. Press it again on the same source to stop.
-            out_rect = pygame.Rect(card_rect.right - 230, cy - 2, 52, 16)
-            if is_audio_out:
-                pygame.draw.rect(surface, device_color, out_rect, border_radius=3)
-                surf = f_tiny.render("OUT", True, theme.BG)
-            else:
-                pygame.draw.rect(surface, theme.BUTTON_BG, out_rect, border_radius=3)
-                pygame.draw.rect(surface, theme.BORDER, out_rect, 1, border_radius=3)
-                surf = f_tiny.render("OUT", True, theme.TEXT_DIM)
-            surface.blit(surf, surf.get_rect(center=out_rect.center))
-            self._card_buttons.append((out_rect, short_name, "set_audio_route"))
 
             # RX — receive Link Audio (e.g. from Live) and play it on
             # this device's USB output. Mutex with MON for the same
