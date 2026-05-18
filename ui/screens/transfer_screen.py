@@ -1271,10 +1271,14 @@ class TransferScreen:
         # Librarian grid and source list draw in their own laid-out rects
         self._relayout_librarian()
         self._p6_grid.draw(surface)
+        legend = "LIVE = already on device · PEND = pending import"
+        legend_surf = f_tiny.render(legend, True, theme.TEXT_DIM)
+        surface.blit(legend_surf, (self._p6_grid.rect.x, self._p6_grid.rect.bottom + 6))
 
         # Source list header
         src_rect = self._p6_source_list.rect
-        label_surf = f_tiny.render("LOCAL WAVS", True, theme.ACCENT)
+        label = f"LOCAL WAVS · {len(self._p6_source_list.items)}"
+        label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
         self._p6_source_list.draw(surface)
 
@@ -1342,8 +1346,12 @@ class TransferScreen:
         # Grid + source list
         self._relayout_librarian()
         self._sp404_grid.draw(surface)
+        legend = "LOAD = present in project"
+        legend_surf = f_tiny.render(legend, True, theme.TEXT_DIM)
+        surface.blit(legend_surf, (self._sp404_grid.rect.x, self._sp404_grid.rect.bottom + 6))
         src_rect = self._sp404_source_list.rect
-        label_surf = f_tiny.render("LOCAL WAVS", True, theme.ACCENT)
+        label = f"LOCAL WAVS · {len(self._sp404_source_list.items)}"
+        label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
         self._sp404_source_list.draw(surface)
 

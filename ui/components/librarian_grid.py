@@ -71,6 +71,10 @@ class LibrarianGrid:
             pads = (list(pads) + [None] * expected)[:expected]
         self._pads = pads
 
+    @property
+    def rect(self) -> pygame.Rect:
+        return self._rect
+
     def set_bank(self, idx: int):
         if 0 <= idx < self._banks:
             self._current_bank = idx
@@ -271,11 +275,35 @@ class LibrarianGrid:
                         surface.blit(name_surf, name_surf.get_rect(
                             center=(pr.centerx, pr.centery + 2)))
 
-                    # Dot in corner indicating loaded
-                    if not is_selected:
-                        pygame.draw.circle(
-                            surface, theme.ACCENT,
-                            (pr.right - 6, pr.y + 6), 3)
+                    # Status badge in the lower-right corner.
+                    is_pending = bool(pad.get("in_import"))
+                    is_on_device = bool(pad.get("on_device"))
+                    if is_pending:
+                        badge_text = "PEND"
+                        badge_bg = theme.ACCENT
+                        badge_fg = theme.BG
+                    elif is_on_device:
+                        badge_text = "LIVE"
+                        badge_bg = theme.BLUE
+                        badge_fg = theme.TEXT_BRIGHT
+                    else:
+                        badge_text = "LOAD"
+                        badge_bg = theme.BG
+                        badge_fg = theme.ACCENT
+
+                    badge_surf = f_tiny.render(badge_text, True, badge_fg)
+                    badge_w = badge_surf.get_width() + 8
+                    badge_h = badge_surf.get_height() + 2
+                    badge_rect = pygame.Rect(
+                        pr.right - badge_w - 5,
+                        pr.bottom - badge_h - 5,
+                        badge_w,
+                        badge_h,
+                    )
+                    pygame.draw.rect(surface, badge_bg, badge_rect, border_radius=4)
+                    if badge_bg == theme.BG:
+                        pygame.draw.rect(surface, theme.BORDER_LIGHT, badge_rect, 1, border_radius=4)
+                    surface.blit(badge_surf, badge_surf.get_rect(center=badge_rect.center))
                 else:
                     # Empty — centered dash
                     dash = f_small.render("—", True, theme.TEXT_DIM)
