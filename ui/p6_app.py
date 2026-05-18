@@ -7,6 +7,7 @@ sample manager, and recorder for the Roland AIRA Compact P-6.
 import os
 import signal
 import sys
+import threading
 import time
 import pygame
 
@@ -3878,10 +3879,13 @@ class P6App:
                     self.device_manager._active_device = None
 
         # Recorder hot-plug retry — with exponential backoff so a missing
-        # audio device doesn't spam PortAudio terminate/reinit + journal logs
-        # every 5 seconds forever. Backoff resets to 0 whenever the USB
-        # topology actually changes (a device was added or removed), so a
-        # newly plugged interface is detected on the very next tick.
+        # audio device doesn't spam the journal every 5 seconds forever.
+        #
+        # Keep this path off PortAudio entirely. Calling sounddevice's
+        # terminate/reinitialize from the pygame thread can block inside
+        # Pa_Terminate/Pa_CloseStream and freeze the touchscreen. The
+        # recorder worker owns stream close/open; the UI thread only queues
+        # retry work and moves on.
         rec = getattr(self, "recorder", None)
         now_mono = time.monotonic()
 
@@ -3889,47 +3893,59 @@ class P6App:
         if new_devices or removed_devices:
             self._rec_retry_next_at = 0.0
             self._rec_retry_attempts = 0
+            self._rec_retry_pending = False
 
         # Initialize lazy state (first call after __init__)
         if not hasattr(self, "_rec_retry_next_at"):
             self._rec_retry_next_at = 0.0
             self._rec_retry_attempts = 0
             self._rec_retry_last_log = 0.0
+            self._rec_retry_pending = False
+
+        if rec is not None and getattr(rec, "_monitoring", False):
+            self._rec_retry_attempts = 0
+            self._rec_retry_next_at = 0.0
+            self._rec_retry_pending = False
 
         if (rec is not None and not getattr(rec, "_monitoring", False)
+                and not getattr(self, "_rec_retry_pending", False)
                 and now_mono >= self._rec_retry_next_at):
             self._rec_retry_attempts += 1
-            success = False
+            queued = False
             try:
-                import sounddevice as _sd
-                try:
-                    _sd._terminate()
-                    _sd._initialize()
-                except Exception:
-                    pass
-                rec._device_index = None
-                rec._find_device()
-                if rec.available:
+                focus = self.device_manager.focus_key
+                profile = self.device_manager.connected.get(focus) if focus else None
+                hint = getattr(profile, "audio_hint", "") or getattr(rec, "_device_hint", "")
+                if hint:
+                    rec.switch_device(hint)
+                else:
                     rec.start_monitoring()
-                    if rec._monitoring:
-                        success = True
-                        print("Recorder hot-plug: monitoring restored",
-                              flush=True)
+                queued = True
+                self._rec_retry_pending = True
+                print("Recorder hot-plug: queued monitoring retry", flush=True)
             except Exception as _e:
-                print(f"Recorder hot-plug retry failed: {_e}", flush=True)
+                print(f"Recorder hot-plug queue failed: {_e}", flush=True)
 
-            if success:
-                self._rec_retry_attempts = 0
-                self._rec_retry_next_at = 0.0
-            else:
+            if queued:
                 # Exponential backoff: 5s, 10s, 20s, 40s, then 60s ceiling
                 backoff = min(60.0, 5.0 * (2 ** max(0, self._rec_retry_attempts - 1)))
                 self._rec_retry_next_at = now_mono + backoff
-                # Rate-limit "no audio" log to ≤1 line/minute
+                # Allow another queued attempt after the backoff if the
+                # worker still has not restored monitoring.
+                def _clear_rec_retry_pending():
+                    time.sleep(backoff)
+                    self._rec_retry_pending = False
+
+                threading.Thread(target=_clear_rec_retry_pending,
+                                 daemon=True).start()
+                # Rate-limit "queued retry" log to <=1 line/minute
                 if now_mono - self._rec_retry_last_log > 60.0:
-                    print(f"Recorder: no audio device (next retry in {backoff:.0f}s)",
+                    print(f"Recorder: monitoring retry queued (next in {backoff:.0f}s)",
                           flush=True)
                     self._rec_retry_last_log = now_mono
+            else:
+                backoff = min(60.0, 5.0 * (2 ** max(0, self._rec_retry_attempts - 1)))
+                self._rec_retry_next_at = now_mono + backoff
 
     def switch_screen(self, name: str, context: dict | None = None):
         """Switch to a screen, optionally passing context data.
