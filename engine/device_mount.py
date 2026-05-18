@@ -351,6 +351,7 @@ def active_mount_partition(
     safe = "".join(c if c.isalnum() or c in "-_" else "_"
                    for c in mount_name) or part.name
     target = os.path.join(COMPA_MOUNT_BASE, safe)
+    helper_missing = not os.path.exists(COMPA_MOUNT_HELPER)
 
     # Prefer the dedicated root-owned helper installed by setup/install.sh.
     # It validates the target block device before mounting, and the sudoers
@@ -377,7 +378,13 @@ def active_mount_partition(
         )
     except subprocess.CalledProcessError as e:
         msg = (e.stderr or e.stdout or str(e)).strip()
-        _set_mount_error(part.device, f"mkdir failed: {msg}")
+        if helper_missing and "password" in msg.lower():
+            _set_mount_error(
+                part.device,
+                "Compa storage mount helper is not installed — run sudo bash setup/install-storage-helper.sh",
+            )
+        else:
+            _set_mount_error(part.device, f"mkdir failed: {msg}")
         log.error("mkdir %s: %s", target, msg)
         return None
     except Exception as e:
@@ -403,7 +410,13 @@ def active_mount_partition(
             )
             if result.returncode != 0:
                 msg = result.stderr.strip() or result.stdout.strip()
-                _set_mount_error(part.device, f"mount failed: {msg}")
+                if helper_missing and "password" in msg.lower():
+                    _set_mount_error(
+                        part.device,
+                        "Compa storage mount helper is not installed — run sudo bash setup/install-storage-helper.sh",
+                    )
+                else:
+                    _set_mount_error(part.device, f"mount failed: {msg}")
                 log.error("Plain mount also failed: %s", msg)
                 return None
     except Exception as e:
@@ -432,7 +445,13 @@ def _mount_with_helper(part: Partition, mount_name: str) -> Optional[str]:
 
     if result.returncode != 0:
         msg = result.stderr.strip() or result.stdout.strip()
-        _set_mount_error(part.device, f"mount helper failed: {msg}")
+        if "password" in msg.lower():
+            _set_mount_error(
+                part.device,
+                "Compa storage mount helper is installed but sudoers is not active — run sudo bash setup/install-storage-helper.sh",
+            )
+        else:
+            _set_mount_error(part.device, f"mount helper failed: {msg}")
         log.error("Mount helper failed for %s: %s", part.device, msg)
         return None
 

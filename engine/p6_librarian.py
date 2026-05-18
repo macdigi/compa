@@ -170,7 +170,7 @@ class P6Librarian:
             p = candidates[0]
             err = info.get("mount_errors", {}).get(p.device, "")
             if err:
-                return f"P-6 storage found on {p.device}, but mount failed: {err[:54]}"
+                return f"P-6 storage found on {p.device}, but mount failed: {err[:96]}"
             return f"P-6 storage found on {p.device}, but it is not mounted"
         return f"P-6: seen {nm} mounted + {nu} unmounted — none match signature"
 

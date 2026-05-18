@@ -179,7 +179,7 @@ class SP404Librarian:
             p = candidates[0]
             err = info.get("mount_errors", {}).get(p.device, "")
             if err:
-                return f"SP-404 storage found on {p.device}, but mount failed: {err[:52]}"
+                return f"SP-404 storage found on {p.device}, but mount failed: {err[:94]}"
             return f"SP-404 storage found on {p.device}, but it is not mounted"
         return f"SP-404: seen {nm} mounted + {nu} unmounted — none match signature"
 
