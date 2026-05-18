@@ -210,7 +210,7 @@ class TransferScreen:
                 "selected": True,
                 "title": pad_label,
                 "state": fallback_state,
-                "lines": ["Pad is empty.", "Tap a local WAV to load it here."],
+                "lines": ["Pad is empty.", "Tap a local WAV to load it here.", "Action: load sample"],
             }
 
         filename = pad.get("filename") or "Unknown sample"
@@ -228,12 +228,57 @@ class TransferScreen:
             meta_bits.append(_human_size(size))
         if meta_bits:
             lines.append(" · ".join(meta_bits))
+        if state == "PENDING":
+            lines.append("Action: replace or clear pending import")
+        elif state == "LIVE":
+            lines.append("Action: queue replacement or clear import slot")
+        else:
+            lines.append("Action: replace, move, or clear")
         return {
             "selected": True,
             "title": pad_label,
             "state": state,
             "lines": lines,
         }
+
+    def _p6_action_specs(self) -> list[dict]:
+        selected = self._p6_grid.selected_pad
+        pad = (self._p6_cached_assignments[selected]
+               if 0 <= selected < len(self._p6_cached_assignments) else None)
+        return [
+            {"id": "clear_pad", "label": "CLEAR PAD", "color": theme.BUTTON_BG,
+             "enabled": selected >= 0 and pad is not None},
+            {"id": "clear_bank", "label": "CLR BANK", "color": theme.BUTTON_BG,
+             "enabled": True},
+            {"id": "clear_all", "label": "CLR ALL", "color": theme.RED,
+             "enabled": True},
+            {"id": "backup", "label": "BACKUP", "color": theme.BLUE,
+             "enabled": True},
+            {"id": "restore", "label": "RESTORE", "color": theme.ACCENT_DIM,
+             "enabled": True},
+            {"id": "debug", "label": "DEBUG", "color": theme.BUTTON_BG,
+             "enabled": True},
+        ]
+
+    def _sp404_action_specs(self) -> list[dict]:
+        selected = self._sp404_grid.selected_pad
+        pads = self._sp404_grid.pads
+        pad = pads[selected] if 0 <= selected < len(pads) else None
+        return [
+            {"id": "clear_pad", "label": "CLEAR PAD", "color": theme.BUTTON_BG,
+             "enabled": selected >= 0 and pad is not None},
+            {"id": "move", "label": "MOVE" if not self._sp404_move_mode else "CANCEL",
+             "color": theme.BLUE if not self._sp404_move_mode else theme.RED,
+             "enabled": self._sp404_move_mode or pad is not None},
+            {"id": "clear_bank", "label": "CLR BANK", "color": theme.BUTTON_BG,
+             "enabled": True},
+            {"id": "backup", "label": "BACKUP", "color": theme.BLUE,
+             "enabled": True},
+            {"id": "restore", "label": "RESTORE", "color": theme.ACCENT_DIM,
+             "enabled": True},
+            {"id": "debug", "label": "DEBUG", "color": theme.BUTTON_BG,
+             "enabled": True},
+        ]
 
     def _draw_selected_pad_card(self, surface: pygame.Surface, detail: dict,
                                 rect: pygame.Rect, f_small, f_tiny):
@@ -658,8 +703,11 @@ class TransferScreen:
         # Action bar buttons
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
-            for rect, action_id in self._p6_action_rects:
+            for rect, action_id, enabled in self._p6_action_rects:
                 if rect.collidepoint(mx, my):
+                    if not enabled:
+                        self._set_status("Select a loaded pad first")
+                        return
                     self._do_p6_action(action_id)
                     return
 
@@ -693,8 +741,11 @@ class TransferScreen:
                             self._refresh_sp404_assignments()
                         return
 
-            for rect, action_id in self._sp404_action_rects:
+            for rect, action_id, enabled in self._sp404_action_rects:
                 if rect.collidepoint(mx, my):
+                    if not enabled:
+                        self._set_status("Select a loaded pad first")
+                        return
                     self._do_sp404_action(action_id)
                     return
 
@@ -1392,14 +1443,7 @@ class TransferScreen:
         # Action bar at bottom
         self._draw_librarian_actions(
             surface, f_small, f_tiny,
-            [
-                ("clear_pad",  "CLEAR PAD",  theme.BUTTON_BG),
-                ("clear_bank", "CLR BANK",   theme.BUTTON_BG),
-                ("clear_all",  "CLR ALL",    theme.RED),
-                ("backup",     "BACKUP",     theme.BLUE),
-                ("restore",    "RESTORE",    theme.ACCENT_DIM),
-                ("debug",      "DEBUG",      theme.BUTTON_BG),
-            ],
+            self._p6_action_specs(),
             self._p6_action_rects,
             lib,
         )
@@ -1468,15 +1512,7 @@ class TransferScreen:
         # Action bar
         self._draw_librarian_actions(
             surface, f_small, f_tiny,
-            [
-                ("clear_pad",  "CLEAR PAD",  theme.BUTTON_BG),
-                ("move",       "MOVE" if not self._sp404_move_mode else "CANCEL",
-                 theme.BLUE if not self._sp404_move_mode else theme.RED),
-                ("clear_bank", "CLR BANK",   theme.BUTTON_BG),
-                ("backup",     "BACKUP",     theme.BLUE),
-                ("restore",    "RESTORE",    theme.ACCENT_DIM),
-                ("debug",      "DEBUG",      theme.BUTTON_BG),
-            ],
+            self._sp404_action_specs(),
             self._sp404_action_rects,
             lib,
         )
@@ -1500,14 +1536,19 @@ class TransferScreen:
         btn_h = self.ACTION_H - 8
 
         busy = lib is not None and lib.busy
-        for i, (action_id, label, color) in enumerate(buttons):
+        for i, spec in enumerate(buttons):
+            action_id = spec["id"]
+            label = spec["label"]
+            color = spec["color"]
+            enabled = spec.get("enabled", True)
             x = 10 + i * (btn_w + gap)
             rect = pygame.Rect(x, y, btn_w, btn_h)
-            out_rects.append((rect, action_id))
+            out_rects.append((rect, action_id, enabled and not busy))
 
             # Dim disabled buttons while busy
-            draw_color = color if not busy else theme.BG_PANEL
-            text_color = theme.TEXT_BRIGHT if not busy else theme.TEXT_DIM
+            active = enabled and not busy
+            draw_color = color if active else theme.BG_PANEL
+            text_color = theme.TEXT_BRIGHT if active else theme.TEXT_DIM
 
             pygame.draw.rect(surface, draw_color, rect, border_radius=6)
             pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=6)
