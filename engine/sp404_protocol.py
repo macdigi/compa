@@ -108,6 +108,12 @@ def _set_dtr_rts(fd: int):
     fcntl.ioctl(fd, tiocmset, struct.pack("I", bits))
 
 
+def configure_sp404_librarian_fd(fd: int):
+    """Configure an open SP-404 CDC ACM fd like the Roland app."""
+    _set_raw_9600(fd)
+    _set_dtr_rts(fd)
+
+
 def probe_sp404_librarian(timeout: float = 3.0) -> SP404ProtocolProbe:
     """Send the captured SP-404 handshake and return any response.
 
@@ -125,8 +131,7 @@ def probe_sp404_librarian(timeout: float = 3.0) -> SP404ProtocolProbe:
 
     chunks: list[bytes] = []
     try:
-        _set_raw_9600(fd)
-        _set_dtr_rts(fd)
+        configure_sp404_librarian_fd(fd)
         time.sleep(0.2)
         os.write(fd, SP404_HANDSHAKE)
 

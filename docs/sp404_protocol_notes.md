@@ -161,3 +161,24 @@ Next concrete probes:
    this handshake.
 3. Reproduce the smallest read-only command in Compa before attempting any
    write/delete operation.
+
+## Pi protocol lab (2026-05-18)
+
+Added tools/sp404_protocol_lab.py for repeatable local probing:
+
+    tools/sp404_protocol_lab.py probe --count 5
+    tools/sp404_protocol_lab.py analyze sessions/sp404_protocol/<log>.jsonl
+
+Repeated live handshakes returned stable 35-byte responses in the current SP
+state. Example:
+
+    13 e0 3f 05 44 6e e0 82 88 e8 5b 83 13 00 00 00
+    7e 04 00 04 00 08 00 01 ff ff ff ff 00 02 00 00
+    00 0b 33
+
+The lab also has a guarded send-hex mode for replaying captured read-only
+commands after the official app traffic is captured. Do not replay unknown
+import/delete/write commands.
+
+Mac capture workflow is documented in
+docs/sp404_librarian_capture_workflow.md.
