@@ -44,12 +44,25 @@ SupplementaryGroups=audio video input render
 WantedBy=multi-user.target
 EOF
 
-# Create udev rule for P-6 USB automount
-echo ">>> Setting up P-6 USB automount..."
+# Create udev rule and privileged helper for USB storage
+echo ">>> Setting up Compa USB storage helper..."
+install -D -o root -g root -m 0755 \
+    "$PROJECT_DIR/setup/compa-storage-mount" \
+    /usr/local/sbin/compa-storage-mount
+mkdir -p /mnt/compa
+chown root:root /mnt/compa
+chmod 0755 /mnt/compa
+cat > /etc/sudoers.d/020_compa_storage_mount << 'EOF'
+pi ALL=(root) NOPASSWD: /usr/local/sbin/compa-storage-mount *
+EOF
+chmod 0440 /etc/sudoers.d/020_compa_storage_mount
+visudo -cf /etc/sudoers.d/020_compa_storage_mount >/dev/null
+
+echo ">>> Setting up Roland USB storage udev tags..."
 cat > /etc/udev/rules.d/99-p6-automount.rules << 'EOF'
-# Auto-mount Roland P-6 USB storage
-ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ATTRS{idVendor}=="0582", ATTRS{idProduct}=="0300", RUN+="/bin/mkdir -p /media/pi/P-6", RUN+="/bin/mount /dev/%k /media/pi/P-6"
-ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z]", RUN+="/bin/umount /media/pi/P-6"
+# Mark Roland USB storage for Compa. Mounting is handled by
+# /usr/local/sbin/compa-storage-mount from the app process.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ATTRS{idVendor}=="0582", ENV{ID_COMPA_STORAGE}="1"
 EOF
 
 # Reload udev

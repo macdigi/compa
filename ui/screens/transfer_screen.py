@@ -177,8 +177,21 @@ class TransferScreen:
         self._p6_source_list.set_rect(src_rect)
         self._sp404_source_list.set_rect(src_rect)
 
-    def _selected_pad_detail(self, device_type: str) -> dict:
+    def _selected_pad_detail(self, device_type: str, mounted: bool = True) -> dict:
         """Return normalized selected-pad details for the active librarian."""
+        if not mounted:
+            device_label = "P-6" if device_type == "p6" else "SP-404"
+            return {
+                "selected": False,
+                "title": f"{device_label} storage offline",
+                "state": "OFFLINE",
+                "lines": [
+                    "USB storage must mount before pad contents are known.",
+                    "Use DEBUG to inspect detected block devices.",
+                    "Pad contents are unavailable until mounted.",
+                ],
+            }
+
         if device_type == "p6":
             selected = self._p6_grid.selected_pad
             pads = self._p6_cached_assignments
@@ -241,41 +254,41 @@ class TransferScreen:
             "lines": lines,
         }
 
-    def _p6_action_specs(self) -> list[dict]:
+    def _p6_action_specs(self, mounted: bool = True) -> list[dict]:
         selected = self._p6_grid.selected_pad
         pad = (self._p6_cached_assignments[selected]
                if 0 <= selected < len(self._p6_cached_assignments) else None)
         return [
             {"id": "clear_pad", "label": "CLEAR PAD", "color": theme.BUTTON_BG,
-             "enabled": selected >= 0 and pad is not None},
+             "enabled": mounted and selected >= 0 and pad is not None},
             {"id": "clear_bank", "label": "CLR BANK", "color": theme.BUTTON_BG,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "clear_all", "label": "CLR ALL", "color": theme.RED,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "backup", "label": "BACKUP", "color": theme.BLUE,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "restore", "label": "RESTORE", "color": theme.ACCENT_DIM,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "debug", "label": "DEBUG", "color": theme.BUTTON_BG,
              "enabled": True},
         ]
 
-    def _sp404_action_specs(self) -> list[dict]:
+    def _sp404_action_specs(self, mounted: bool = True) -> list[dict]:
         selected = self._sp404_grid.selected_pad
         pads = self._sp404_grid.pads
         pad = pads[selected] if 0 <= selected < len(pads) else None
         return [
             {"id": "clear_pad", "label": "CLEAR PAD", "color": theme.BUTTON_BG,
-             "enabled": selected >= 0 and pad is not None},
+             "enabled": mounted and selected >= 0 and pad is not None},
             {"id": "move", "label": "MOVE" if not self._sp404_move_mode else "CANCEL",
              "color": theme.BLUE if not self._sp404_move_mode else theme.RED,
-             "enabled": self._sp404_move_mode or pad is not None},
+             "enabled": mounted and (self._sp404_move_mode or pad is not None)},
             {"id": "clear_bank", "label": "CLR BANK", "color": theme.BUTTON_BG,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "backup", "label": "BACKUP", "color": theme.BLUE,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "restore", "label": "RESTORE", "color": theme.ACCENT_DIM,
-             "enabled": True},
+             "enabled": mounted},
             {"id": "debug", "label": "DEBUG", "color": theme.BUTTON_BG,
              "enabled": True},
         ]
@@ -307,6 +320,9 @@ class TransferScreen:
         elif state == "EMPTY":
             badge_bg = theme.BG
             badge_fg = theme.TEXT_DIM
+        elif state == "OFFLINE":
+            badge_bg = theme.RED
+            badge_fg = theme.TEXT_BRIGHT
 
         badge_surf = f_tiny.render(state, True, badge_fg)
         badge_rect = pygame.Rect(rect.right - badge_surf.get_width() - 18, rect.y + 9,
@@ -477,9 +493,12 @@ class TransferScreen:
         if lib is None:
             return ("P-6 librarian unavailable", "No P-6 library backend is attached.")
         if not lib.is_mounted():
+            diag = lib.diagnostic()
+            if "storage found" in diag:
+                return ("P-6 storage detected, not mounted", diag)
             return (
                 "P-6 not mounted",
-                "Hold SAMPLING while powering on the P-6, then reconnect USB. Use DEBUG if the mount needs manual help.",
+                "Hold SAMPLING while powering on the P-6. Use DEBUG to confirm what Linux sees.",
             )
 
         pads = lib.read_assignments()
@@ -496,9 +515,12 @@ class TransferScreen:
         if lib is None:
             return ("SP-404 librarian unavailable", "No SP-404 library backend is attached.")
         if not lib.is_mounted():
+            diag = lib.diagnostic()
+            if "storage found" in diag:
+                return ("SP-404 storage detected, not mounted", diag)
             return (
                 "SP-404 not mounted",
-                "Put the SP-404 MKII into USB storage mode, then reconnect USB. Use DEBUG if the mount needs manual help.",
+                "Put the SP-404 MKII into Utility → USB Storage. Use DEBUG to confirm what Linux sees.",
             )
 
         if not self._sp404_projects:
@@ -1411,9 +1433,10 @@ class TransferScreen:
 
     def _draw_p6(self, surface: pygame.Surface, f_med, f_small, f_tiny):
         lib = self.p6_lib
+        mounted = lib is not None and lib.is_mounted()
 
         # Mount status row (replaces AKAI's drive row)
-        if lib is not None and lib.is_mounted():
+        if mounted:
             # Re-read live assignments each draw so the view is fresh
             self._p6_cached_assignments = lib.read_assignments()
             self._p6_grid.set_pads(self._p6_cached_assignments)
@@ -1426,6 +1449,10 @@ class TransferScreen:
         # Librarian grid and source list draw in their own laid-out rects
         self._relayout_librarian()
         self._p6_grid.draw(surface)
+        if not mounted:
+            self._draw_storage_offline_overlay(
+                surface, self._p6_grid.rect, "P-6 storage not mounted",
+                "DEBUG shows the detected USB disk and mount error.", f_small, f_tiny)
         legend = "LIVE = already on device · PEND = pending import"
         legend_surf = f_tiny.render(legend, True, theme.TEXT_DIM)
         surface.blit(legend_surf, (self._p6_grid.rect.x, self._p6_grid.rect.bottom + 6))
@@ -1433,9 +1460,11 @@ class TransferScreen:
         # Source list header
         src_rect = self._p6_source_list.rect
         detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
-        self._draw_selected_pad_card(surface, self._selected_pad_detail("p6"),
+        self._draw_selected_pad_card(surface, self._selected_pad_detail("p6", mounted),
                                      detail_rect, f_small, f_tiny)
         label = f"LOCAL WAVS · {len(self._p6_source_list.items)}"
+        if not self._p6_source_list.items:
+            label += " · recordings/ + samples/"
         label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
         self._p6_source_list.draw(surface)
@@ -1443,7 +1472,7 @@ class TransferScreen:
         # Action bar at bottom
         self._draw_librarian_actions(
             surface, f_small, f_tiny,
-            self._p6_action_specs(),
+            self._p6_action_specs(mounted),
             self._p6_action_rects,
             lib,
         )
@@ -1459,9 +1488,10 @@ class TransferScreen:
 
     def _draw_sp404(self, surface: pygame.Surface, f_med, f_small, f_tiny):
         lib = self.sp404_lib
+        mounted = lib is not None and lib.is_mounted()
 
         # Mount + project status row — auto-refresh while drawing
-        if lib is not None and lib.is_mounted():
+        if mounted:
             if not self._sp404_projects:
                 self._refresh_sp404_projects()
             if self._sp404_projects:
@@ -1497,14 +1527,20 @@ class TransferScreen:
         # Grid + source list
         self._relayout_librarian()
         self._sp404_grid.draw(surface)
+        if not mounted:
+            self._draw_storage_offline_overlay(
+                surface, self._sp404_grid.rect, "SP-404 storage not mounted",
+                "Enter Utility → USB Storage, then check DEBUG.", f_small, f_tiny)
         legend = "LOAD = present in project"
         legend_surf = f_tiny.render(legend, True, theme.TEXT_DIM)
         surface.blit(legend_surf, (self._sp404_grid.rect.x, self._sp404_grid.rect.bottom + 6))
         src_rect = self._sp404_source_list.rect
         detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
-        self._draw_selected_pad_card(surface, self._selected_pad_detail("sp404"),
+        self._draw_selected_pad_card(surface, self._selected_pad_detail("sp404", mounted),
                                      detail_rect, f_small, f_tiny)
         label = f"LOCAL WAVS · {len(self._sp404_source_list.items)}"
+        if not self._sp404_source_list.items:
+            label += " · recordings/ + samples/"
         label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
         self._sp404_source_list.draw(surface)
@@ -1512,7 +1548,7 @@ class TransferScreen:
         # Action bar
         self._draw_librarian_actions(
             surface, f_small, f_tiny,
-            self._sp404_action_specs(),
+            self._sp404_action_specs(mounted),
             self._sp404_action_rects,
             lib,
         )
@@ -1521,6 +1557,23 @@ class TransferScreen:
         # Debug panel overlay
         if self._debug_panel_visible:
             self._draw_debug_panel(surface, f_small, f_tiny, lib)
+
+    def _draw_storage_offline_overlay(self, surface: pygame.Surface,
+                                      rect: pygame.Rect, title: str,
+                                      subtitle: str, f_small, f_tiny):
+        """Dim the pad grid when device storage is not actually mounted."""
+        panel = rect.inflate(-24, -24)
+        overlay = pygame.Surface((panel.width, panel.height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        surface.blit(overlay, panel.topleft)
+        pygame.draw.rect(surface, theme.RED, panel, 2, border_radius=8)
+
+        title_surf = f_small.render(title[:42], True, theme.TEXT_BRIGHT)
+        sub_surf = f_tiny.render(subtitle[:64], True, theme.TEXT_DIM)
+        surface.blit(title_surf, title_surf.get_rect(
+            center=(panel.centerx, panel.centery - 10)))
+        surface.blit(sub_surf, sub_surf.get_rect(
+            center=(panel.centerx, panel.centery + 12)))
 
     def _draw_librarian_actions(self, surface, f_small, f_tiny,
                                   buttons: list,
@@ -1609,7 +1662,7 @@ class TransferScreen:
             from engine.device_mount import active_mount_partition
             part = payload
             mp = active_mount_partition(
-                part, mount_name=part.label or self._device_type)
+                part, mount_name=part.label or self._device_type, force=True)
             if mp:
                 lib.set_manual_mount(mp)
                 self._set_status(f"Mounted {part.device} at {mp}")

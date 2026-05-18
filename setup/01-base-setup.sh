@@ -30,6 +30,7 @@ apt install -y \
     libasound2-dev \
     libusb-1.0-0 \
     pkg-config \
+    exfatprogs \
     sshfs \
     git \
     fonts-dejavu-core

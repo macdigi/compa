@@ -94,6 +94,7 @@ apt-get install -y --no-install-recommends \
     libasound2-dev \
     pkg-config \
     ffmpeg \
+    exfatprogs \
     libts-bin \
     sshfs \
     samba \
@@ -232,18 +233,41 @@ EOF
 usermod -a -G audio,video,input,render "${COMPA_USER}"
 ok "Audio limits + user groups set"
 
-# ── Phase 7: udev rules (Push 2 + P-6 USB) ──────────────────────────
-log "Installing udev rules"
+# ── Phase 7: udev rules + USB storage helper ────────────────────────
+log "Installing udev rules and USB storage helper"
 if [[ -f "${COMPA_DIR}/setup/50-ableton-push-2.rules" ]]; then
     cp "${COMPA_DIR}/setup/50-ableton-push-2.rules" \
         /etc/udev/rules.d/50-ableton-push-2.rules
     ok "Push 2 USB rule installed"
 fi
 cat > /etc/udev/rules.d/99-p6-automount.rules <<'EOF'
-# Auto-mount Roland P-6 USB storage
-ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]", ATTRS{idVendor}=="0582", ATTRS{idProduct}=="0300", RUN+="/bin/mkdir -p /media/pi/P-6", RUN+="/bin/mount /dev/%k /media/pi/P-6"
-ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z]", RUN+="/bin/umount /media/pi/P-6"
+# Mark Roland USB storage for Compa. Mounting is handled by
+# /usr/local/sbin/compa-storage-mount from the app process; doing real
+# mounts inside udev RUN is unreliable under systemd.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ATTRS{idVendor}=="0582", ENV{ID_COMPA_STORAGE}="1"
 EOF
+
+if [[ -f "${COMPA_DIR}/setup/compa-storage-mount" ]]; then
+    install -D -o root -g root -m 0755 \
+        "${COMPA_DIR}/setup/compa-storage-mount" \
+        /usr/local/sbin/compa-storage-mount
+    mkdir -p /mnt/compa
+    chown root:root /mnt/compa
+    chmod 0755 /mnt/compa
+    cat > /etc/sudoers.d/020_compa_storage_mount <<EOF
+${COMPA_USER} ALL=(root) NOPASSWD: /usr/local/sbin/compa-storage-mount *
+EOF
+    chmod 0440 /etc/sudoers.d/020_compa_storage_mount
+    if visudo -cf /etc/sudoers.d/020_compa_storage_mount >/dev/null; then
+        ok "Compa USB storage mount helper installed"
+    else
+        rm -f /etc/sudoers.d/020_compa_storage_mount
+        die "Invalid sudoers entry for Compa USB storage helper"
+    fi
+else
+    warn "USB storage helper missing from repo; P-6/SP-404 mounting may require manual sudo"
+fi
+
 if [[ "$COMPA_IN_CHROOT" != "1" ]]; then
     udevadm control --reload-rules
     udevadm trigger

@@ -20,11 +20,18 @@ storage mount points without hardcoding a path like `/media/pi/P-6`.
 
 import logging
 import os
+import re
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
+
+_LSBLK_PAIR_RE = re.compile(r'(\w+)="([^"]*)"')
+_LAST_MOUNT_ERRORS: dict[str, str] = {}
+_LAST_MOUNT_ATTEMPTS: dict[str, float] = {}
+_MOUNT_RETRY_AFTER = 8.0
 
 
 @dataclass
@@ -62,20 +69,20 @@ def list_removable_mounts() -> list[RemovableMount]:
     # Primary: lsblk
     try:
         out = subprocess.run(
-            ["lsblk", "-rno", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL"],
+            ["lsblk", "-Pno", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL"],
             capture_output=True, text=True, timeout=5,
         )
         for line in out.stdout.splitlines():
-            parts = line.split(None, 4)
-            if len(parts) < 4:
+            fields = _parse_lsblk_pairs(line)
+            if not fields:
                 continue
-            name = parts[0]
-            size = parts[1]
-            ptype = parts[2]
-            mountpoint = parts[3] if len(parts) >= 4 else ""
-            label = parts[4] if len(parts) >= 5 else ""
+            name = fields.get("NAME", "")
+            size = fields.get("SIZE", "")
+            ptype = fields.get("TYPE", "")
+            mountpoint = fields.get("MOUNTPOINT", "")
+            label = fields.get("LABEL", "")
 
-            if ptype != "part":
+            if ptype not in ("part", "disk"):
                 continue
             if not mountpoint:
                 continue
@@ -84,6 +91,8 @@ def list_removable_mounts() -> list[RemovableMount]:
             if mountpoint.startswith("/boot/"):
                 continue
             if name.startswith("mmcblk0"):
+                continue
+            if name.startswith("zram") or name.startswith("loop"):
                 continue
 
             size_gb = _parse_size_gb(size)
@@ -214,12 +223,13 @@ def list_all_partitions() -> list[Partition]:
     partition-only filter misses it entirely.
 
     Skips the Pi's own SD card (mmcblk0*), the root partition, /boot/*
-    entries, and anything smaller than 256 MB (EFI stubs etc).
+    entries, zram/loop devices, and tiny unlabeled stubs. Tiny labeled
+    volumes are kept because some Roland devices expose small FAT disks.
     """
     results: list[Partition] = []
     try:
         out = subprocess.run(
-            ["lsblk", "-rno", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE"],
+            ["lsblk", "-Pno", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE"],
             capture_output=True, text=True, timeout=5,
         )
     except Exception as e:
@@ -232,15 +242,15 @@ def list_all_partitions() -> list[Partition]:
     raw_entries: list[tuple[str, str, str, str, str, str]] = []
 
     for line in out.stdout.splitlines():
-        parts = line.split(None, 5)
-        if len(parts) < 3:
+        fields = _parse_lsblk_pairs(line)
+        if not fields:
             continue
-        name = parts[0]
-        size = parts[1]
-        ptype = parts[2]
-        mountpoint = parts[3] if len(parts) >= 4 else ""
-        label = parts[4] if len(parts) >= 5 else ""
-        fs_type = parts[5] if len(parts) >= 6 else ""
+        name = fields.get("NAME", "")
+        size = fields.get("SIZE", "")
+        ptype = fields.get("TYPE", "")
+        mountpoint = fields.get("MOUNTPOINT", "")
+        label = fields.get("LABEL", "")
+        fs_type = fields.get("FSTYPE", "")
         raw_entries.append((name, size, ptype, mountpoint, label, fs_type))
 
         if ptype == "part":
@@ -254,6 +264,8 @@ def list_all_partitions() -> list[Partition]:
             continue
         if name.startswith("mmcblk0"):
             continue  # Pi's own SD
+        if name.startswith("zram") or name.startswith("loop"):
+            continue
         if mountpoint in ("/", "/boot", "/boot/firmware"):
             continue
         if mountpoint.startswith("/boot/"):
@@ -264,9 +276,10 @@ def list_all_partitions() -> list[Partition]:
             continue
 
         size_gb = _parse_size_gb(size)
-        # Skip sub-256MB (EFI stubs, bootstrap partitions). The P-6 has
-        # ~2GB internal storage so this is safe.
-        if size_gb < 0.25:
+        # Skip tiny unlabeled stubs, but keep explicitly-labelled removable
+        # media. Some Roland devices expose very small FAT volumes in storage
+        # mode, so a hard 256MB cutoff hides the real target device.
+        if size_gb < 0.25 and not label.strip():
             continue
 
         results.append(Partition(
@@ -292,6 +305,11 @@ def _parent_disk(part_name: str) -> str:
     return stripped or part_name
 
 
+def _parse_lsblk_pairs(line: str) -> dict[str, str]:
+    """Parse one lsblk -P line into a field dict."""
+    return {k: v for k, v in _LSBLK_PAIR_RE.findall(line)}
+
+
 def list_unmounted_partitions() -> list[Partition]:
     """Return only unmounted partitions (good candidates for active mount)."""
     return [p for p in list_all_partitions() if not p.mountpoint]
@@ -301,11 +319,13 @@ def list_unmounted_partitions() -> list[Partition]:
 
 # Where we create our own mount points (owned by Compa)
 COMPA_MOUNT_BASE = "/mnt/compa"
+COMPA_MOUNT_HELPER = "/usr/local/sbin/compa-storage-mount"
 
 
 def active_mount_partition(
     part: Partition,
     mount_name: str = "",
+    force: bool = False,
 ) -> Optional[str]:
     """Mount an unmounted partition to /mnt/compa/<name>.
 
@@ -316,6 +336,14 @@ def active_mount_partition(
     if part.mountpoint:
         return part.mountpoint  # already mounted
 
+    now = time.monotonic()
+    last_attempt = _LAST_MOUNT_ATTEMPTS.get(part.device, 0.0)
+    if not force and now - last_attempt < _MOUNT_RETRY_AFTER:
+        return None
+    _LAST_MOUNT_ATTEMPTS[part.device] = now
+
+    _clear_mount_error(part.device)
+
     # Pick a target path
     if not mount_name:
         mount_name = part.label or part.name
@@ -324,13 +352,36 @@ def active_mount_partition(
                    for c in mount_name) or part.name
     target = os.path.join(COMPA_MOUNT_BASE, safe)
 
+    # Prefer the dedicated root-owned helper installed by setup/install.sh.
+    # It validates the target block device before mounting, and the sudoers
+    # rule can safely grant only this helper instead of broad mount access.
+    helper_result = _mount_with_helper(part, safe)
+    if helper_result:
+        return helper_result
+
+    # Desktop/session installs may allow udisksctl via Polkit. The systemd
+    # appliance service usually cannot use this because it has no auth agent,
+    # but it is useful when running Compa manually from a login session.
+    udisks_result = _mount_with_udisks(part)
+    if udisks_result:
+        return udisks_result
+
+    # Legacy fallback: direct sudo mount. Use -n so the service never blocks
+    # waiting for an interactive password prompt.
     # Make the parent dir (we own /mnt/compa/ after first mount)
     try:
         subprocess.run(
-            ["sudo", "mkdir", "-p", target],
+            ["sudo", "-n", "mkdir", "-p", target],
             capture_output=True, text=True, timeout=5,
+            check=True,
         )
+    except subprocess.CalledProcessError as e:
+        msg = (e.stderr or e.stdout or str(e)).strip()
+        _set_mount_error(part.device, f"mkdir failed: {msg}")
+        log.error("mkdir %s: %s", target, msg)
+        return None
     except Exception as e:
+        _set_mount_error(part.device, f"mkdir exception: {e}")
         log.error("mkdir %s: %s", target, e)
         return None
 
@@ -339,7 +390,7 @@ def active_mount_partition(
     mount_opts = "uid=1000,gid=1000,fmask=0000,dmask=0000"
     try:
         result = subprocess.run(
-            ["sudo", "mount", "-o", mount_opts, part.device, target],
+            ["sudo", "-n", "mount", "-o", mount_opts, part.device, target],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:
@@ -347,25 +398,140 @@ def active_mount_partition(
             log.info("Mount with options failed (%s), retrying plain",
                      result.stderr.strip())
             result = subprocess.run(
-                ["sudo", "mount", part.device, target],
+                ["sudo", "-n", "mount", part.device, target],
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode != 0:
-                log.error("Plain mount also failed: %s", result.stderr.strip())
+                msg = result.stderr.strip() or result.stdout.strip()
+                _set_mount_error(part.device, f"mount failed: {msg}")
+                log.error("Plain mount also failed: %s", msg)
                 return None
     except Exception as e:
+        _set_mount_error(part.device, f"mount exception: {e}")
         log.error("Mount exception %s: %s", part.device, e)
         return None
 
+    _clear_mount_error(part.device)
     log.info("Mounted %s → %s", part.device, target)
     return target
 
 
-def unmount_partition(mount_point: str) -> bool:
-    """Unmount a path (must be under /mnt/compa or another owned path)."""
+def _mount_with_helper(part: Partition, mount_name: str) -> Optional[str]:
+    """Mount through the narrow Compa sudo helper when installed."""
+    if not os.path.exists(COMPA_MOUNT_HELPER):
+        return None
     try:
         result = subprocess.run(
-            ["sudo", "umount", mount_point],
+            ["sudo", "-n", COMPA_MOUNT_HELPER, "mount", part.device, mount_name],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception as e:
+        _set_mount_error(part.device, f"mount helper exception: {e}")
+        log.error("Mount helper exception %s: %s", part.device, e)
+        return None
+
+    if result.returncode != 0:
+        msg = result.stderr.strip() or result.stdout.strip()
+        _set_mount_error(part.device, f"mount helper failed: {msg}")
+        log.error("Mount helper failed for %s: %s", part.device, msg)
+        return None
+
+    mount_point = result.stdout.strip().splitlines()[-1].strip()
+    if mount_point and os.path.isdir(mount_point):
+        _clear_mount_error(part.device)
+        log.info("Mounted %s via helper → %s", part.device, mount_point)
+        return mount_point
+
+    mount_point = _mountpoint_for_device(part.device)
+    if mount_point:
+        _clear_mount_error(part.device)
+        return mount_point
+
+    _set_mount_error(part.device, "mount helper returned no mount point")
+    return None
+
+
+def _mount_with_udisks(part: Partition) -> Optional[str]:
+    """Try user-session mounting via udisksctl."""
+    try:
+        result = subprocess.run(
+            ["udisksctl", "mount", "-b", part.device],
+            capture_output=True, text=True, timeout=20,
+        )
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        _set_mount_error(part.device, f"udisksctl exception: {e}")
+        log.debug("udisksctl exception %s: %s", part.device, e)
+        return None
+
+    if result.returncode != 0:
+        msg = result.stderr.strip() or result.stdout.strip()
+        _set_mount_error(part.device, f"udisksctl failed: {msg}")
+        log.debug("udisksctl failed for %s: %s", part.device, msg)
+        return None
+
+    # Typical output: "Mounted /dev/sda at /media/pi/P-6."
+    match = re.search(r" at (.+?)\.?$", result.stdout.strip())
+    if match:
+        mount_point = match.group(1).rstrip(".")
+        if os.path.isdir(mount_point):
+            _clear_mount_error(part.device)
+            log.info("Mounted %s via udisksctl → %s", part.device, mount_point)
+            return mount_point
+
+    mount_point = _mountpoint_for_device(part.device)
+    if mount_point:
+        _clear_mount_error(part.device)
+        return mount_point
+
+    _set_mount_error(part.device, "udisksctl returned no mount point")
+    return None
+
+
+def _mountpoint_for_device(device: str) -> str:
+    try:
+        result = subprocess.run(
+            ["findmnt", "-n", "-o", "TARGET", "-S", device],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().splitlines()[0].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _set_mount_error(device: str, message: str):
+    _LAST_MOUNT_ERRORS[device] = " ".join(message.split())[:220]
+
+
+def _clear_mount_error(device: str):
+    _LAST_MOUNT_ERRORS.pop(device, None)
+
+
+def get_mount_errors() -> dict[str, str]:
+    return dict(_LAST_MOUNT_ERRORS)
+
+
+def unmount_partition(mount_point: str) -> bool:
+    """Unmount a path (must be under /mnt/compa or another owned path)."""
+    if mount_point.startswith(COMPA_MOUNT_BASE + "/") and os.path.exists(COMPA_MOUNT_HELPER):
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", COMPA_MOUNT_HELPER, "umount", mount_point],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return True
+            log.error("helper umount %s failed: %s",
+                      mount_point, result.stderr.strip())
+        except Exception as e:
+            log.error("helper umount %s: %s", mount_point, e)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "umount", mount_point],
             capture_output=True, text=True, timeout=10,
         )
         return result.returncode == 0
@@ -453,6 +619,7 @@ def diagnostic_info() -> dict:
         "mounted": [RemovableMount, ...],
         "unmounted": [Partition, ...],
         "all_partitions": [Partition, ...],
+        "mount_errors": {"/dev/sdX": "last failure"},
         "lsblk_available": bool,
         "lsblk_raw": str,           # raw lsblk output
         "lsusb_raw": str,           # raw lsusb output (Roland filter)
@@ -497,6 +664,7 @@ def diagnostic_info() -> dict:
         "mounted": list_removable_mounts(),
         "unmounted": list_unmounted_partitions(),
         "all_partitions": list_all_partitions(),
+        "mount_errors": get_mount_errors(),
         "lsblk_available": lsblk_ok,
         "lsblk_raw": lsblk_raw,
         "lsusb_raw": lsusb_raw,

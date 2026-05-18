@@ -77,6 +77,17 @@ def _sp404_signature(mount_point: str, label: str) -> bool:
     return False
 
 
+def _sp404_label_match(label: str) -> bool:
+    lab = label.upper().replace("-", "").replace("_", "")
+    return "SP404" in lab or "SP404MKII" in lab
+
+
+def _partition_label(part) -> str:
+    label = part.label or "(no label)"
+    fs = part.fs_type or "?"
+    return f"{part.device} [{label}] {part.size} {fs}"
+
+
 class SP404Librarian:
     """SP-404 MK2 on-device librarian."""
 
@@ -134,6 +145,11 @@ class SP404Librarian:
             self._mount_path = ""
             self._img._mount_path = ""
             self._last_error = "No SP-404 mount found"
+            info = diagnostic_info()
+            candidates = [p for p in info["unmounted"] if _sp404_label_match(p.label)]
+            if candidates:
+                err = info.get("mount_errors", {}).get(candidates[0].device, "")
+                self._last_error = err or f"Storage visible on {candidates[0].device}, not mounted"
             return False
         self._mount_path = found.mount_point
         self._img._mount_path = found.mount_point
@@ -157,15 +173,24 @@ class SP404Librarian:
         nm = len(info["mounted"])
         nu = len(info["unmounted"])
         if nm == 0 and nu == 0:
-            return "SP-404: no USB storage detected — Tools → USB storage"
+            return "SP-404: no USB storage detected — Utility → USB storage"
+        candidates = [p for p in info["unmounted"] if _sp404_label_match(p.label)]
+        if candidates:
+            p = candidates[0]
+            err = info.get("mount_errors", {}).get(p.device, "")
+            if err:
+                return f"SP-404 storage found on {p.device}, but mount failed: {err[:52]}"
+            return f"SP-404 storage found on {p.device}, but it is not mounted"
         return f"SP-404: seen {nm} mounted + {nu} unmounted — none match signature"
 
     def diagnostic_lines(self) -> list[str]:
         """Full diagnostic report for the debug modal."""
         lines: list[str] = []
+        mounted_now = self.is_mounted()
+        info = diagnostic_info()
 
         # Show current mount state first, regardless of lsblk
-        if self.is_mounted():
+        if mounted_now:
             lines.append(f"CURRENT MOUNT: {self._mount_path}")
             try:
                 entries = sorted(os.listdir(self._mount_path))[:12]
@@ -175,12 +200,15 @@ class SP404Librarian:
                 pass
             lines.append("")
         else:
-            lines.append("SP-404 IS NOT DETECTED")
+            candidates = [p for p in info["unmounted"] if _sp404_label_match(p.label)]
+            if candidates:
+                lines.append("SP-404 STORAGE DETECTED BUT NOT MOUNTED")
+                lines.append(f"  device: {_partition_label(candidates[0])}")
+            else:
+                lines.append("SP-404 IS NOT DETECTED")
             if self._last_error:
                 lines.append(f"  last error: {self._last_error}")
             lines.append("")
-
-        info = diagnostic_info()
 
         if not info["lsblk_available"]:
             lines.append("ERROR: lsblk not available on this system")
@@ -206,10 +234,12 @@ class SP404Librarian:
         if unmounted:
             lines.append("")
             lines.append(f"UNMOUNTED PARTITIONS ({len(unmounted)}):")
+            mount_errors = info.get("mount_errors", {})
             for p in unmounted:
-                label = p.label or "(no label)"
-                fs = p.fs_type or "?"
-                lines.append(f"  {p.device} [{label}] {p.size} {fs}")
+                lines.append(f"  {_partition_label(p)}")
+                err = mount_errors.get(p.device, "")
+                if err:
+                    lines.append(f"    mount error: {err}")
 
         return lines
 

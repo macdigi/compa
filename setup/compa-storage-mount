@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Narrow root helper for Compa USB mass-storage workflows.
+#
+# Installed by setup/install.sh as /usr/local/sbin/compa-storage-mount and
+# granted via sudoers to the Compa service user. The helper intentionally
+# refuses non-USB/system devices so Compa can mount groovebox storage without
+# broad passwordless sudo access to mount(8).
+
+set -euo pipefail
+
+BASE="/mnt/compa"
+PI_UID="${COMPA_MOUNT_UID:-1000}"
+PI_GID="${COMPA_MOUNT_GID:-1000}"
+
+die() {
+    echo "compa-storage-mount: $*" >&2
+    exit 1
+}
+
+safe_name() {
+    local raw="${1:-compa}"
+    raw="${raw//[^A-Za-z0-9_-]/_}"
+    [[ -n "$raw" ]] || raw="compa"
+    printf '%s' "$raw"
+}
+
+device_is_allowed() {
+    local dev="$1"
+    [[ -b "$dev" ]] || die "not a block device: $dev"
+    [[ "$dev" != /dev/mmcblk0* ]] || die "refusing system SD card: $dev"
+    [[ "$dev" =~ ^/dev/sd[a-z][0-9]*$ || "$dev" =~ ^/dev/mmcblk[1-9][0-9]*p?[0-9]*$ ]] \
+        || die "unsupported device path: $dev"
+
+    local info
+    info="$(udevadm info -q property -n "$dev" 2>/dev/null || true)"
+    grep -q '^ID_BUS=usb$' <<<"$info" || die "not a USB storage device: $dev"
+    grep -q '^ID_FS_USAGE=filesystem$' <<<"$info" || die "no filesystem detected on $dev"
+
+    local fs
+    fs="$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -n1 | tr -d '[:space:]')"
+    case "$fs" in
+        vfat|exfat|fat|msdos|"") ;;
+        *) die "unsupported filesystem '$fs' on $dev" ;;
+    esac
+}
+
+mount_device() {
+    local dev="$1"
+    local name
+    name="$(safe_name "${2:-$(basename "$dev")}")"
+    device_is_allowed "$dev"
+
+    local existing
+    existing="$(findmnt -n -o TARGET -S "$dev" 2>/dev/null || true)"
+    if [[ -n "$existing" ]]; then
+        echo "$existing"
+        return 0
+    fi
+
+    local target="${BASE}/${name}"
+    mkdir -p "$target"
+
+    local opts="uid=${PI_UID},gid=${PI_GID},fmask=0000,dmask=0000,noatime"
+    local err=""
+    if ! err="$(mount -o "$opts" "$dev" "$target" 2>&1)"; then
+        # Some filesystems reject uid/gid options. Keep this as a fallback for
+        # future devices, but P-6/SP storage should normally use vfat/exfat.
+        local fallback_err=""
+        if ! fallback_err="$(mount "$dev" "$target" 2>&1)"; then
+            rmdir "$target" 2>/dev/null || true
+            die "${err}; ${fallback_err}"
+        fi
+    fi
+    echo "$target"
+}
+
+umount_target() {
+    local raw="$1"
+    local target
+    if [[ "$raw" == "$BASE"/* ]]; then
+        target="$raw"
+    else
+        target="${BASE}/$(safe_name "$raw")"
+    fi
+    [[ "$target" == "$BASE"/* ]] || die "refusing path outside $BASE"
+    if mountpoint -q "$target"; then
+        umount "$target"
+    fi
+    rmdir "$target" 2>/dev/null || true
+}
+
+case "${1:-}" in
+    mount)
+        [[ $# -ge 2 ]] || die "usage: $0 mount /dev/sdX [name]"
+        mount_device "$2" "${3:-}"
+        ;;
+    umount|unmount)
+        [[ $# -ge 2 ]] || die "usage: $0 umount NAME_OR_MOUNTPOINT"
+        umount_target "$2"
+        ;;
+    *)
+        die "usage: $0 mount /dev/sdX [name] | umount NAME_OR_MOUNTPOINT"
+        ;;
+esac
