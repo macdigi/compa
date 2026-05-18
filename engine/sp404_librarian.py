@@ -85,7 +85,10 @@ def _sp404_label_match(label: str) -> bool:
 def _partition_label(part) -> str:
     label = part.label or "(no label)"
     fs = part.fs_type or "?"
-    return f"{part.device} [{label}] {part.size} {fs}"
+    hardware = " ".join(x for x in (getattr(part, "vendor", ""),
+                                    getattr(part, "model", "")) if x).strip()
+    suffix = f" · {hardware}" if hardware else ""
+    return f"{part.device} [{label}] {part.size} {fs}{suffix}"
 
 
 class SP404Librarian:

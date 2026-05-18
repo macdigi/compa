@@ -240,17 +240,22 @@ if [[ -f "${COMPA_DIR}/setup/50-ableton-push-2.rules" ]]; then
         /etc/udev/rules.d/50-ableton-push-2.rules
     ok "Push 2 USB rule installed"
 fi
-cat > /etc/udev/rules.d/99-p6-automount.rules <<'EOF'
+rm -f /etc/udev/rules.d/99-p6-automount.rules
+cat > /etc/udev/rules.d/99-compa-roland-storage.rules <<'EOF'
 # Mark Roland USB storage for Compa. Mounting is handled by
-# /usr/local/sbin/compa-storage-mount from the app process; doing real
-# mounts inside udev RUN is unreliable under systemd.
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ATTRS{idVendor}=="0582", ENV{ID_COMPA_STORAGE}="1"
+# /usr/local/sbin/compa-storage-mount. The systemd unit handles auto-mount
+# on connect; the app can still call the helper for manual/debug mounting.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ATTRS{idVendor}=="0582", TAG+="systemd", ENV{ID_COMPA_STORAGE}="1", ENV{SYSTEMD_WANTS}+="compa-storage-mount@%k.service"
 EOF
 
-if [[ -f "${COMPA_DIR}/setup/compa-storage-mount" ]]; then
+if [[ -f "${COMPA_DIR}/setup/compa-storage-mount" && \
+      -f "${COMPA_DIR}/setup/compa-storage-mount@.service" ]]; then
     install -D -o root -g root -m 0755 \
         "${COMPA_DIR}/setup/compa-storage-mount" \
         /usr/local/sbin/compa-storage-mount
+    install -D -o root -g root -m 0644 \
+        "${COMPA_DIR}/setup/compa-storage-mount@.service" \
+        /etc/systemd/system/compa-storage-mount@.service
     mkdir -p /mnt/compa
     chown root:root /mnt/compa
     chmod 0755 /mnt/compa
@@ -265,12 +270,19 @@ EOF
         die "Invalid sudoers entry for Compa USB storage helper"
     fi
 else
-    warn "USB storage helper missing from repo; P-6/SP-404 mounting may require manual sudo"
+    warn "USB storage helper/unit missing from repo; P-6/SP-404 mounting may require manual sudo"
 fi
 
 if [[ "$COMPA_IN_CHROOT" != "1" ]]; then
+    systemctl daemon-reload
     udevadm control --reload-rules
     udevadm trigger
+    for dev in /dev/sd* /dev/mmcblk[1-9]*; do
+        [[ -b "$dev" ]] || continue
+        if udevadm info -q property -n "$dev" 2>/dev/null | grep -q '^ID_VENDOR_ID=0582$'; then
+            /usr/local/sbin/compa-storage-mount mount "$dev" "$(basename "$dev")" || true
+        fi
+    done
     ok "udev rules reloaded"
 else
     ok "udev rules installed (will load on first boot)"

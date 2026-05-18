@@ -1867,7 +1867,10 @@ class TransferScreen:
                 break
             label = p.label or "(no label)"
             fs = p.fs_type or "?"
-            text = f"  {p.device}  [{label}]  {p.size}  {fs}"
+            hardware = " ".join(x for x in (getattr(p, "vendor", ""),
+                                            getattr(p, "model", "")) if x).strip()
+            suffix = f"  {hardware}" if hardware else ""
+            text = f"  {p.device}  [{label}]  {p.size}  {fs}{suffix}"
             surface.blit(f_small.render(text[:100], True, theme.TEXT),
                          (content_x, y))
             mount_rect = pygame.Rect(

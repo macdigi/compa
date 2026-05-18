@@ -1,0 +1,10 @@
+[Unit]
+Description=Compa mount Roland USB storage /dev/%I
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/compa-storage-mount mount /dev/%I %I
+ExecStop=/usr/local/sbin/compa-storage-mount umount %I

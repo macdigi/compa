@@ -49,6 +49,9 @@ echo ">>> Setting up Compa USB storage helper..."
 install -D -o root -g root -m 0755 \
     "$PROJECT_DIR/setup/compa-storage-mount" \
     /usr/local/sbin/compa-storage-mount
+install -D -o root -g root -m 0644 \
+    "$PROJECT_DIR/setup/compa-storage-mount@.service" \
+    /etc/systemd/system/compa-storage-mount@.service
 mkdir -p /mnt/compa
 chown root:root /mnt/compa
 chmod 0755 /mnt/compa
@@ -59,15 +62,24 @@ chmod 0440 /etc/sudoers.d/020_compa_storage_mount
 visudo -cf /etc/sudoers.d/020_compa_storage_mount >/dev/null
 
 echo ">>> Setting up Roland USB storage udev tags..."
-cat > /etc/udev/rules.d/99-p6-automount.rules << 'EOF'
+rm -f /etc/udev/rules.d/99-p6-automount.rules
+cat > /etc/udev/rules.d/99-compa-roland-storage.rules << 'EOF'
 # Mark Roland USB storage for Compa. Mounting is handled by
-# /usr/local/sbin/compa-storage-mount from the app process.
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ATTRS{idVendor}=="0582", ENV{ID_COMPA_STORAGE}="1"
+# /usr/local/sbin/compa-storage-mount. The systemd unit handles auto-mount
+# on connect; the app can still call the helper for manual/debug mounting.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ATTRS{idVendor}=="0582", TAG+="systemd", ENV{ID_COMPA_STORAGE}="1", ENV{SYSTEMD_WANTS}+="compa-storage-mount@%k.service"
 EOF
 
 # Reload udev
+systemctl daemon-reload
 udevadm control --reload-rules
 udevadm trigger
+for dev in /dev/sd* /dev/mmcblk[1-9]*; do
+    [[ -b "$dev" ]] || continue
+    if udevadm info -q property -n "$dev" 2>/dev/null | grep -q '^ID_VENDOR_ID=0582$'; then
+        /usr/local/sbin/compa-storage-mount mount "$dev" "$(basename "$dev")" || true
+    fi
+done
 
 # Enable service
 echo ">>> Enabling compa.service..."

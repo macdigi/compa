@@ -53,6 +53,8 @@ class Partition:
     mountpoint: str       # "" if unmounted
     label: str
     fs_type: str          # vfat, exfat, etc
+    model: str = ""       # USB-reported model, when available
+    vendor: str = ""      # USB-reported vendor, when available
 
 
 def list_removable_mounts() -> list[RemovableMount]:
@@ -229,7 +231,7 @@ def list_all_partitions() -> list[Partition]:
     results: list[Partition] = []
     try:
         out = subprocess.run(
-            ["lsblk", "-Pno", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE"],
+            ["lsblk", "-Pno", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE,MODEL,VENDOR"],
             capture_output=True, text=True, timeout=5,
         )
     except Exception as e:
@@ -239,7 +241,7 @@ def list_all_partitions() -> list[Partition]:
     # Track which disks have partitions — if a disk has at least one
     # partition child, we prefer the partitions and skip the disk itself.
     disks_with_parts: set[str] = set()
-    raw_entries: list[tuple[str, str, str, str, str, str]] = []
+    raw_entries: list[tuple[str, str, str, str, str, str, str, str]] = []
 
     for line in out.stdout.splitlines():
         fields = _parse_lsblk_pairs(line)
@@ -251,7 +253,10 @@ def list_all_partitions() -> list[Partition]:
         mountpoint = fields.get("MOUNTPOINT", "")
         label = fields.get("LABEL", "")
         fs_type = fields.get("FSTYPE", "")
-        raw_entries.append((name, size, ptype, mountpoint, label, fs_type))
+        model = fields.get("MODEL", "")
+        vendor = fields.get("VENDOR", "")
+        raw_entries.append((name, size, ptype, mountpoint, label, fs_type,
+                            model, vendor))
 
         if ptype == "part":
             # Derive parent disk name: sda1 → sda, nvme0n1p1 → nvme0n1
@@ -259,7 +264,7 @@ def list_all_partitions() -> list[Partition]:
             if parent:
                 disks_with_parts.add(parent)
 
-    for name, size, ptype, mountpoint, label, fs_type in raw_entries:
+    for name, size, ptype, mountpoint, label, fs_type, model, vendor in raw_entries:
         if ptype not in ("part", "disk"):
             continue
         if name.startswith("mmcblk0"):
@@ -290,6 +295,8 @@ def list_all_partitions() -> list[Partition]:
             mountpoint=mountpoint,
             label=label.strip(),
             fs_type=fs_type,
+            model=model.strip(),
+            vendor=vendor.strip(),
         ))
 
     return results
@@ -655,7 +662,7 @@ def diagnostic_info() -> dict:
     lsblk_raw = ""
     try:
         out = subprocess.run(
-            ["lsblk", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE"],
+            ["lsblk", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE,MODEL,VENDOR"],
             capture_output=True, text=True, timeout=5,
         )
         lsblk_raw = out.stdout
