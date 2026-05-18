@@ -33,7 +33,10 @@ def _find_port(port_class, fragment: str) -> Optional[int]:
                      fragment in name)):
                 return i
     finally:
-        del inst
+        try:
+            inst.delete()
+        except Exception:
+            pass
     return None
 
 

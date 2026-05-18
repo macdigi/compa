@@ -132,35 +132,52 @@ class SpectraMapper:
     def detect(self) -> bool:
         if rtmidi is None:
             return False
+        mi = None
         try:
             mi = rtmidi.MidiIn()
             for i in range(mi.get_port_count()):
                 if "Midi Fighter Spectra" in mi.get_port_name(i):
-                    del mi
                     return True
-            del mi
         except Exception:
             pass
+        finally:
+            if mi is not None:
+                try:
+                    mi.delete()
+                except Exception:
+                    pass
         return False
 
     def connect(self) -> bool:
         if rtmidi is None:
             return False
 
-        mi = rtmidi.MidiIn()
-        mo = rtmidi.MidiOut()
+        mi = None
+        mo = None
         in_port = out_port = None
+        try:
+            mi = rtmidi.MidiIn()
+            mo = rtmidi.MidiOut()
 
-        for i in range(mi.get_port_count()):
-            if "Midi Fighter Spectra" in mi.get_port_name(i):
-                in_port = i
-                break
-        for i in range(mo.get_port_count()):
-            if "Midi Fighter Spectra" in mo.get_port_name(i):
-                out_port = i
-                break
-
-        del mi, mo
+            for i in range(mi.get_port_count()):
+                if "Midi Fighter Spectra" in mi.get_port_name(i):
+                    in_port = i
+                    break
+            for i in range(mo.get_port_count()):
+                if "Midi Fighter Spectra" in mo.get_port_name(i):
+                    out_port = i
+                    break
+        finally:
+            if mi is not None:
+                try:
+                    mi.delete()
+                except Exception:
+                    pass
+            if mo is not None:
+                try:
+                    mo.delete()
+                except Exception:
+                    pass
 
         if in_port is None:
             return False

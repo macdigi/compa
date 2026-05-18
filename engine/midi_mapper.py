@@ -140,34 +140,39 @@ class MidiMapper:
             self._cached_controllers = []
             return []
 
+        mi = None
         try:
             mi = rtmidi.MidiIn()
+            found = []
+            device_hints = {"SP-404", "P-6", "Through", "RtMidi", "ATOM", "Force"}
+
+            for i in range(mi.get_port_count()):
+                name = mi.get_port_name(i)
+                if any(h in name for h in device_hints):
+                    continue
+                profile = None
+                prof_name = "Generic"
+                for pn, prof in KNOWN_CONTROLLERS.items():
+                    if prof["hint"] in name:
+                        profile = prof
+                        prof_name = pn
+                        break
+                found.append({
+                    "index": i,
+                    "name": name,
+                    "profile": profile,
+                    "profile_name": prof_name,
+                })
         except Exception:
             self._cached_controllers = []
             return []
+        finally:
+            if mi is not None:
+                try:
+                    mi.delete()
+                except Exception:
+                    pass
 
-        found = []
-        device_hints = {"SP-404", "P-6", "Through", "RtMidi", "ATOM", "Force"}
-
-        for i in range(mi.get_port_count()):
-            name = mi.get_port_name(i)
-            if any(h in name for h in device_hints):
-                continue
-            profile = None
-            prof_name = "Generic"
-            for pn, prof in KNOWN_CONTROLLERS.items():
-                if prof["hint"] in name:
-                    profile = prof
-                    prof_name = pn
-                    break
-            found.append({
-                "index": i,
-                "name": name,
-                "profile": profile,
-                "profile_name": prof_name,
-            })
-
-        del mi  # Release immediately
         self._cached_controllers = found
         return found
 
@@ -176,20 +181,34 @@ class MidiMapper:
         if rtmidi is None:
             return False
 
-        mi = rtmidi.MidiIn()
-        mo = rtmidi.MidiOut()
+        mi = None
+        mo = None
+        try:
+            mi = rtmidi.MidiIn()
+            mo = rtmidi.MidiOut()
 
-        in_port = out_port = None
-        for i in range(mi.get_port_count()):
-            if port_name_hint in mi.get_port_name(i):
-                in_port = i
-                self._controller_name = mi.get_port_name(i)
-                break
+            in_port = out_port = None
+            for i in range(mi.get_port_count()):
+                if port_name_hint in mi.get_port_name(i):
+                    in_port = i
+                    self._controller_name = mi.get_port_name(i)
+                    break
 
-        for i in range(mo.get_port_count()):
-            if port_name_hint in mo.get_port_name(i):
-                out_port = i
-                break
+            for i in range(mo.get_port_count()):
+                if port_name_hint in mo.get_port_name(i):
+                    out_port = i
+                    break
+        finally:
+            if mi is not None:
+                try:
+                    mi.delete()
+                except Exception:
+                    pass
+            if mo is not None:
+                try:
+                    mo.delete()
+                except Exception:
+                    pass
 
         if in_port is None:
             return False

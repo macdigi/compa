@@ -185,6 +185,7 @@ sudo -u "${COMPA_USER}" "${COMPA_DIR}/venv/bin/pip" install \
     --quiet --disable-pip-version-check \
     sounddevice \
     soundfile \
+    Pillow \
     pyusb \
     aalink \
     git+https://github.com/macdigi/pylinkaudio.git

@@ -371,6 +371,7 @@ class P6Midi:
 
         import rtmidi
         # Temporarily create a new input that accepts SysEx
+        syx_in = None
         try:
             syx_in = rtmidi.MidiIn()
             # Find the same port
@@ -441,12 +442,20 @@ class P6Midi:
                 else:
                     time.sleep(0.01)
 
-            syx_in.close_port()
-            del syx_in
             return result
         except Exception as e:
             log.warning("Identity query failed: %s", e)
             return {}
+        finally:
+            if syx_in is not None:
+                try:
+                    syx_in.close_port()
+                except Exception:
+                    pass
+                try:
+                    syx_in.delete()
+                except Exception:
+                    pass
 
     # ── State queries ───────────────────────────────────────────────────
 
@@ -516,16 +525,32 @@ def find_p6_ports(port_hint: str = "P-6"):
             break
 
     if in_port is None and out_port is None:
+        try:
+            midi_in.delete()
+        except Exception:
+            pass
+        try:
+            midi_out.delete()
+        except Exception:
+            pass
         return None, None
 
     if in_port is not None:
         midi_in.open_port(in_port)
     else:
+        try:
+            midi_in.delete()
+        except Exception:
+            pass
         midi_in = None
 
     if out_port is not None:
         midi_out.open_port(out_port)
     else:
+        try:
+            midi_out.delete()
+        except Exception:
+            pass
         midi_out = None
 
     return midi_in, midi_out
