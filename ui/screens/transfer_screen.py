@@ -279,7 +279,9 @@ class TransferScreen:
         """Return TouchListItem entries for all local WAVs.
 
         Pulls from P6_RECORDING_DIR (recordings/) and LOCAL_SAMPLE_CACHE
-        (samples/). Deduped by basename.
+        (samples/), recursively. We keep duplicate basenames when they
+        live in different folders because that path context matters for
+        kit-building and device loading.
         """
         roots = []
         rec_dir = self.app.config.get("P6_RECORDING_DIR", "")
@@ -289,31 +291,77 @@ class TransferScreen:
         if sample_dir and os.path.isdir(sample_dir):
             roots.append(("SMP", sample_dir))
 
-        seen = set()
         items: list = []
         for tag, root in roots:
             try:
-                for fn in sorted(os.listdir(root)):
-                    if not fn.lower().endswith(".wav"):
-                        continue
-                    if fn in seen:
-                        continue
-                    seen.add(fn)
-                    path = os.path.join(root, fn)
-                    try:
-                        size = os.path.getsize(path)
-                    except Exception:
-                        size = 0
+                found: list[tuple[str, str, int]] = []
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for fn in filenames:
+                        if not fn.lower().endswith(".wav"):
+                            continue
+                        path = os.path.join(dirpath, fn)
+                        try:
+                            size = os.path.getsize(path)
+                        except Exception:
+                            size = 0
+                        rel_dir = os.path.relpath(dirpath, root)
+                        found.append((path, rel_dir, size))
+                for path, rel_dir, size in sorted(found,
+                                                  key=lambda x: (x[1], os.path.basename(x[0]).lower())):
+                    fn = os.path.basename(path)
+                    rel_label = "" if rel_dir in (".", "") else f" · {rel_dir}"
                     items.append(TouchListItem(
                         text=fn,
-                        subtext=f"{tag} · {size // 1024}KB",
+                        subtext=f"{tag}{rel_label} · {size // 1024}KB",
                         icon="~",
                         icon_color=theme.WAVEFORM_COLOR,
-                        data={"path": path, "name": fn, "size": size},
+                        data={"path": path, "name": fn, "size": size, "root": root,
+                              "rel_dir": rel_dir},
                     ))
             except Exception as e:
                 log.warning("scan %s failed: %s", root, e)
         return items
+
+    def _p6_storage_summary(self) -> tuple[str, str]:
+        """Return a title/subtitle pair for the P-6 storage row."""
+        lib = self.p6_lib
+        if lib is None:
+            return ("P-6 librarian unavailable", "No P-6 library backend is attached.")
+        if not lib.is_mounted():
+            return (
+                "P-6 not mounted",
+                "Hold SAMPLING while powering on the P-6, then reconnect USB. Use DEBUG if the mount needs manual help.",
+            )
+
+        pads = lib.read_assignments()
+        total = sum(1 for p in pads if p is not None)
+        on_device = sum(1 for p in pads if p and p.get("on_device"))
+        pending = sum(1 for p in pads if p and p.get("in_import"))
+        title = f"P-6 ready · {total}/48 visible · {lib.mount_path}"
+        subtitle = f"{on_device} on device · {pending} pending import"
+        return (title, subtitle)
+
+    def _sp404_storage_summary(self) -> tuple[str, str]:
+        """Return a title/subtitle pair for the SP-404 storage row."""
+        lib = self.sp404_lib
+        if lib is None:
+            return ("SP-404 librarian unavailable", "No SP-404 library backend is attached.")
+        if not lib.is_mounted():
+            return (
+                "SP-404 not mounted",
+                "Put the SP-404 MKII into USB storage mode, then reconnect USB. Use DEBUG if the mount needs manual help.",
+            )
+
+        if not self._sp404_projects:
+            self._refresh_sp404_projects()
+        proj = self._sp404_projects[self._sp404_project_idx] if self._sp404_projects else None
+        if proj:
+            title = f"SP-404 ready · {proj['name']} · {proj['num_samples']} samples · {lib.mount_path}"
+            subtitle = f"{len(self._sp404_projects)} project(s) visible"
+        else:
+            title = f"SP-404 ready · {lib.mount_path}"
+            subtitle = "No projects yet — Compa can create PROJECT_01 on first write."
+        return (title, subtitle)
 
     def _refresh_p6_assignments(self):
         """Re-read pad assignments from the P-6."""
@@ -1210,18 +1258,15 @@ class TransferScreen:
         lib = self.p6_lib
 
         # Mount status row (replaces AKAI's drive row)
-        if lib is None:
-            info = "P-6 librarian unavailable"
-        elif lib.is_mounted():
+        if lib is not None and lib.is_mounted():
             # Re-read live assignments each draw so the view is fresh
             self._p6_cached_assignments = lib.read_assignments()
             self._p6_grid.set_pads(self._p6_cached_assignments)
-            n = sum(1 for p in self._p6_cached_assignments if p is not None)
-            info = f"P-6 · {n}/48 loaded · {lib.mount_path}"
-        else:
-            info = lib.diagnostic()
-        info_surf = f_small.render(info[:100], True, theme.TEXT_DIM)
-        surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 4))
+        title, subtitle = self._p6_storage_summary()
+        info_surf = f_small.render(title[:110], True, theme.TEXT_DIM)
+        surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 2))
+        sub_surf = f_tiny.render(subtitle[:118], True, theme.TEXT_DIM)
+        surface.blit(sub_surf, (12, self.DRIVE_ROW_Y + 18))
 
         # Librarian grid and source list draw in their own laid-out rects
         self._relayout_librarian()
@@ -1261,9 +1306,7 @@ class TransferScreen:
         lib = self.sp404_lib
 
         # Mount + project status row — auto-refresh while drawing
-        if lib is None:
-            info = "SP-404 librarian unavailable"
-        elif lib.is_mounted():
+        if lib is not None and lib.is_mounted():
             if not self._sp404_projects:
                 self._refresh_sp404_projects()
             if self._sp404_projects:
@@ -1273,13 +1316,11 @@ class TransferScreen:
                 # Refresh the pad grid too
                 pads = lib.read_project_pads(proj["path"])
                 self._sp404_grid.set_pads(pads)
-                info = f"SP-404 · {proj['name']} · {proj['num_samples']} samples · {lib.mount_path}"
-            else:
-                info = f"SP-404 · {lib.mount_path} · no projects yet"
-        else:
-            info = lib.diagnostic()
-        info_surf = f_small.render(info[:100], True, theme.TEXT_DIM)
-        surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 4))
+        title, subtitle = self._sp404_storage_summary()
+        info_surf = f_small.render(title[:110], True, theme.TEXT_DIM)
+        surface.blit(info_surf, (12, self.DRIVE_ROW_Y + 2))
+        sub_surf = f_tiny.render(subtitle[:118], True, theme.TEXT_DIM)
+        surface.blit(sub_surf, (12, self.DRIVE_ROW_Y + 18))
 
         # Project prev/next arrows (top-right)
         self._sp404_proj_rects = []
