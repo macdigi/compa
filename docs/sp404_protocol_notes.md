@@ -119,3 +119,45 @@ The SP-404 may require the app to send something via the AUDIO/MIDI
 interface (0582:0281) FIRST before the CDC serial port (0582:02e7)
 becomes responsive. The dtrace capture didn't show MIDI activity
 but the app opens MIDI ports during startup.
+
+## Live Pi status (2026-05-18)
+
+Jordan confirmed the official SP-404MKII App can access pad/sample data
+while the SP is connected normally, without entering a visible USB storage
+mode. That means Compa's mass-storage-only implementation is incomplete for
+the desired workflow.
+
+Current implementation status:
+- Compa can mount generic Roland USB storage volumes through the
+  `compa-storage-mount` helper when a block device appears.
+- The SP-404MKII normal connection exposes audio/MIDI and, when present, the
+  separate Roland CDC/librarian device described above.
+- No normal-mode SP pad filesystem is visible as a Linux block device, so
+  Files -> Device -> SP-404 must eventually talk the Roland librarian protocol
+  instead of only scanning `lsblk`.
+
+Live Pi probe:
+- `/dev/ttyACM0` maps to USB ID `0582:02e7`
+  (`usb-Roland_Corporation_Roland_SP-404MKII-if00`).
+- Opening `/dev/ttyACM0` raw at 9600, setting DTR/RTS, and sending the
+  captured handshake bytes now returns data from Jordan's hardware:
+
+    write:
+    12 60 e0 05 fe 67 00 6d 33 31 31 03
+
+    read:
+    13 e0 b5 05 44 6e e0 82 20 c7 5a 83 13 00 00 00
+    7e 04 00 01 00 06 00 00 00 de 0e 00 00 02 00 00
+    00 0b 33
+
+This overturns the earlier "CDC serial is unreachable" assumption. The SP
+does not need to mount as USB storage for librarian access, but Compa still
+needs the command layer after this handshake.
+
+Next concrete probes:
+1. Identify the response frame boundaries, command IDs, sequence numbers, and
+   checksum/CRC.
+2. Capture the official app requesting project/pad lists immediately after
+   this handshake.
+3. Reproduce the smallest read-only command in Compa before attempting any
+   write/delete operation.

@@ -4,7 +4,8 @@ Hosts three device-type tabs accessible from Files → Device:
 
   AKAI    push/pull files between Compa and MPC/Force via USB Computer Mode
   P-6     librarian for the Roland AIRA Compact P-6: bank/pad view, load
-          samples by tapping a pad then tapping a WAV, clear, backup/restore
+          samples by tapping a pad then tapping local audio, clear,
+          backup/restore
   SP-404  librarian for the Roland SP-404 MK2: bank/pad view, load samples
           (WAV→SMP conversion), move pads, clear, backup/restore
 
@@ -223,7 +224,7 @@ class TransferScreen:
                 "selected": True,
                 "title": pad_label,
                 "state": fallback_state,
-                "lines": ["Pad is empty.", "Tap a local WAV to load it here.", "Action: load sample"],
+                "lines": ["Pad is empty.", "Tap local audio to load it here.", "Action: convert + load"],
             }
 
         filename = pad.get("filename") or "Unknown sample"
@@ -434,35 +435,55 @@ class TransferScreen:
     # ── Librarian helpers ──────────────────────────────────────────────
 
     def _refresh_librarian_sources(self):
-        """Populate both librarian source lists with local WAVs."""
-        items = self._scan_local_wavs()
+        """Populate both librarian source lists with local importable audio."""
+        items = self._scan_local_audio()
         self._p6_source_list.set_items(items)
         # Fresh copies so selection state is independent
-        self._sp404_source_list.set_items(self._scan_local_wavs())
+        self._sp404_source_list.set_items(self._scan_local_audio())
 
-    def _scan_local_wavs(self) -> list:
-        """Return TouchListItem entries for all local WAVs.
+    def _scan_local_audio(self) -> list:
+        """Return TouchListItem entries for importable local audio.
 
-        Pulls from P6_RECORDING_DIR (recordings/) and LOCAL_SAMPLE_CACHE
-        (samples/), recursively. We keep duplicate basenames when they
-        live in different folders because that path context matters for
-        kit-building and device loading.
+        Pulls from Compa's recording/sample/session folders plus common
+        user drop locations. P-6 imports are converted on write; SP-404
+        imports are converted to SMP, so source files can be WAV, AIFF,
+        FLAC, MP3, or M4A.
         """
-        roots = []
+        roots: list[tuple[str, str]] = []
+        seen_roots: set[str] = set()
+
+        def add_root(tag: str, path: str):
+            if not path:
+                return
+            root = os.path.abspath(os.path.expanduser(path))
+            if root in seen_roots or not os.path.isdir(root):
+                return
+            seen_roots.add(root)
+            roots.append((tag, root))
+
         rec_dir = self.app.config.get("P6_RECORDING_DIR", "")
-        if rec_dir and os.path.isdir(rec_dir):
-            roots.append(("REC", rec_dir))
         sample_dir = self.app.config.get("LOCAL_SAMPLE_CACHE", "")
-        if sample_dir and os.path.isdir(sample_dir):
-            roots.append(("SMP", sample_dir))
+        sessions_dir = self.app.config.get("P6_SESSIONS_DIR", "sessions")
+        add_root("REC", rec_dir)
+        add_root("SMP", sample_dir)
+        add_root("SLC", os.path.join(sessions_dir, "slices"))
+        add_root("KIT", os.path.join(sessions_dir, "converted"))
+        add_root("BAK", os.path.join(sessions_dir, "device_images"))
+        add_root("MNT", "/mnt/samples")
+        add_root("MUS", "~/Music")
+        add_root("DLD", "~/Downloads")
 
         items: list = []
+        audio_ext = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".m4a"}
+        skip_dirs = {".git", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
         for tag, root in roots:
             try:
                 found: list[tuple[str, str, int]] = []
-                for dirpath, _dirnames, filenames in os.walk(root):
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
                     for fn in filenames:
-                        if not fn.lower().endswith(".wav"):
+                        ext = os.path.splitext(fn)[1].lower()
+                        if ext not in audio_ext:
                             continue
                         path = os.path.join(dirpath, fn)
                         try:
@@ -474,10 +495,11 @@ class TransferScreen:
                 for path, rel_dir, size in sorted(found,
                                                   key=lambda x: (x[1], os.path.basename(x[0]).lower())):
                     fn = os.path.basename(path)
+                    ext = os.path.splitext(fn)[1].lower().lstrip(".").upper()
                     rel_label = "" if rel_dir in (".", "") else f" · {rel_dir}"
                     items.append(TouchListItem(
                         text=fn,
-                        subtext=f"{tag}{rel_label} · {size // 1024}KB",
+                        subtext=f"{tag}{rel_label} · {ext} · {size // 1024}KB",
                         icon="~",
                         icon_color=theme.WAVEFORM_COLOR,
                         data={"path": path, "name": fn, "size": size, "root": root,
@@ -485,7 +507,7 @@ class TransferScreen:
                     ))
             except Exception as e:
                 log.warning("scan %s failed: %s", root, e)
-        return items
+        return items[:512]
 
     def _p6_storage_summary(self) -> tuple[str, str]:
         """Return a title/subtitle pair for the P-6 storage row."""
@@ -506,7 +528,7 @@ class TransferScreen:
         on_device = sum(1 for p in pads if p and p.get("on_device"))
         pending = sum(1 for p in pads if p and p.get("in_import"))
         title = f"P-6 ready · {total}/48 visible · {lib.mount_path}"
-        subtitle = f"{on_device} on device · {pending} pending import"
+        subtitle = f"{on_device} on device · {pending} pending · imports convert to 44.1k mono, max 6s"
         return (title, subtitle)
 
     def _sp404_storage_summary(self) -> tuple[str, str]:
@@ -518,9 +540,14 @@ class TransferScreen:
             diag = lib.diagnostic()
             if "storage found" in diag:
                 return ("SP-404 storage detected, not mounted", diag)
+            if "librarian port found" in diag:
+                return (
+                    "SP-404 connected · normal librarian mode",
+                    "Normal-mode pad/file access is protocol work; mass-storage writes are not active.",
+                )
             return (
-                "SP-404 not mounted",
-                "Put the SP-404 MKII into Utility → USB Storage. Use DEBUG to confirm what Linux sees.",
+                "SP-404 storage not mounted",
+                "Use DEBUG to confirm USB state. Normal-mode SP access is not a Linux mount.",
             )
 
         if not self._sp404_projects:
@@ -920,15 +947,22 @@ class TransferScreen:
             return
         bank_idx = global_idx // 6
         pad_idx = global_idx % 6
-        dest = lib.write_pad(bank_idx, pad_idx, src_wav)
-        if dest:
-            name = os.path.basename(src_wav)
-            bank_letter = "ABCDEFGH"[bank_idx]
-            self._set_status(f"Loaded {name[:24]} → {bank_letter}-{pad_idx + 1}")
-            self._refresh_p6_assignments()
-        else:
-            err = lib.last_error or "Load failed — check the P-6 mount"
-            self._set_status(err[:80])
+        self._set_status(
+            f"Converting {os.path.basename(src_wav)[:24]} → P-6 WAV...")
+
+        def _worker():
+            dest = lib.write_pad(bank_idx, pad_idx, src_wav)
+            if dest:
+                name = os.path.basename(src_wav)
+                bank_letter = "ABCDEFGH"[bank_idx]
+                self._set_status(
+                    f"Loaded {name[:24]} → {bank_letter}-{pad_idx + 1}")
+                self._refresh_p6_assignments()
+            else:
+                err = lib.last_error or "Load failed — check the P-6 mount"
+                self._set_status(err[:80])
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _do_p6_action(self, action_id: str):
         lib = self.p6_lib
@@ -1462,9 +1496,9 @@ class TransferScreen:
         detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
         self._draw_selected_pad_card(surface, self._selected_pad_detail("p6", mounted),
                                      detail_rect, f_small, f_tiny)
-        label = f"LOCAL WAVS · {len(self._p6_source_list.items)}"
+        label = f"LOCAL AUDIO · {len(self._p6_source_list.items)}"
         if not self._p6_source_list.items:
-            label += " · recordings/ + samples/"
+            label += " · recordings/ samples/ Music/"
         label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
         self._p6_source_list.draw(surface)
@@ -1538,9 +1572,9 @@ class TransferScreen:
         detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
         self._draw_selected_pad_card(surface, self._selected_pad_detail("sp404", mounted),
                                      detail_rect, f_small, f_tiny)
-        label = f"LOCAL WAVS · {len(self._sp404_source_list.items)}"
+        label = f"LOCAL AUDIO · {len(self._sp404_source_list.items)}"
         if not self._sp404_source_list.items:
-            label += " · recordings/ + samples/"
+            label += " · recordings/ samples/ Music/"
         label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
         self._sp404_source_list.draw(surface)

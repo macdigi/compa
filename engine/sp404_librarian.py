@@ -28,8 +28,9 @@ PADCONF.BIN is NOT written by v1 of this module. Phase A tests whether
 the SP-404 can pick up new .SMP files on its own. If the hardware
 requires PADCONF rewrites, that's a follow-up (Phase B).
 
-The CDC serial protocol is confirmed unreachable (see
-docs/sp404_protocol_notes.md), so we go direct to mass storage.
+Normal-mode librarian access uses a Roland CDC serial protocol (see
+docs/sp404_protocol_notes.md). Compa can detect that port, but write
+support still uses mass storage until the normal-mode protocol is decoded.
 
 Backup/restore is delegated to engine.p6_image.P6ImageManager — same
 device-agnostic background-thread implementation the P-6 librarian uses.
@@ -45,6 +46,7 @@ from typing import Callable, Optional
 from engine.p6_image import P6ImageManager
 from engine import sp404_storage
 from engine.device_mount import find_or_mount_device, diagnostic_info
+from engine.sp404_protocol import find_sp404_librarian_port
 
 log = logging.getLogger(__name__)
 
@@ -77,11 +79,6 @@ def _sp404_signature(mount_point: str, label: str) -> bool:
     return False
 
 
-def _sp404_label_match(label: str) -> bool:
-    lab = label.upper().replace("-", "").replace("_", "")
-    return "SP404" in lab or "SP404MKII" in lab
-
-
 def _sp404_storage_candidate(part) -> bool:
     label = (part.label or "").upper().replace("-", "").replace("_", "")
     model = (getattr(part, "model", "") or "").upper().replace("-", "").replace("_", "")
@@ -94,9 +91,15 @@ def _sp404_storage_candidate(part) -> bool:
 
 
 def _sp404_usb_status(info: dict) -> str:
+    port = find_sp404_librarian_port()
+    if port:
+        return (
+            f"SP-404 normal-mode librarian port found at {port}; "
+            "no storage mount is exposed"
+        )
     raw = (info.get("lsusb_raw") or "").lower()
     if "sp-404" in raw or "sp404" in raw or "0582:02e7" in raw or "0582:0281" in raw:
-        return "SP-404 connected in normal mode — enter Utility -> USB Storage for file access"
+        return "SP-404 connected in normal mode; storage mount is not exposed"
     return ""
 
 
@@ -167,7 +170,7 @@ class SP404Librarian:
             self._img._mount_path = ""
             self._last_error = "No SP-404 mount found"
             info = diagnostic_info()
-            candidates = [p for p in info["unmounted"] if _sp404_label_match(p.label)]
+            candidates = [p for p in info["unmounted"] if _sp404_storage_candidate(p)]
             if candidates:
                 err = info.get("mount_errors", {}).get(candidates[0].device, "")
                 self._last_error = err or f"Storage visible on {candidates[0].device}, not mounted"
@@ -229,7 +232,12 @@ class SP404Librarian:
                 lines.append("SP-404 STORAGE DETECTED BUT NOT MOUNTED")
                 lines.append(f"  device: {_partition_label(candidates[0])}")
             else:
-                lines.append("SP-404 IS NOT DETECTED")
+                usb_status = _sp404_usb_status(info)
+                if usb_status:
+                    lines.append(usb_status.upper())
+                    lines.append("  normal-mode file access needs the Roland librarian protocol")
+                else:
+                    lines.append("SP-404 IS NOT DETECTED")
             if self._last_error:
                 lines.append(f"  last error: {self._last_error}")
             lines.append("")

@@ -25,7 +25,7 @@ thread with progress tracking.
 
 import logging
 import os
-import shutil
+import re
 import subprocess
 import threading
 from typing import Callable, Optional
@@ -34,6 +34,10 @@ from engine.p6_image import P6ImageManager
 from engine.device_mount import find_or_mount_device, diagnostic_info
 
 log = logging.getLogger(__name__)
+
+P6_IMPORT_SAMPLE_RATE = 44100
+P6_IMPORT_CHANNELS = 1
+P6_IMPORT_MAX_SECONDS = 6.0
 
 
 def _p6_signature(mount_point: str, label: str) -> bool:
@@ -79,6 +83,14 @@ def _partition_label(part) -> str:
                                     getattr(part, "model", "")) if x).strip()
     suffix = f" · {hardware}" if hardware else ""
     return f"{part.device} [{label}] {part.size} {fs}{suffix}"
+
+
+def _p6_import_filename(src_path: str) -> str:
+    """Return a short FAT-friendly WAV filename for P-6 import."""
+    stem = os.path.splitext(os.path.basename(src_path))[0]
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "sample"
+    # Keep room for the suffix and avoid very long names on FAT.
+    return f"{safe[:36]}_p6.wav"
 
 
 class P6Librarian:
@@ -363,20 +375,25 @@ class P6Librarian:
         return os.path.join(self.import_dir(), f"BANK_{bank}", f"PAD_{pad_idx + 1}")
 
     def write_pad(self, bank_idx: int, pad_idx: int, src_wav: str) -> Optional[str]:
-        """Copy a WAV into the IMPORT folder for the given pad.
+        """Convert/copy an audio file into the IMPORT folder for the pad.
 
         Returns the destination path on success, None on failure. Clears
         any existing WAV in that pad's folder first so the P-6 picks up
         the new one. Creates the IMPORT/BANK_X/PAD_N hierarchy if the
         P-6 hasn't done so yet (e.g. a fresh device).
+
+        P-6 imports are intentionally conservative for now: 44.1 kHz,
+        mono, 16-bit PCM WAV, capped at six seconds. That matches the
+        current safe path Jordan described and avoids queuing files the
+        hardware will reject.
         """
         if not self.is_mounted():
             self._last_error = "P-6 not mounted"
             log.warning("P-6 not mounted")
             return None
         if not os.path.isfile(src_wav):
-            self._last_error = f"Source WAV not found: {os.path.basename(src_wav)}"
-            log.warning("Source WAV not found: %s", src_wav)
+            self._last_error = f"Source audio not found: {os.path.basename(src_wav)}"
+            log.warning("Source audio not found: %s", src_wav)
             return None
         if not 0 <= bank_idx < len(self.BANKS):
             return None
@@ -404,19 +421,66 @@ class P6Librarian:
         except Exception as e:
             log.warning("Couldn't clear old pad files: %s", e)
 
-        # Copy (use basename of source; no rename)
-        name = os.path.basename(src_wav)
+        name = _p6_import_filename(src_wav)
         dest = os.path.join(pad_dir, name)
-        try:
-            shutil.copy2(src_wav, dest)
-        except Exception as e:
-            log.error("Copy failed %s → %s: %s", src_wav, dest, e)
+        if not self._convert_for_import(src_wav, dest):
             return None
 
         self.sync()
         log.info("P-6: wrote %s → bank %s pad %d",
                  name, self.BANKS[bank_idx], pad_idx + 1)
         return dest
+
+    def _convert_for_import(self, src_path: str, dest_wav: str) -> bool:
+        """Write a P-6-safe import WAV using ffmpeg."""
+        tmp_path = dest_wav + ".tmp.wav"
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", src_path,
+            "-t", f"{P6_IMPORT_MAX_SECONDS:.3f}",
+            "-vn",
+            "-map_metadata", "-1",
+            "-ac", str(P6_IMPORT_CHANNELS),
+            "-ar", str(P6_IMPORT_SAMPLE_RATE),
+            "-sample_fmt", "s16",
+            "-f", "wav",
+            tmp_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=45,
+            )
+        except FileNotFoundError:
+            self._last_error = "ffmpeg not installed — can't prepare P-6 import"
+            log.error(self._last_error)
+            return False
+        except subprocess.TimeoutExpired:
+            self._last_error = "P-6 import conversion timed out"
+            log.error(self._last_error)
+            return False
+        except Exception as e:
+            self._last_error = f"P-6 import conversion failed: {e}"
+            log.error(self._last_error)
+            return False
+
+        if result.returncode != 0:
+            err = " ".join((result.stderr or result.stdout or "").split())
+            self._last_error = f"P-6 import conversion failed: {err[:120]}"
+            log.error(self._last_error)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False
+
+        try:
+            os.replace(tmp_path, dest_wav)
+        except Exception as e:
+            self._last_error = f"Can't stage P-6 WAV: {e}"
+            log.error(self._last_error)
+            return False
+        return True
 
     def clear_pad(self, bank_idx: int, pad_idx: int) -> bool:
         """Delete any WAV in the IMPORT folder for this pad."""
