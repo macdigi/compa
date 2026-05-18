@@ -75,6 +75,10 @@ class LibrarianGrid:
     def rect(self) -> pygame.Rect:
         return self._rect
 
+    @property
+    def pads(self) -> list[Optional[dict]]:
+        return self._pads
+
     def set_bank(self, idx: int):
         if 0 <= idx < self._banks:
             self._current_bank = idx

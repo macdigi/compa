@@ -165,12 +165,116 @@ class TransferScreen:
 
         grid_w = int(W * 0.60) - 20
         grid_rect = pygame.Rect(10, lib_top, grid_w, lib_h)
-        src_rect = pygame.Rect(grid_w + 20, lib_top, W - grid_w - 30, lib_h)
+        src_x = grid_w + 20
+        src_w = W - grid_w - 30
+        detail_h = min(138, max(110, int(lib_h * 0.26)))
+        list_gap = 18
+        src_rect = pygame.Rect(src_x, lib_top + detail_h + list_gap,
+                               src_w, lib_h - detail_h - list_gap)
 
         self._p6_grid.set_rect(grid_rect)
         self._sp404_grid.set_rect(grid_rect)
         self._p6_source_list.set_rect(src_rect)
         self._sp404_source_list.set_rect(src_rect)
+
+    def _selected_pad_detail(self, device_type: str) -> dict:
+        """Return normalized selected-pad details for the active librarian."""
+        if device_type == "p6":
+            selected = self._p6_grid.selected_pad
+            pads = self._p6_cached_assignments
+            labels = "ABCDEFGH"
+            per_bank = 6
+            fallback_state = "EMPTY"
+        else:
+            selected = self._sp404_grid.selected_pad
+            pads = self._sp404_grid.pads
+            labels = [chr(ord("A") + i) for i in range(10)]
+            per_bank = 16
+            fallback_state = "EMPTY"
+
+        if selected < 0 or selected >= len(pads):
+            return {
+                "selected": False,
+                "title": "No pad selected",
+                "state": fallback_state,
+                "lines": ["Tap a pad to inspect it."],
+            }
+
+        bank_idx = selected // per_bank
+        pad_idx = selected % per_bank
+        bank_label = labels[bank_idx] if bank_idx < len(labels) else str(bank_idx + 1)
+        pad_label = f"{bank_label}-{pad_idx + 1}" if device_type == "p6" else f"{bank_label}{pad_idx + 1:02d}"
+        pad = pads[selected]
+        if not pad:
+            return {
+                "selected": True,
+                "title": pad_label,
+                "state": fallback_state,
+                "lines": ["Pad is empty.", "Tap a local WAV to load it here."],
+            }
+
+        filename = pad.get("filename") or "Unknown sample"
+        state = "PENDING" if pad.get("in_import") else "LIVE" if pad.get("on_device") else "LOADED"
+        lines = [filename]
+        src_path = pad.get("path") or ""
+        if src_path:
+            lines.append(src_path)
+        size = pad.get("size") or 0
+        duration = pad.get("duration") or 0.0
+        meta_bits = []
+        if duration:
+            meta_bits.append(f"{duration:.1f}s")
+        if size:
+            meta_bits.append(_human_size(size))
+        if meta_bits:
+            lines.append(" · ".join(meta_bits))
+        return {
+            "selected": True,
+            "title": pad_label,
+            "state": state,
+            "lines": lines,
+        }
+
+    def _draw_selected_pad_card(self, surface: pygame.Surface, detail: dict,
+                                rect: pygame.Rect, f_small, f_tiny):
+        """Draw the selected-pad detail card above the source browser."""
+        pygame.draw.rect(surface, theme.BG_PANEL, rect, border_radius=8)
+        pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=8)
+
+        title = detail.get("title", "")
+        state = detail.get("state", "")
+        lines = detail.get("lines", [])
+
+        title_surf = f_small.render(title[:28], True, theme.TEXT_BRIGHT)
+        surface.blit(title_surf, (rect.x + 10, rect.y + 10))
+
+        badge_bg = theme.BG
+        badge_fg = theme.TEXT_DIM
+        if state == "PENDING":
+            badge_bg = theme.ACCENT
+            badge_fg = theme.BG
+        elif state == "LIVE":
+            badge_bg = theme.BLUE
+            badge_fg = theme.TEXT_BRIGHT
+        elif state == "LOADED":
+            badge_bg = theme.BG
+            badge_fg = theme.ACCENT
+        elif state == "EMPTY":
+            badge_bg = theme.BG
+            badge_fg = theme.TEXT_DIM
+
+        badge_surf = f_tiny.render(state, True, badge_fg)
+        badge_rect = pygame.Rect(rect.right - badge_surf.get_width() - 18, rect.y + 9,
+                                 badge_surf.get_width() + 8, badge_surf.get_height() + 4)
+        pygame.draw.rect(surface, badge_bg, badge_rect, border_radius=4)
+        pygame.draw.rect(surface, theme.BORDER_LIGHT, badge_rect, 1, border_radius=4)
+        surface.blit(badge_surf, badge_surf.get_rect(center=badge_rect.center))
+
+        y = rect.y + 34
+        for line in lines[:4]:
+            surf = f_tiny.render(str(line)[:52], True, theme.TEXT_DIM if line != lines[0] else theme.TEXT)
+            surface.blit(surf, (rect.x + 10, y))
+            y += 16
 
     def on_enter(self):
         self._refresh_push_list()
@@ -1277,6 +1381,9 @@ class TransferScreen:
 
         # Source list header
         src_rect = self._p6_source_list.rect
+        detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
+        self._draw_selected_pad_card(surface, self._selected_pad_detail("p6"),
+                                     detail_rect, f_small, f_tiny)
         label = f"LOCAL WAVS · {len(self._p6_source_list.items)}"
         label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
@@ -1350,6 +1457,9 @@ class TransferScreen:
         legend_surf = f_tiny.render(legend, True, theme.TEXT_DIM)
         surface.blit(legend_surf, (self._sp404_grid.rect.x, self._sp404_grid.rect.bottom + 6))
         src_rect = self._sp404_source_list.rect
+        detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
+        self._draw_selected_pad_card(surface, self._selected_pad_detail("sp404"),
+                                     detail_rect, f_small, f_tiny)
         label = f"LOCAL WAVS · {len(self._sp404_source_list.items)}"
         label_surf = f_tiny.render(label, True, theme.ACCENT)
         surface.blit(label_surf, (src_rect.x, src_rect.y - 14))
