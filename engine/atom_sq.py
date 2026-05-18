@@ -256,12 +256,24 @@ def find_atom_sq_ports(
             break
 
     if in_port is None:
+        try:
+            midi_in.delete()
+        except Exception:
+            pass
+        try:
+            midi_out.delete()
+        except Exception:
+            pass
         return None, None
 
     midi_in.open_port(in_port)
     if out_port is not None:
         midi_out.open_port(out_port)
     else:
+        try:
+            midi_out.delete()
+        except Exception:
+            pass
         midi_out = None
 
     log.info("ATOM SQ opened: in=%s", midi_in.get_port_name(in_port))

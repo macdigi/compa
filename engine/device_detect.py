@@ -173,16 +173,32 @@ def find_midi_ports(hint: str):
             break
 
     if in_port is None and out_port is None:
+        try:
+            midi_in.delete()
+        except Exception:
+            pass
+        try:
+            midi_out.delete()
+        except Exception:
+            pass
         return None, None
 
     if in_port is not None:
         midi_in.open_port(in_port)
     else:
+        try:
+            midi_in.delete()
+        except Exception:
+            pass
         midi_in = None
 
     if out_port is not None:
         midi_out.open_port(out_port)
     else:
+        try:
+            midi_out.delete()
+        except Exception:
+            pass
         midi_out = None
 
     return midi_in, midi_out

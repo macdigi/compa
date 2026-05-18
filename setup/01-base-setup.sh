@@ -45,7 +45,8 @@ sudo -u pi "$PROJECT_DIR/venv/bin/pip" install \
     sounddevice \
     soundfile \
     python-rtmidi \
-    numpy
+    numpy \
+    Pillow
 
 # GPU memory split — give more RAM to CPU for samples
 echo ">>> Configuring GPU memory split (64MB)..."
