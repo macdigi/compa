@@ -6,9 +6,8 @@ The SP-404MKII exposes two USB devices in normal mode:
 * 0582:02e7 CDC ACM, exposed by Linux as /dev/ttyACM*
 
 The official Roland librarian uses the CDC ACM device rather than a
-Linux-visible storage mount.  This module only handles discovery and a
-small handshake probe for now; higher-level pad/file commands still need
-to be decoded before Compa can read/write the SP in normal mode.
+Linux-visible storage mount.  This module only contains decoded read-only
+traffic. Write/import/delete commands are intentionally not implemented.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from __future__ import annotations
 import glob
 import fcntl
 import os
+import re
 import select
 import struct
 import termios
@@ -27,6 +27,26 @@ from typing import Optional
 ROLAND_VENDOR_ID = "0582"
 SP404_CDC_PRODUCT_ID = "02e7"
 SP404_HANDSHAKE = bytes.fromhex("12 60 e0 05 fe 67 00 6d 33 31 31 03")
+APP_HANDSHAKE = bytes.fromhex("12 60 e0 05 fe 67 00 74 68 2d 49 03")
+PROJECT_INIT = bytes.fromhex("12 60 e0 05 9a 04 00 00 00 20 20 03")
+PROJECT_LIST = bytes.fromhex("12 60 e0 05 fd 04 00 00 07 00 00 03")
+FILE_OPEN_PREAMBLE = bytes.fromhex("12 60 e0 05 b3 00 00 00 c0 93 91 02")
+READ_META_13 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 13 00 00 00 03 0d 00 00 00 00 00 00 f7"
+)
+READ_META_07 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 07 00 00 00 03 0d 00 00 00 00 00 00 f7"
+)
+READ_HEADER_04 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 04 00 00 00 03 0d 00 00 00 04 00 00 f7"
+)
+READ_DONE_03 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 03 00 00 00 03 0d 00 00 00 00 00 00 f7"
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +61,35 @@ class SP404ProtocolProbe:
     @property
     def response_hex(self) -> str:
         return self.response.hex(" ")
+
+
+@dataclass(frozen=True)
+class SP404SampleHeader:
+    """Decoded read-only RFWV header from an SP sample slot."""
+
+    project: str
+    bank: int
+    pad: int
+    data_size: int
+    sample_rate: int
+    channels: int
+    bit_depth: int
+    path: str
+
+    @property
+    def duration(self) -> float:
+        bytes_per_frame = self.channels * max(1, self.bit_depth // 8)
+        if self.data_size <= 0 or self.sample_rate <= 0 or bytes_per_frame <= 0:
+            return 0.0
+        return self.data_size / bytes_per_frame / self.sample_rate
+
+    @property
+    def filename(self) -> str:
+        return f"BANK{self.bank}-{self.pad:02d}.SMP"
+
+    @property
+    def pad_id(self) -> str:
+        return f"{chr(ord('A') + self.bank - 1)}{self.pad:02d}"
 
 
 def _usb_device_for_tty(tty_name: str) -> Optional[str]:
@@ -112,6 +161,160 @@ def configure_sp404_librarian_fd(fd: int):
     """Configure an open SP-404 CDC ACM fd like the Roland app."""
     _set_raw_9600(fd)
     _set_dtr_rts(fd)
+
+
+def _read_until_quiet(fd: int, timeout: float, quiet: float = 0.2) -> bytes:
+    chunks: list[bytes] = []
+    deadline = time.time() + timeout
+    last_data = time.time()
+    while time.time() < deadline:
+        readable, _, _ = select.select([fd], [], [], 0.05)
+        if readable:
+            try:
+                data = os.read(fd, 8192)
+            except BlockingIOError:
+                continue
+            if data:
+                chunks.append(data)
+                last_data = time.time()
+        elif chunks and time.time() - last_data >= quiet:
+            break
+    return b"".join(chunks)
+
+
+def _transact_many(payloads: list[tuple[str, bytes]],
+                   timeout: float) -> tuple[str, list[tuple[str, bytes]]]:
+    port = find_sp404_librarian_port()
+    if not port:
+        raise RuntimeError("SP-404 CDC port not found")
+
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    responses: list[tuple[str, bytes]] = []
+    try:
+        configure_sp404_librarian_fd(fd)
+        time.sleep(0.2)
+        for label, payload in payloads:
+            os.write(fd, payload)
+            responses.append((label, _read_until_quiet(fd, timeout)))
+    finally:
+        os.close(fd)
+    return port, responses
+
+
+def _remote_smp_path(project: str, bank: int, pad: int) -> str:
+    if not re.fullmatch(r"PROJECT_[0-9]{2}", project):
+        raise ValueError("project must look like PROJECT_05")
+    if not 1 <= bank <= 10:
+        raise ValueError("bank must be 1-10")
+    if not 1 <= pad <= 16:
+        raise ValueError("pad must be 1-16")
+    return (
+        f"/SP404REMOTE///ROLAND/SP-404MKII/{project}/SMPL/"
+        f"BANK{bank}-{pad:02d}.SMP"
+    )
+
+
+def _build_file_read_path(path: str) -> bytes:
+    path_bytes = path.encode("ascii")
+    if len(path_bytes) > 220:
+        raise ValueError("path is too long for one observed librarian packet")
+    return b"".join([
+        bytes.fromhex("13 60 e0 06 00 0c 00 00 a0 57 a5 e2"),
+        bytes([len(path_bytes) + 17, 0x00, 0x00, 0x00]),
+        bytes.fromhex("f0 41 7a 03 00 00 00 00 00 00 00 00 00 00"),
+        bytes([len(path_bytes) + 1]),
+        path_bytes,
+        b"\x00\xf7",
+    ])
+
+
+def _file_read_payloads(path: str, *, preamble: bool) -> list[tuple[str, bytes]]:
+    read_path = _build_file_read_path(path)
+    if preamble:
+        read_path = FILE_OPEN_PREAMBLE + read_path
+    return [
+        ("read_path", read_path),
+        ("read_meta_13", READ_META_13),
+        ("read_meta_07", READ_META_07),
+        ("read_header_04", READ_HEADER_04),
+        ("read_done_03", READ_DONE_03),
+    ]
+
+
+def _parse_project_names(data: bytes) -> list[str]:
+    projects: list[str] = []
+    for match in re.finditer(rb"PROJECT_[0-9]{2}", data):
+        name = match.group(0).decode("ascii")
+        if name not in projects:
+            projects.append(name)
+    return projects
+
+
+def _parse_rfwv_header(project: str, bank: int, pad: int,
+                       path: str, data: bytes) -> Optional[SP404SampleHeader]:
+    pos = data.find(b"RFWV")
+    if pos < 0 or len(data) < pos + 20:
+        return None
+    return SP404SampleHeader(
+        project=project,
+        bank=bank,
+        pad=pad,
+        data_size=int.from_bytes(data[pos + 4:pos + 8], "big"),
+        sample_rate=int.from_bytes(data[pos + 8:pos + 12], "big"),
+        channels=int.from_bytes(data[pos + 12:pos + 16], "big"),
+        bit_depth=int.from_bytes(data[pos + 16:pos + 20], "big"),
+        path=path,
+    )
+
+
+def list_projects(timeout: float = 1.5) -> list[str]:
+    """Return normal-mode SP projects through the read-only CDC protocol."""
+    payloads = [
+        ("app_handshake", APP_HANDSHAKE),
+        ("project_init", PROJECT_INIT),
+        ("project_list", PROJECT_LIST),
+    ]
+    _port, responses = _transact_many(payloads, timeout)
+    combined = b"".join(response for _label, response in responses)
+    return _parse_project_names(combined)
+
+
+def read_bank_headers(project: str, bank: int,
+                      timeout: float = 1.5) -> list[Optional[SP404SampleHeader]]:
+    """Read RFWV headers for one 1-indexed SP bank via normal mode."""
+    if not re.fullmatch(r"PROJECT_[0-9]{2}", project):
+        raise ValueError("project must look like PROJECT_05")
+    if not 1 <= bank <= 10:
+        raise ValueError("bank must be 1-10")
+
+    payloads: list[tuple[str, bytes]] = [
+        ("app_handshake", APP_HANDSHAKE),
+        ("project_init", PROJECT_INIT),
+        ("project_list", PROJECT_LIST),
+    ]
+    paths: dict[int, str] = {}
+    for pad in range(1, 17):
+        path = _remote_smp_path(project, bank, pad)
+        paths[pad] = path
+        for label, payload in _file_read_payloads(path, preamble=(pad == 1)):
+            payloads.append((f"pad_{pad:02d}_{label}", payload))
+
+    _port, responses = _transact_many(payloads, timeout)
+    responses_by_pad: dict[int, bytearray] = {
+        pad: bytearray() for pad in range(1, 17)
+    }
+    for label, response in responses:
+        match = re.match(r"pad_([0-9]{2})_", label)
+        if match:
+            responses_by_pad[int(match.group(1))].extend(response)
+
+    headers: list[Optional[SP404SampleHeader]] = []
+    for pad in range(1, 17):
+        headers.append(
+            _parse_rfwv_header(project, bank, pad, paths[pad],
+                               bytes(responses_by_pad[pad]))
+        )
+    return headers
 
 
 def probe_sp404_librarian(timeout: float = 3.0) -> SP404ProtocolProbe:

@@ -46,9 +46,15 @@ from typing import Callable, Optional
 from engine.p6_image import P6ImageManager
 from engine import sp404_storage
 from engine.device_mount import find_or_mount_device, diagnostic_info
-from engine.sp404_protocol import find_sp404_librarian_port
+from engine.sp404_protocol import (
+    find_sp404_librarian_port,
+    list_projects as list_protocol_projects,
+    read_bank_headers as read_protocol_bank_headers,
+)
 
 log = logging.getLogger(__name__)
+
+SP404_PROTOCOL_PREFIX = "sp404://"
 
 
 def _sp404_signature(mount_point: str, label: str) -> bool:
@@ -130,6 +136,8 @@ class SP404Librarian:
         self._manual_mount = ""          # user-selected mount (DEBUG panel)
         self._mount_path = mount_path
         self._last_error = ""
+        self._protocol_projects: list[str] = []
+        self._protocol_pads: dict[str, list[Optional[dict]]] = {}
         os.makedirs(images_dir, exist_ok=True)
         self._img = P6ImageManager(images_dir, mount_path=mount_path)
 
@@ -142,6 +150,24 @@ class SP404Librarian:
     @property
     def last_error(self) -> str:
         return self._last_error
+
+    def normal_mode_available(self) -> bool:
+        """Return True when the SP CDC/librarian port is present."""
+        return bool(find_sp404_librarian_port())
+
+    @staticmethod
+    def protocol_project_ref(project: str) -> str:
+        return f"{SP404_PROTOCOL_PREFIX}{project}"
+
+    @staticmethod
+    def is_protocol_project(project_dir: str) -> bool:
+        return bool(project_dir and project_dir.startswith(SP404_PROTOCOL_PREFIX))
+
+    @staticmethod
+    def protocol_project_name(project_dir: str) -> str:
+        if project_dir.startswith(SP404_PROTOCOL_PREFIX):
+            return project_dir[len(SP404_PROTOCOL_PREFIX):]
+        return project_dir
 
     def is_mounted(self) -> bool:
         """Return True if an SP-404 volume is mounted. Auto-rescans.
@@ -235,7 +261,7 @@ class SP404Librarian:
                 usb_status = _sp404_usb_status(info)
                 if usb_status:
                     lines.append(usb_status.upper())
-                    lines.append("  normal-mode file access needs the Roland librarian protocol")
+                    lines.append("  read-only normal-mode bank scan is available")
                 else:
                     lines.append("SP-404 IS NOT DETECTED")
             if self._last_error:
@@ -316,6 +342,26 @@ class SP404Librarian:
                 # next boot.
                 self._ensure_default_project(rdir)
                 return self._list_projects_in(rdir)
+        if self.normal_mode_available():
+            try:
+                names = list_protocol_projects()
+                self._protocol_projects = names
+                return [
+                    {
+                        "name": name,
+                        "path": self.protocol_project_ref(name),
+                        "num_samples": sum(
+                            1 for p in self._protocol_pads.get(name, [])
+                            if p is not None
+                        ),
+                        "read_only": True,
+                        "mode": "protocol",
+                    }
+                    for name in names
+                ]
+            except Exception as e:
+                self._last_error = f"SP-404 protocol list failed: {e}"
+                log.warning("%s", self._last_error)
         # Dev fallback — use the Mac librarian cache
         cache = sp404_storage.find_sp404_cache()
         if cache:
@@ -359,7 +405,50 @@ class SP404Librarian:
 
     def read_project_pads(self, project_dir: str) -> list[Optional[dict]]:
         """Return 160 pad entries for the given project."""
+        if self.is_protocol_project(project_dir):
+            project = self.protocol_project_name(project_dir)
+            return list(self._protocol_pads.get(project, [None] * self.NUM_PADS))
         return sp404_storage.read_project_pads(project_dir)
+
+    def read_project_bank_pads(self, project_dir: str,
+                               bank_idx: int) -> list[Optional[dict]]:
+        """Read one bank from a normal-mode project into the local cache."""
+        if not self.is_protocol_project(project_dir):
+            return self.read_project_pads(project_dir)
+        if not 0 <= bank_idx < self.BANKS:
+            return self.read_project_pads(project_dir)
+
+        project = self.protocol_project_name(project_dir)
+        pads = list(self._protocol_pads.get(project, [None] * self.NUM_PADS))
+        try:
+            headers = read_protocol_bank_headers(project, bank_idx + 1)
+        except Exception as e:
+            self._last_error = f"SP-404 protocol bank scan failed: {e}"
+            log.warning("%s", self._last_error)
+            return pads
+
+        for pad_idx, header in enumerate(headers):
+            global_idx = bank_idx * self.PADS_PER_BANK + pad_idx
+            if header is None:
+                pads[global_idx] = None
+                continue
+            pads[global_idx] = {
+                "filename": header.filename,
+                "path": header.path,
+                "pad_id": header.pad_id,
+                "data_size": header.data_size,
+                "file_size": header.data_size + 20,
+                "sample_rate": header.sample_rate,
+                "channels": header.channels,
+                "bit_depth": header.bit_depth,
+                "duration": round(header.duration, 2),
+                "on_device": True,
+                "read_only": True,
+                "mode": "protocol",
+            }
+        self._protocol_pads[project] = pads
+        self._last_error = ""
+        return list(pads)
 
     # ── WAV → .SMP conversion ───────────────────────────────────────
 

@@ -254,3 +254,12 @@ Live result on Jordan's SP-404MKII:
 This confirms the SP normal-mode librarian protocol can read internal sample
 files without USB mass-storage mode. Keep this as read-only lab functionality
 until chunk continuation, pad config parsing, and safe UI threading are decoded.
+
+Compa integration now exposes this as read-only manual scanning in
+Files -> Device -> SP-404 while the SP is connected normally:
+
+- project names come from the normal-mode CDC protocol
+- SCAN BANK reads the currently selected bank in a background thread
+- scanned pads show RFWV sample metadata in the SP grid
+- import/delete/move/backup/restore remain disabled unless a real mass-storage
+  mount is present

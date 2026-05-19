@@ -111,6 +111,8 @@ class TransferScreen:
         self._sp404_projects: list[dict] = []
         self._sp404_project_idx = 0
         self._sp404_move_mode = False  # first tap = source, second = dest
+        self._sp404_protocol_scanning = False
+        self._sp404_protocol_scan_key: tuple[str, int] | None = None
 
         # Shared confirm modal for destructive actions
         self._confirm_modal = Modal(
@@ -134,6 +136,30 @@ class TransferScreen:
     @property
     def sp404_lib(self):
         return getattr(self.app, "sp404_lib", None)
+
+    def _sp404_normal_mode(self) -> bool:
+        lib = self.sp404_lib
+        return bool(
+            lib is not None
+            and not lib.is_mounted()
+            and hasattr(lib, "normal_mode_available")
+            and lib.normal_mode_available()
+        )
+
+    def _sp404_current_project_entry(self) -> dict | None:
+        if not self._sp404_projects:
+            return None
+        idx = max(0, min(self._sp404_project_idx, len(self._sp404_projects) - 1))
+        return self._sp404_projects[idx]
+
+    def _sp404_current_project_is_protocol(self) -> bool:
+        lib = self.sp404_lib
+        proj = self._sp404_current_project_entry()
+        return bool(
+            lib is not None and proj
+            and hasattr(lib, "is_protocol_project")
+            and lib.is_protocol_project(proj.get("path", ""))
+        )
 
     def _compute_content_rect(self) -> pygame.Rect:
         """Content rect computed from current theme dimensions (may be shimmed)."""
@@ -220,6 +246,17 @@ class TransferScreen:
         pad_label = f"{bank_label}-{pad_idx + 1}" if device_type == "p6" else f"{bank_label}{pad_idx + 1:02d}"
         pad = pads[selected]
         if not pad:
+            if device_type == "sp404" and self._sp404_current_project_is_protocol():
+                return {
+                    "selected": True,
+                    "title": pad_label,
+                    "state": fallback_state,
+                    "lines": [
+                        "Pad is empty or not scanned yet.",
+                        "Tap SCAN BANK to read the current SP bank.",
+                        "Writes/imports are disabled in normal mode.",
+                    ],
+                }
             return {
                 "selected": True,
                 "title": pad_label,
@@ -245,7 +282,10 @@ class TransferScreen:
         if state == "PENDING":
             lines.append("Action: replace or clear pending import")
         elif state == "LIVE":
-            lines.append("Action: queue replacement or clear import slot")
+            if pad.get("read_only"):
+                lines.append("Action: read-only; import/delete not decoded yet")
+            else:
+                lines.append("Action: queue replacement or clear import slot")
         else:
             lines.append("Action: replace, move, or clear")
         return {
@@ -274,10 +314,18 @@ class TransferScreen:
              "enabled": True},
         ]
 
-    def _sp404_action_specs(self, mounted: bool = True) -> list[dict]:
+    def _sp404_action_specs(self, mounted: bool = True,
+                            normal_mode: bool = False) -> list[dict]:
         selected = self._sp404_grid.selected_pad
         pads = self._sp404_grid.pads
         pad = pads[selected] if 0 <= selected < len(pads) else None
+        if normal_mode and not mounted:
+            return [
+                {"id": "scan_bank", "label": "SCAN BANK", "color": theme.BLUE,
+                 "enabled": not self._sp404_protocol_scanning},
+                {"id": "debug", "label": "DEBUG", "color": theme.BUTTON_BG,
+                 "enabled": True},
+            ]
         return [
             {"id": "clear_pad", "label": "CLEAR PAD", "color": theme.BUTTON_BG,
              "enabled": mounted and selected >= 0 and pad is not None},
@@ -541,9 +589,17 @@ class TransferScreen:
             if "storage found" in diag:
                 return ("SP-404 storage detected, not mounted", diag)
             if "librarian port found" in diag:
+                proj = self._sp404_current_project_entry()
+                if proj and proj.get("mode") == "protocol":
+                    scanned = proj.get("num_samples", 0)
+                    scan = "scanning..." if self._sp404_protocol_scanning else "tap SCAN BANK"
+                    return (
+                        f"SP-404 normal mode · {proj['name']} · read-only",
+                        f"{scanned} scanned pad(s) cached · {scan}; writes still disabled.",
+                    )
                 return (
                     "SP-404 connected · normal librarian mode",
-                    "Normal-mode pad/file access is protocol work; mass-storage writes are not active.",
+                    "Read-only protocol access is available; tap SCAN BANK after project load.",
                 )
             return (
                 "SP-404 storage not mounted",
@@ -595,6 +651,41 @@ class TransferScreen:
             return
         pads = lib.read_project_pads(proj)
         self._sp404_grid.set_pads(pads)
+
+    def _scan_sp404_current_bank(self):
+        lib = self.sp404_lib
+        proj = self._current_sp404_project()
+        if lib is None or not proj:
+            self._set_status("No SP-404 project selected")
+            return
+        if not (hasattr(lib, "is_protocol_project")
+                and lib.is_protocol_project(proj)):
+            self._refresh_sp404_assignments()
+            return
+        if self._sp404_protocol_scanning:
+            self._set_status("SP-404 bank scan already running")
+            return
+
+        bank_idx = self._sp404_grid.current_bank
+        bank_letter = chr(ord("A") + bank_idx)
+        self._sp404_protocol_scanning = True
+        self._sp404_protocol_scan_key = (proj, bank_idx)
+        self._set_status(f"Scanning SP-404 bank {bank_letter}...")
+
+        def _worker():
+            try:
+                pads = lib.read_project_bank_pads(proj, bank_idx)
+                self._sp404_grid.set_pads(pads)
+                self._refresh_sp404_projects()
+                loaded = sum(
+                    1 for p in pads[bank_idx * 16:(bank_idx + 1) * 16]
+                    if p is not None
+                )
+                self._set_status(f"SP-404 bank {bank_letter}: {loaded}/16 loaded")
+            finally:
+                self._sp404_protocol_scanning = False
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _get_active_samples_dir(self) -> str:
         storage = getattr(self.app, "akai_storage", None)
@@ -793,12 +884,20 @@ class TransferScreen:
             for rect, action_id, enabled in self._sp404_action_rects:
                 if rect.collidepoint(mx, my):
                     if not enabled:
-                        self._set_status("Select a loaded pad first")
+                        if action_id == "scan_bank":
+                            self._set_status("SP-404 bank scan already running")
+                        else:
+                            self._set_status("Select a loaded pad first")
                         return
                     self._do_sp404_action(action_id)
                     return
 
+        old_bank = self._sp404_grid.current_bank
         tapped_pad = self._sp404_grid.handle_event(event)
+        if self._sp404_grid.current_bank != old_bank:
+            if self._sp404_current_project_is_protocol():
+                self._scan_sp404_current_bank()
+            return
         if tapped_pad is not None:
             # MOVE mode: first tap = src, second = dest
             if self._sp404_move_mode:
@@ -1106,6 +1205,10 @@ class TransferScreen:
             self._debug_panel_visible = True
             return
 
+        if action_id == "scan_bank":
+            self._scan_sp404_current_bank()
+            return
+
         # Auto-rescan projects so we don't fail on first use
         if not self._sp404_projects and lib.is_mounted():
             self._refresh_sp404_projects()
@@ -1246,9 +1349,18 @@ class TransferScreen:
             self._sp404_source_list.update()
             if self.sp404_lib:
                 now_mounted = self.sp404_lib.is_mounted()
-                if now_mounted != getattr(self, "_sp404_was_mounted", None):
-                    self._sp404_was_mounted = now_mounted
+                normal_mode = (
+                    not now_mounted
+                    and hasattr(self.sp404_lib, "normal_mode_available")
+                    and self.sp404_lib.normal_mode_available()
+                )
+                state = (now_mounted, normal_mode)
+                if state != getattr(self, "_sp404_was_state", None):
+                    self._sp404_was_state = state
                     if now_mounted:
+                        self._refresh_sp404_projects()
+                        self._refresh_sp404_assignments()
+                    elif normal_mode:
                         self._refresh_sp404_projects()
                         self._refresh_sp404_assignments()
 
@@ -1283,7 +1395,12 @@ class TransferScreen:
         storage = getattr(self.app, "akai_storage", None)
         akai_ok = storage and storage.is_connected
         p6_ok = self.p6_lib is not None and self.p6_lib.is_mounted()
-        sp_ok = self.sp404_lib is not None and self.sp404_lib.is_mounted()
+        sp_ok = (
+            self.sp404_lib is not None
+            and (self.sp404_lib.is_mounted()
+                 or (hasattr(self.sp404_lib, "normal_mode_available")
+                     and self.sp404_lib.normal_mode_available()))
+        )
 
         tabs = [
             ("AKAI",   "akai",  akai_ok),
@@ -1523,6 +1640,7 @@ class TransferScreen:
     def _draw_sp404(self, surface: pygame.Surface, f_med, f_small, f_tiny):
         lib = self.sp404_lib
         mounted = lib is not None and lib.is_mounted()
+        normal_mode = self._sp404_normal_mode()
 
         # Mount + project status row — auto-refresh while drawing
         if mounted:
@@ -1561,16 +1679,16 @@ class TransferScreen:
         # Grid + source list
         self._relayout_librarian()
         self._sp404_grid.draw(surface)
-        if not mounted:
+        if not mounted and not normal_mode:
             self._draw_storage_offline_overlay(
                 surface, self._sp404_grid.rect, "SP-404 storage not mounted",
-                "Enter Utility → USB Storage, then check DEBUG.", f_small, f_tiny)
-        legend = "LOAD = present in project"
+                "Normal mode supports read-only SCAN BANK.", f_small, f_tiny)
+        legend = "SCAN BANK = read SP pads without storage" if normal_mode and not mounted else "LOAD = present in project"
         legend_surf = f_tiny.render(legend, True, theme.TEXT_DIM)
         surface.blit(legend_surf, (self._sp404_grid.rect.x, self._sp404_grid.rect.bottom + 6))
         src_rect = self._sp404_source_list.rect
         detail_rect = pygame.Rect(src_rect.x, self.DRIVE_ROW_Y + 32, src_rect.width, 132)
-        self._draw_selected_pad_card(surface, self._selected_pad_detail("sp404", mounted),
+        self._draw_selected_pad_card(surface, self._selected_pad_detail("sp404", mounted or normal_mode),
                                      detail_rect, f_small, f_tiny)
         label = f"LOCAL AUDIO · {len(self._sp404_source_list.items)}"
         if not self._sp404_source_list.items:
@@ -1582,7 +1700,7 @@ class TransferScreen:
         # Action bar
         self._draw_librarian_actions(
             surface, f_small, f_tiny,
-            self._sp404_action_specs(mounted),
+            self._sp404_action_specs(mounted, normal_mode),
             self._sp404_action_rects,
             lib,
         )
