@@ -7,6 +7,10 @@ The first Mac DTrace attempt confirmed the SP-404 USB devices and app version,
 but it did not capture serial TX/RX. On this Mac, prefer the DYLD interposer
 capture below; keep the DTrace script as a fallback only.
 
+A later adapted DTrace script did capture useful traffic. When DTrace is used,
+always parse the trace with the parse-dtrace command so the 512-byte tracemem
+dumps are trimmed to each event's reported length.
+
 ## What to Capture
 
 Capture one action at a time. Avoid import, delete, restore, or project-write
@@ -56,10 +60,37 @@ Still save:
 - a zip of ~/SP404 User if it exists
 ~~~~
 
-## Preferred Mac Capture: DYLD Interposer
+## Preferred Mac Capture: DTrace
 
-Use this first. It launches the Roland app with a small local interposer that
-logs serial-port open/read/write/ioctl calls as JSONL.
+Use this first when DTrace can see syscall probes. It captures the official app
+while leaving the app launch path unchanged.
+
+~~~~bash
+sudo dtrace -q -s ~/Desktop/sp404-capture/sp404_serial_trace.d | tee ~/Desktop/sp404-capture/sp404_trace_$(date -u +%Y%m%dT%H%M%SZ).txt
+~~~~
+
+Expected useful lines look like:
+
+~~~~text
+OPEN pid=2289 exec=SP-404MKII path=/dev/tty.usbmodem11101
+TX pid=2289 exec=SP-404MKII fd=4 len=12 captured=12
+RX pid=2289 exec=SP-404MKII fd=4 len=35 captured=35
+~~~~
+
+Then parse on the Pi:
+
+~~~~bash
+tools/sp404_protocol_lab.py parse-dtrace sp404_trace_YYYYMMDDTHHMMSSZ.txt \
+  --only-fd 4 \
+  --out sessions/sp404_protocol/sp404_app_capture.jsonl
+tools/sp404_protocol_lab.py capture-summary sessions/sp404_protocol/sp404_app_capture.jsonl
+~~~~
+
+## Alternate Mac Capture: DYLD Interposer
+
+If DTrace is blocked or produces only the startup banner, try the interposer.
+It launches the Roland app with a small local library that logs serial-port
+open/read/write/ioctl calls as JSONL.
 
 ~~~~bash
 git fetch origin pi-runtime-fixes
@@ -67,23 +98,15 @@ git checkout pi-runtime-fixes
 bash tools/mac_sp404_capture_interpose.sh
 ~~~~
 
-Expected useful lines look like:
-
-~~~~json
-{"event":"open","fd":17,"path":"/dev/cu.usbmodem11101"}
-{"event":"tx","fd":17,"len":12,"hex":"12 60 e0 05 fe 67 00 6d 33 31 31 03"}
-{"event":"rx","fd":17,"len":35,"hex":"13 e0 3f 05 44 6e e0 82 88 e8 5b 83 13 00 00 00 7e 04 00 04 00 08 00 01 ff ff ff ff 00 02 00 00 00 0b 33"}
-~~~~
-
 If the log only has trace_start/trace_stop, macOS hardened runtime or app
 launch mechanics probably blocked DYLD_INSERT_LIBRARIES. Capture the
-codesign -dv --verbose=4 output and try the fallback.
+codesign -dv --verbose=4 output.
 
-## Fallback: DTrace Script
+## DTrace Script
 
-This is retained for systems where syscall DTrace probes are available. The
-2026-05-19 Mac mini capture showed SIP/probe limitations and only produced the
-startup banner, so do not rely on this path first.
+This version uses constant-size tracemem copyin calls because some macOS
+DTrace builds reject dynamic tracemem sizes. The parser trims each dump back
+to the reported captured length.
 
 ~~~~d
 #pragma D option quiet
@@ -126,7 +149,7 @@ syscall::*write*:entry
     this->n = arg2 > 512 ? 512 : arg2;
     printf("\nTX pid=%d exec=%s fd=%d len=%d captured=%d\n",
         pid, execname, arg0, arg2, this->n);
-    tracemem(copyin(arg1, this->n), this->n);
+    tracemem(copyin(arg1, 512), 512);
 }
 
 syscall::*read*:entry
@@ -142,7 +165,7 @@ syscall::*read*:return
     this->n = arg0 > 512 ? 512 : arg0;
     printf("\nRX pid=%d exec=%s fd=%d len=%d captured=%d\n",
         pid, execname, self->read_fd, arg0, this->n);
-    tracemem(copyin(self->read_buf, this->n), this->n);
+    tracemem(copyin(self->read_buf, 512), 512);
     self->read_fd = 0;
     self->read_buf = 0;
 }

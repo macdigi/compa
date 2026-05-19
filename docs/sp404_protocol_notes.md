@@ -196,8 +196,33 @@ The ioreg output also confirmed the two SP USB personalities:
 - 0582:02e7 Roland CDC/librarian interface
 - 0582:0281 audio/MIDI interface
 
-The DTrace capture was inconclusive. Earlier attempts were blocked by SIP/probe
-compatibility, and the final trace only contained the startup banner with no
-OPEN/IOCTL/TX/RX events. Next capture path is the DYLD interposer in
-tools/mac_sp404_capture_interpose.sh, which should log serial read/write
-traffic as JSONL if macOS hardened runtime does not block library injection.
+The first DTrace capture was inconclusive. Earlier attempts were blocked by
+SIP/probe compatibility, and one trace only contained the startup banner with no
+OPEN/IOCTL/TX/RX events. A later adapted DTrace capture succeeded and logged:
+
+- OPEN events: 1
+- IOCTL events: 6
+- TX events: 7128
+- RX events: 6622
+
+After trimming DTrace's fixed 512-byte memory dumps to reported packet lengths,
+valid fd=4 traffic included:
+
+- handshake write:
+  12 60 e0 05 fe 67 00 74 68 2d 49 03
+- 35-byte handshake/status replies:
+  13 e0 3f 05 ... 7e 04 ... 0b 33
+- project/list init writes:
+  12 60 e0 05 9a 04 00 00 00 20 20 03
+  12 60 e0 05 fd 04 00 00 07 00 00 03
+- normal-mode remote file paths such as:
+  /SP404REMOTE///ROLAND/SP-404MKII/PROJECT_05/SMPL/BANK1-01.SMP
+
+The app is walking the SP's internal project/sample files through the CDC
+serial protocol, not mounting a block filesystem. Read-only path requests
+return RFWV sample data chunks, so Compa can eventually provide normal-mode
+pad/file browsing without USB storage mode.
+
+Important safety note: a broad ad-hoc live sweep of 9e entry indexes caused the
+SP USB devices to reset/re-enumerate on the Pi. Keep broad scans inside the
+protocol lab until framing/state requirements are better understood.
