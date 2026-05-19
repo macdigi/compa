@@ -21,7 +21,9 @@ from engine.studio_performer import (
     SP404_BEAT_BASS_TARGET,
     SP404_VARIATION_STYLES,
     confirmed_sp404_beat_bass_spec,
+    feel_from_performer_take,
     generate_sp404_beat_bass_variation,
+    normalized_performer_feel,
     performer_take_from_spec,
     spec_from_performer_take,
 )
@@ -60,6 +62,9 @@ class ClipScreen:
         self._performer_seed = 0
         self._performer_style_idx = 0
         self._performer_take_idx = 0
+        self._performer_swing = 56.0
+        self._performer_humanize = 0.0
+        self._performer_gate = 1.0
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -230,6 +235,38 @@ class ClipScreen:
     def _style_label(style: str) -> str:
         return style.replace("_", " ").title()
 
+    def _performer_feel(self) -> dict:
+        return normalized_performer_feel({
+            "swing": self._performer_swing,
+            "humanize": self._performer_humanize,
+            "gate": self._performer_gate,
+        }, spec=self._current_performer_spec())
+
+    def _set_performer_feel(self, feel: dict) -> None:
+        normalized = normalized_performer_feel(
+            feel, spec=self._current_performer_spec())
+        self._performer_swing = normalized["swing"]
+        self._performer_humanize = normalized["humanize"]
+        self._performer_gate = normalized["gate"]
+
+    def _feel_label(self) -> str:
+        feel = self._performer_feel()
+        return (
+            f"Sw {feel['swing']:.0f}  Hu {feel['humanize']:.0f}  "
+            f"Gate {feel['gate'] * 100:.0f}%")
+
+    def _adjust_performer_feel(self, field: str, delta: float) -> None:
+        feel = self._performer_feel()
+        if field == "swing":
+            feel["swing"] += delta
+        elif field == "humanize":
+            feel["humanize"] += delta
+        elif field == "gate":
+            feel["gate"] += delta
+        self._set_performer_feel(feel)
+        suffix = " next loop" if self._performer_player().status()["running"] else ""
+        self._performer_message = f"feel {self._feel_label()}{suffix}"
+
     def _performer_takes(self, sess) -> list:
         takes = getattr(sess, "studio_performer_takes", None)
         if not isinstance(takes, list):
@@ -272,7 +309,8 @@ class ClipScreen:
         takes = self._performer_takes(sess)
         takes[self._performer_take_idx] = performer_take_from_spec(
             spec, slot=self._performer_take_idx,
-            target_key=SP404_BEAT_BASS_TARGET)
+            target_key=SP404_BEAT_BASS_TARGET,
+            feel=self._performer_feel())
         self._persist_session(sess)
         self._performer_message = (
             f"saved Take {self._performer_take_idx + 1}: {spec.name}")
@@ -284,6 +322,7 @@ class ClipScreen:
             self._performer_message = (
                 f"Take {self._performer_take_idx + 1} is empty")
             return
+        self._set_performer_feel(feel_from_performer_take(take))
         self._set_current_performer_spec(spec)
         player = self._performer_player()
         if player.status()["running"] and player.queue_spec(spec):
@@ -318,6 +357,7 @@ class ClipScreen:
         if not specs:
             self._performer_message = "no saved takes to chain"
             return
+        self._set_performer_feel(feel_from_performer_take(self._current_take(sess)))
         self._set_current_performer_spec(specs[0])
         if status["running"]:
             player.queue_spec(specs[0])
@@ -376,6 +416,7 @@ class ClipScreen:
                 port_label=port_label,
                 loops=0,
                 bpm_provider=lambda: self._performer_bpm(sess),
+                feel_provider=lambda: self._performer_feel(),
             )
             self._performer_message = f"playing {spec.name}"
         except Exception as exc:
@@ -666,6 +707,7 @@ class ClipScreen:
             ("Target", target.label or capability.label),
             ("Genre", self._style_label(self._performer_style())),
             ("Take", self._take_label(sess)),
+            ("Feel", self._feel_label()),
             ("Pattern", spec.name),
             ("Tempo", f"follows Studio BPM: {self._performer_bpm(sess):.1f}"),
             ("MIDI", midi_status),
@@ -757,6 +799,25 @@ class ClipScreen:
         x += 94
         self._button(surface, "performer_step_export",
                      pygame.Rect(x, button_top, 128, 34), "SEND STEP")
+        button_top += 42
+        x = 20
+        self._button(surface, "performer_swing_down",
+                     pygame.Rect(x, button_top, 66, 34), "SW -")
+        x += 74
+        self._button(surface, "performer_swing_up",
+                     pygame.Rect(x, button_top, 66, 34), "SW +")
+        x += 78
+        self._button(surface, "performer_human_down",
+                     pygame.Rect(x, button_top, 74, 34), "HU -")
+        x += 82
+        self._button(surface, "performer_human_up",
+                     pygame.Rect(x, button_top, 74, 34), "HU +")
+        x += 86
+        self._button(surface, "performer_gate_down",
+                     pygame.Rect(x, button_top, 86, 34), "GATE -")
+        x += 94
+        self._button(surface, "performer_gate_up",
+                     pygame.Rect(x, button_top, 86, 34), "GATE +")
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -813,6 +874,24 @@ class ClipScreen:
                 return True
             if key == "performer_step_export":
                 self._export_performer_take_to_step_grid(sess)
+                return True
+            if key == "performer_swing_down":
+                self._adjust_performer_feel("swing", -2.0)
+                return True
+            if key == "performer_swing_up":
+                self._adjust_performer_feel("swing", 2.0)
+                return True
+            if key == "performer_human_down":
+                self._adjust_performer_feel("humanize", -5.0)
+                return True
+            if key == "performer_human_up":
+                self._adjust_performer_feel("humanize", 5.0)
+                return True
+            if key == "performer_gate_down":
+                self._adjust_performer_feel("gate", -0.1)
+                return True
+            if key == "performer_gate_up":
+                self._adjust_performer_feel("gate", 0.1)
                 return True
             if key == "performer_mute":
                 self._toggle_performer_mute()

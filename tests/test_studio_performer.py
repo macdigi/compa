@@ -8,8 +8,10 @@ from engine.studio_performer import (
     all_notes_off_messages,
     build_midi_events,
     confirmed_sp404_beat_bass_spec,
+    feel_from_performer_take,
     generate_sp404_beat_bass_variation,
     normalize_sp404_variation_style,
+    normalized_performer_feel,
     performer_take_from_spec,
     spec_from_performer_take,
 )
@@ -67,6 +69,37 @@ class StudioPerformerTests(unittest.TestCase):
             places=3,
         )
 
+    def test_swing_humanize_and_gate_affect_events(self):
+        spec = PatternSpec(
+            name="feel",
+            prompt="feel",
+            swing=50.0,
+            hits=[
+                PatternHit(pad=0, step=0, velocity=100, duration_steps=1.0),
+                PatternHit(pad=1, step=1, velocity=100, duration_steps=1.0),
+            ],
+        )
+        straight = build_midi_events(spec, bpm=120.0, swing=50.0)
+        swung = build_midi_events(spec, bpm=120.0, swing=66.0)
+        straight_second = [e for e in straight if e.is_note_on][1]
+        swung_second = [e for e in swung if e.is_note_on][1]
+        self.assertGreater(swung_second.seconds, straight_second.seconds)
+
+        short = build_midi_events(spec, bpm=120.0, gate=0.5)
+        long = build_midi_events(spec, bpm=120.0, gate=1.5)
+        short_off = [e for e in short if not e.is_note_on][0]
+        long_off = [e for e in long if not e.is_note_on][0]
+        self.assertGreater(long_off.seconds, short_off.seconds)
+
+        human_a = build_midi_events(
+            spec, bpm=120.0, humanize=25.0, humanize_seed=4)
+        human_b = build_midi_events(
+            spec, bpm=120.0, humanize=25.0, humanize_seed=4)
+        self.assertEqual(
+            [(e.seconds, e.message) for e in human_a],
+            [(e.seconds, e.message) for e in human_b],
+        )
+
     def test_generated_variations_are_deterministic(self):
         a = generate_sp404_beat_bass_variation(3)
         b = generate_sp404_beat_bass_variation(3)
@@ -104,8 +137,13 @@ class StudioPerformerTests(unittest.TestCase):
 
     def test_performer_take_round_trips_through_session(self):
         spec = generate_sp404_beat_bass_variation(2, style="breakbeat")
-        take = performer_take_from_spec(spec, slot=MAX_PERFORMER_TAKES + 2)
+        feel = {"swing": 62.0, "humanize": 15.0, "gate": 1.35}
+        take = performer_take_from_spec(
+            spec, slot=MAX_PERFORMER_TAKES + 2, feel=feel)
         self.assertEqual(take["slot"], MAX_PERFORMER_TAKES - 1)
+        self.assertEqual(feel_from_performer_take(take), feel)
+        self.assertEqual(normalized_performer_feel({"swing": 90.0})["swing"],
+                         75.0)
 
         sess = Session.empty()
         sess.studio_performer_takes = [take]

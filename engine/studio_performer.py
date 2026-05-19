@@ -68,14 +68,30 @@ def build_midi_events(
     *,
     bpm: float | None = None,
     velocity_scale: float = 1.0,
+    swing: float | None = None,
+    humanize: float = 0.0,
+    gate: float = 1.0,
+    humanize_seed: int = 0,
 ) -> list[MidiEvent]:
     tempo = float(bpm or spec.bpm)
     step_seconds = (60.0 / max(1.0, tempo)) * 4.0 / float(spec.steps_per_bar)
     loop_seconds = spec.length_beats * 60.0 / max(1.0, tempo)
+    swing_amount = _swing_delay_steps(spec.swing if swing is None else swing)
+    humanize = max(0.0, min(100.0, float(humanize)))
+    humanize_steps = humanize * 0.0018
+    velocity_jitter = int(round(humanize * 0.18))
+    gate = max(0.15, min(3.0, float(gate)))
+    rng = random.Random((int(spec.seed) << 8) + int(humanize_seed))
     events: list[MidiEvent] = []
 
     def add_pair(start_step: float, duration_steps: float, note: int,
                  channel: int, velocity: int, label: str) -> None:
+        if int(round(start_step)) % 2 == 1:
+            start_step += swing_amount
+        if humanize_steps > 0.0:
+            start_step += rng.uniform(-humanize_steps, humanize_steps)
+            velocity += rng.randint(-velocity_jitter, velocity_jitter)
+        duration_steps *= gate
         start = max(0.0, start_step * step_seconds)
         if start >= loop_seconds:
             return
@@ -115,6 +131,13 @@ def build_midi_events(
     return events
 
 
+def _swing_delay_steps(swing: float) -> float:
+    """Map 50-75% swing to an off-step delay in grid-step units."""
+
+    swing = max(50.0, min(75.0, float(swing)))
+    return (swing - 50.0) / 50.0
+
+
 def all_notes_off_messages(events: Iterable[MidiEvent]) -> list[tuple[int, int, int]]:
     pairs = {
         (event.message[0] & 0x0F, event.message[1])
@@ -129,6 +152,7 @@ def performer_take_from_spec(
     *,
     slot: int,
     target_key: str = SP404_BEAT_BASS_TARGET,
+    feel: dict | None = None,
 ) -> dict:
     """Serialize a playable performer take for session persistence."""
 
@@ -141,6 +165,7 @@ def performer_take_from_spec(
         "device": spec.device,
         "bank": spec.bank,
         "tags": list(spec.tags),
+        "feel": normalized_performer_feel(feel, spec=spec),
         "spec": spec.to_dict(),
     }
 
@@ -154,6 +179,28 @@ def spec_from_performer_take(take: dict | None) -> PatternSpec | None:
     if not isinstance(data, dict):
         return None
     return PatternSpec.from_dict(data)
+
+
+def normalized_performer_feel(
+    feel: dict | None = None,
+    *,
+    spec: PatternSpec | None = None,
+) -> dict:
+    feel = feel if isinstance(feel, dict) else {}
+    swing = feel.get("swing", spec.swing if spec is not None else 50.0)
+    humanize = feel.get("humanize", 0.0)
+    gate = feel.get("gate", 1.0)
+    return {
+        "swing": max(50.0, min(75.0, float(swing))),
+        "humanize": max(0.0, min(100.0, float(humanize))),
+        "gate": max(0.15, min(3.0, float(gate))),
+    }
+
+
+def feel_from_performer_take(take: dict | None) -> dict:
+    spec = spec_from_performer_take(take)
+    feel = take.get("feel") if isinstance(take, dict) else None
+    return normalized_performer_feel(feel, spec=spec)
 
 
 class PatternPerformer:
@@ -172,6 +219,7 @@ class PatternPerformer:
         self._last_error = ""
         self._running = False
         self._last_bpm = 0.0
+        self._last_feel = normalized_performer_feel()
         self._loop_count = 0
         self._queued_spec: PatternSpec | None = None
         self._queued_pattern_name = ""
@@ -189,6 +237,7 @@ class PatternPerformer:
                 "port_label": self._port_label,
                 "last_error": self._last_error,
                 "last_bpm": self._last_bpm,
+                "last_feel": dict(self._last_feel),
                 "loop_count": self._loop_count,
                 "queued_pattern_name": self._queued_pattern_name,
                 "sequence_enabled": self._sequence_enabled,
@@ -207,11 +256,14 @@ class PatternPerformer:
         loops: int = 0,
         bpm: float | None = None,
         bpm_provider: Callable[[], float] | None = None,
+        feel_provider: Callable[[], dict] | None = None,
         velocity_scale: float = 1.0,
     ) -> None:
         current_bpm = float(bpm_provider() if bpm_provider else (bpm or spec.bpm))
+        feel = self._current_feel(spec, feel_provider)
         events = build_midi_events(
-            spec, bpm=current_bpm, velocity_scale=velocity_scale)
+            spec, bpm=current_bpm, velocity_scale=velocity_scale,
+            **feel)
         if not events:
             raise RuntimeError("pattern has no MIDI events")
         self.stop()
@@ -220,7 +272,7 @@ class PatternPerformer:
         thread = threading.Thread(
             target=self._run,
             args=(spec, send_message, stop_event, mute_event, loops,
-                  current_bpm, bpm_provider, velocity_scale),
+                  current_bpm, bpm_provider, feel_provider, velocity_scale),
             daemon=True,
             name="studio-pattern-performer",
         )
@@ -236,6 +288,7 @@ class PatternPerformer:
             self._last_error = ""
             self._running = True
             self._last_bpm = current_bpm
+            self._last_feel = feel
             self._loop_count = 0
             self._queued_spec = None
             self._queued_pattern_name = ""
@@ -326,6 +379,7 @@ class PatternPerformer:
         loops: int,
         bpm: float,
         bpm_provider: Callable[[], float] | None,
+        feel_provider: Callable[[], dict] | None,
         velocity_scale: float,
     ) -> None:
         loop_idx = 0
@@ -338,14 +392,18 @@ class PatternPerformer:
                 except Exception:
                     current_bpm = bpm
                 current_bpm = max(20.0, min(300.0, current_bpm))
+                feel = self._current_feel(current_spec, feel_provider)
                 events = build_midi_events(
                     current_spec, bpm=current_bpm,
-                    velocity_scale=velocity_scale)
+                    velocity_scale=velocity_scale,
+                    humanize_seed=loop_idx,
+                    **feel)
                 loop_seconds = current_spec.length_beats * 60.0 / max(1.0, current_bpm)
                 with self._lock:
                     self._events = events
                     self._pattern_name = current_spec.name
                     self._last_bpm = current_bpm
+                    self._last_feel = feel
                     self._loop_count = loop_idx + 1
                 start_time = time.monotonic()
                 for event in events:
@@ -403,6 +461,17 @@ class PatternPerformer:
                 send_message(list(msg))
             except Exception:
                 pass
+
+    @staticmethod
+    def _current_feel(
+        spec: PatternSpec,
+        feel_provider: Callable[[], dict] | None,
+    ) -> dict:
+        try:
+            feel = feel_provider() if feel_provider else None
+        except Exception:
+            feel = None
+        return normalized_performer_feel(feel, spec=spec)
 
 
 def confirmed_sp404_beat_bass_spec() -> PatternSpec:
