@@ -38,6 +38,12 @@ from engine.studio_targets import (
     known_targets,
     target_for_track,
 )
+from engine.studio_modules import (
+    known_modules,
+    module_availability_label,
+    module_for_key,
+    module_for_tab,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -45,11 +51,14 @@ from engine.push2driver.palette import track_color_index, build_palette
 class ClipScreen:
     name = "studio"
     TABS = (
-        ("overview", "OVERVIEW"),
+        ("overview", "HOME"),
         ("clips", "CLIPS"),
-        ("instruments", "INSTRUMENTS"),
-        ("performer", "PERFORMER"),
-        ("settings", "SETTINGS"),
+        ("performer", "PERFORM"),
+        ("sampler", "SAMPLER"),
+        ("drum_synth", "DRUM"),
+        ("synth", "SYNTH"),
+        ("mixer", "MIX"),
+        ("recorder", "REC"),
     )
 
     def __init__(self, app) -> None:
@@ -93,13 +102,26 @@ class ClipScreen:
         ctrl = getattr(self.app, "push2_control", None)
         if ctrl is None:
             return
-        desired = "performer" if self._tab == "performer" else "session"
+        if self._tab == "performer":
+            desired = "performer"
+        elif self._tab == "clips":
+            desired = "session"
+        else:
+            desired = "studio"
         if getattr(ctrl, "mode_name", "") != desired:
             ctrl.switch_mode(desired)
 
     def _set_tab(self, tab: str) -> None:
+        if tab not in self._studio_tab_keys():
+            tab = "overview"
         self._tab = tab
         self._sync_push2_mode()
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+
+    def _studio_tab_keys(self) -> set[str]:
+        return {key for key, _label in self.TABS}
 
     # ── Color helpers ─────────────────────────────────────────────
     def _palette_rgb(self, idx: int) -> tuple[int, int, int]:
@@ -124,6 +146,19 @@ class ClipScreen:
             pi_generation=self._pi_generation(),
             studio_audio_enabled=self._studio_audio_supported(),
         )
+
+    def _module_availability(self, module) -> str:
+        return module_availability_label(
+            module,
+            pi_generation=self._pi_generation(),
+            studio_audio_enabled=self._studio_audio_supported(),
+        )
+
+    def _select_studio_module(self, key: str) -> None:
+        module = module_for_key(key)
+        if module is None:
+            return
+        self._set_tab(module.tab)
 
     def _ensure_audio_started(self) -> bool:
         if not self._studio_audio_supported():
@@ -776,8 +811,10 @@ class ClipScreen:
         f_med = pygame.font.SysFont("Arial", 18)
         f_sm = pygame.font.SysFont("Arial", 13)
 
-        title = f"STUDIO · {sess.name}   {sess.bpm:.1f} BPM"
-        surface.blit(f_big.render(title, True, (230, 230, 240)), (16, 12))
+        surface.blit(f_big.render("STUDIO", True, (230, 230, 240)), (16, 12))
+        subtitle = f"{sess.name}   {sess.bpm:.1f} BPM"
+        surface.blit(f_sm.render(subtitle[:72], True, (156, 166, 184)),
+                     (116, 20))
         if ctrl is not None:
             mode_str = f"Push 2 mode: {ctrl.mode_name}"
             surface.blit(f_med.render(mode_str, True, (160, 200, 255)),
@@ -869,72 +906,167 @@ class ClipScreen:
             surface.blit(f_sm.render(f"Scene {scene_idx+1}", True, (220, 220, 220)),
                          (rect.x + 6, rect.y + 8))
 
-    def _draw_placeholder_tab(self, surface: pygame.Surface, tab: str,
-                              top: int, sess) -> None:
+    def _draw_text_fit(self, surface: pygame.Surface, font, text: str,
+                       color: tuple[int, int, int], pos: tuple[int, int],
+                       max_width: int) -> None:
+        label = str(text)
+        while len(label) > 3 and font.size(label)[0] > max_width:
+            label = label[:-4].rstrip() + "..."
+        surface.blit(font.render(label, True, color), pos)
+
+    def _draw_module_card(self, surface: pygame.Surface, module, rect: pygame.Rect,
+                          *, active: bool = False) -> None:
+        self._buttons[f"studio_module_{module.key}"] = rect
+        font = pygame.font.SysFont("Arial", 15, bold=True)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        status = self._module_availability(module)
+        blocked = status.lower() in ("audio gated", f"pi {module.min_pi_generation}+")
+        bg = (30, 42, 54) if active else (20, 23, 34)
+        edge = (92, 210, 170) if active else (
+            (158, 74, 82) if blocked else (52, 60, 82))
+        pygame.draw.rect(surface, bg, rect, border_radius=6)
+        pygame.draw.rect(surface, edge, rect, 1, border_radius=6)
+        self._draw_text_fit(surface, font, module.label, (236, 240, 248),
+                            (rect.x + 12, rect.y + 9), rect.width - 118)
+        chip_w = 88
+        chip = pygame.Rect(rect.right - chip_w - 10, rect.y + 8, chip_w, 22)
+        chip_bg = (52, 92, 76) if not blocked else (86, 42, 48)
+        pygame.draw.rect(surface, chip_bg, chip, border_radius=4)
+        self._draw_text_fit(surface, font_sm, status.upper(), (236, 240, 248),
+                            (chip.x + 8, chip.y + 4), chip.width - 12)
+        self._draw_text_fit(surface, font_sm, module.summary,
+                            (158, 170, 192), (rect.x + 12, rect.y + 32),
+                            rect.width - 24)
+        features = " / ".join(module.features[:3])
+        self._draw_text_fit(surface, font_sm, features,
+                            (118, 132, 160), (rect.x + 12, rect.y + 48),
+                            rect.width - 24)
+
+    def _draw_module_hub(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 24, bold=True)
+        font = pygame.font.SysFont("Arial", 13)
+        surface.blit(font_big.render("Studio Home", True, (232, 234, 242)),
+                     (20, top + 8))
+        pi = self._pi_generation()
+        status = "Pi generation: " + (str(pi) if pi is not None else "unknown")
+        if not self._studio_audio_supported():
+            status += "  |  internal audio gated"
+        surface.blit(font.render(status, True, (150, 162, 184)),
+                     (172, top + 16))
+
+        modules = known_modules()
+        gap = 8
+        x0 = 20
+        y0 = top + 44
+        col_w = (surface.get_width() - 40 - gap) // 2
+        row_h = 62
+        for idx, module in enumerate(modules):
+            col = idx % 2
+            row = idx // 2
+            rect = pygame.Rect(
+                x0 + col * (col_w + gap),
+                y0 + row * (row_h + gap),
+                col_w,
+                row_h,
+            )
+            self._draw_module_card(
+                surface, module, rect, active=module.tab == self._tab)
+
+        track_y = y0 + ((len(modules) + 1) // 2) * (row_h + gap) + 2
+        if track_y > surface.get_height() - 92:
+            return
+        self._draw_text_fit(
+            surface, font, "Current targets", (174, 188, 222),
+            (20, track_y), surface.get_width() - 40)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        x = 20
+        y = track_y + 22
+        for track in sess.tracks[:4]:
+            target = target_for_track(track)
+            capability = capability_for(target)
+            rect = pygame.Rect(x, y, 180, 34)
+            pygame.draw.rect(surface, (18, 20, 30), rect, border_radius=4)
+            pygame.draw.rect(surface, (42, 48, 66), rect, 1, border_radius=4)
+            self._draw_text_fit(
+                surface, font_sm,
+                f"{track.name}: {target.label or capability.label}",
+                (188, 198, 214), (rect.x + 8, rect.y + 10), rect.width - 16)
+            x += 190
+            if x + 180 > surface.get_width() - 20:
+                break
+
+    def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
+                                top: int, sess) -> None:
+        module = module_for_tab(tab)
+        if module is None:
+            self._draw_module_hub(surface, top, sess)
+            return
         font_big = pygame.font.SysFont("Arial", 24, bold=True)
         font = pygame.font.SysFont("Arial", 14)
         font_sm = pygame.font.SysFont("Arial", 12)
-        labels = {
-            "overview": "STUDIO OVERVIEW",
-            "instruments": "INSTRUMENTS",
-            "performer": "PERFORMER",
-            "settings": "STUDIO SETTINGS",
-        }
-        surface.blit(font_big.render(labels.get(tab, tab.upper()), True,
-                                     (232, 234, 242)), (20, top + 8))
-        if tab == "overview" and sess is not None:
-            items = []
-            for track in sess.tracks[:8]:
-                target = target_for_track(track)
-                capability = capability_for(target)
-                features = ", ".join(capability.feature_labels()[:3])
-                items.append((
-                    f"{track.name}: {target.label or capability.label}",
-                    f"{self._availability(capability)} - {features}",
-                ))
-            columns = 2
-        elif tab == "instruments":
-            items = []
-            for capability in known_targets("internal"):
-                if capability.key == "internal.midi":
-                    continue
-                features = ", ".join(capability.feature_labels()[:3])
-                items.append((
-                    capability.label,
-                    f"{self._availability(capability)} - {features}",
-                ))
-            columns = 2
-        elif tab == "performer":
+        status = self._module_availability(module)
+        surface.blit(font_big.render(module.label, True, (232, 234, 242)),
+                     (20, top + 8))
+        surface.blit(font.render(f"{status} - {module.stage_label()}",
+                                 True, (150, 162, 184)), (20, top + 38))
+        surface.blit(font_sm.render(module.summary[:92], True, (150, 162, 184)),
+                     (230, top + 18))
+
+        margin = 20
+        gap = 12
+        y = top + 56
+        content_w = surface.get_width() - margin * 2
+        left_w = int(content_w * 0.54)
+        right_w = content_w - left_w - gap
+        left = pygame.Rect(margin, y, left_w, 176)
+        right = pygame.Rect(margin + left_w + gap, y, right_w, 176)
+        ly = self._panel(surface, left, "Module Surface")
+        ry = self._panel(surface, right, "Build Direction")
+
+        self._info_pair(surface, left.x + 14, ly, "Status", status,
+                        (left_w - 40) // 2)
+        self._info_pair(surface, left.x + 24 + (left_w - 40) // 2, ly,
+                        "Runtime", "internal audio" if module.internal_audio else "MIDI",
+                        (left_w - 40) // 2)
+        list_y = ly + 60
+        surface.blit(font.render("Primary controls", True, (226, 230, 242)),
+                     (left.x + 14, list_y))
+        for idx, feature in enumerate(module.features[:4]):
+            self._draw_text_fit(surface, font_sm, feature, (156, 166, 184),
+                                (left.x + 24, list_y + 26 + idx * 22),
+                                left.width - 48)
+
+        surface.blit(font.render("Next implementation passes", True,
+                                 (226, 230, 242)), (right.x + 14, ry))
+        for idx, step in enumerate(module.next_steps):
+            self._draw_text_fit(surface, font_sm, step, (156, 166, 184),
+                                (right.x + 24, ry + 28 + idx * 24),
+                                right.width - 48)
+
+        cap_rect = pygame.Rect(margin, y + 190, content_w, 78)
+        cy = self._panel(surface, cap_rect, "Capability Targets")
+        x = cap_rect.x + 14
+        for key in module.capability_keys:
+            capability = capability_for(key)
+            label = f"{capability.label}: {self._availability(capability)}"
+            box = pygame.Rect(x, cy, 220, 34)
+            pygame.draw.rect(surface, (24, 27, 38), box, border_radius=4)
+            pygame.draw.rect(surface, (52, 58, 78), box, 1, border_radius=4)
+            self._draw_text_fit(surface, font_sm, label, (188, 198, 214),
+                                (box.x + 10, box.y + 10), box.width - 20)
+            x += 230
+            if x + 220 > cap_rect.right - 14:
+                break
+
+    def _draw_placeholder_tab(self, surface: pygame.Surface, tab: str,
+                              top: int, sess) -> None:
+        if tab == "performer":
             self._draw_performer_tab(surface, top, sess)
             return
-        else:
-            pi = self._pi_generation()
-            items = [
-                ("Audio Gate", "ready" if self._studio_audio_supported()
-                 else "Pi 3 internal audio gated"),
-                ("Controller Map", "Push 2 and touch share Studio targets"),
-                ("Targets", f"{len(known_targets())} capability profiles"),
-                ("Project", f"Pi generation: {pi if pi is not None else 'unknown'}"),
-            ]
-            columns = 1
-        y = top + 48
-        gap = 8
-        col_w = (surface.get_width() - 40 - gap * (columns - 1)) // columns
-        row_h = 46
-        for idx, item in enumerate(items):
-            title, detail = item if isinstance(item, tuple) else (item, "")
-            col = idx % columns
-            row = idx // columns
-            x = 20 + col * (col_w + gap)
-            rect = pygame.Rect(x, y + row * (row_h + 6), col_w, row_h)
-            pygame.draw.rect(surface, (24, 26, 36), rect, border_radius=4)
-            pygame.draw.rect(surface, (52, 58, 78), rect, 1, border_radius=4)
-            surface.blit(font.render(str(title)[:28], True, (224, 228, 238)),
-                         (rect.x + 10, rect.y + 7))
-            if detail:
-                surface.blit(font_sm.render(str(detail)[:42], True,
-                                            (156, 166, 184)),
-                             (rect.x + 10, rect.y + 27))
+        if tab == "overview":
+            self._draw_module_hub(surface, top, sess)
+            return
+        self._draw_module_detail_tab(surface, tab, top, sess)
 
     def _draw_performer_tab(self, surface: pygame.Surface, top: int, sess) -> None:
         font_big = pygame.font.SysFont("Arial", 22, bold=True)
@@ -1251,6 +1383,9 @@ class ClipScreen:
         for key, rect in self._buttons.items():
             if not rect.collidepoint(mx, my):
                 continue
+            if key.startswith("studio_module_"):
+                self._select_studio_module(key.replace("studio_module_", "", 1))
+                return True
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(
                     sess, int(key.rsplit("_", 1)[1]))

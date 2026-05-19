@@ -63,6 +63,22 @@ things Studio needs to know before exposing a workflow: pad count, chromatic
 support, audio in/out, FX CC support, whether it requires internal audio, and
 the minimum Pi generation for heavy internal engines.
 
+Studio module navigation lives in engine/studio_modules.py. Modules are the
+user-facing destinations inside Studio:
+
+- AI Performer
+- Clip Launcher
+- Compa Sampler
+- Drum Synth
+- Synths
+- Mixer / Router
+- Recorder
+
+The module catalog records the visible tab, stage, capability targets, and
+runtime gates. This keeps the Studio screen from becoming one pile of buttons:
+Home chooses the major job, each module owns its own surface, and Push 2
+upper/lower display buttons select the same destinations.
+
 The first runtime performer path lives in engine/studio_performer.py. It plays
 PatternSpec data to an already-open MIDI connection from Studio without
 starting Compa's internal audio stream. The initial confirmed target is
@@ -100,11 +116,10 @@ alias.
 
 ## Near-Term Path
 
-1. Stabilize Studio as the visible clip/session surface.
-2. Add a track target/capabilities model so clips can target internal
-   instruments or external device profiles.
+1. Stabilize Studio as the module hub and visible clip/session surface.
+2. Keep track target/capabilities and module/runtime gates in shared catalogs.
 3. Represent proven SP performer patterns as Studio clips or pattern slots.
-4. Bring Push 2 Studio modes forward: session, note drum, note synth, mix,
+4. Bring Push 2 Studio modes forward: hub, session, note drum, note synth, mix,
    device/edit.
 5. Build internal instruments in this order:
    sample drum rack, 808/909-style drum synth, mono bass synth, then poly or
