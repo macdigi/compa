@@ -175,6 +175,9 @@ class PatternPerformer:
         self._loop_count = 0
         self._queued_spec: PatternSpec | None = None
         self._queued_pattern_name = ""
+        self._sequence_specs: list[PatternSpec] = []
+        self._sequence_enabled = False
+        self._sequence_index = 0
 
     def status(self) -> dict:
         with self._lock:
@@ -188,6 +191,10 @@ class PatternPerformer:
                 "last_bpm": self._last_bpm,
                 "loop_count": self._loop_count,
                 "queued_pattern_name": self._queued_pattern_name,
+                "sequence_enabled": self._sequence_enabled,
+                "sequence_count": len(self._sequence_specs),
+                "sequence_position": self._sequence_index + 1
+                if self._sequence_specs else 0,
             }
 
     def play(
@@ -232,6 +239,9 @@ class PatternPerformer:
             self._loop_count = 0
             self._queued_spec = None
             self._queued_pattern_name = ""
+            self._sequence_specs = []
+            self._sequence_enabled = False
+            self._sequence_index = 0
         thread.start()
 
     def queue_spec(self, spec: PatternSpec) -> bool:
@@ -248,6 +258,29 @@ class PatternPerformer:
             self._last_error = ""
             return True
 
+    def set_sequence(
+        self,
+        specs: list[PatternSpec],
+        *,
+        start_index: int = 0,
+        enabled: bool = True,
+    ) -> bool:
+        playable = [spec for spec in specs if build_midi_events(spec)]
+        if not playable:
+            return False
+        with self._lock:
+            self._sequence_specs = playable
+            self._sequence_index = max(
+                0, min(len(playable) - 1, int(start_index)))
+            self._sequence_enabled = bool(enabled)
+            return self._sequence_enabled
+
+    def clear_sequence(self) -> None:
+        with self._lock:
+            self._sequence_specs = []
+            self._sequence_enabled = False
+            self._sequence_index = 0
+
     def stop(self) -> None:
         with self._lock:
             thread = self._thread
@@ -262,6 +295,9 @@ class PatternPerformer:
         with self._lock:
             self._queued_spec = None
             self._queued_pattern_name = ""
+            self._sequence_specs = []
+            self._sequence_enabled = False
+            self._sequence_index = 0
             if thread is self._thread:
                 self._running = False
 
@@ -334,8 +370,16 @@ class PatternPerformer:
                     if queued is not None:
                         self._queued_spec = None
                         self._queued_pattern_name = ""
+                    sequence_spec = None
+                    if queued is None and self._sequence_enabled and self._sequence_specs:
+                        self._sequence_index = (
+                            self._sequence_index + 1
+                        ) % len(self._sequence_specs)
+                        sequence_spec = self._sequence_specs[self._sequence_index]
                 if queued is not None:
                     current_spec = queued
+                elif sequence_spec is not None:
+                    current_spec = sequence_spec
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -345,6 +389,9 @@ class PatternPerformer:
                 self._running = False
                 self._queued_spec = None
                 self._queued_pattern_name = ""
+                self._sequence_specs = []
+                self._sequence_enabled = False
+                self._sequence_index = 0
 
     @staticmethod
     def _send_all_notes_off(

@@ -144,6 +144,26 @@ class StudioPerformerTests(unittest.TestCase):
         finally:
             player.stop()
 
+    def test_performer_take_sequence_status(self):
+        first = PatternSpec(
+            name="first",
+            prompt="first",
+            hits=[PatternHit(pad=0, step=0, velocity=100)],
+        )
+        second = PatternSpec(
+            name="second",
+            prompt="second",
+            hits=[PatternHit(pad=1, step=1, velocity=100)],
+        )
+        player = PatternPerformer()
+        self.assertTrue(player.set_sequence([first, second], start_index=1))
+        status = player.status()
+        self.assertTrue(status["sequence_enabled"])
+        self.assertEqual(status["sequence_count"], 2)
+        self.assertEqual(status["sequence_position"], 2)
+        player.clear_sequence()
+        self.assertFalse(player.status()["sequence_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

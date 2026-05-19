@@ -262,9 +262,9 @@ class ClipScreen:
         except Exception:
             pass
 
-    def _cycle_performer_take(self, sess) -> None:
+    def _cycle_performer_take(self, sess, direction: int = 1) -> None:
         self._performer_take_idx = (
-            self._performer_take_idx + 1) % MAX_PERFORMER_TAKES
+            self._performer_take_idx + int(direction)) % MAX_PERFORMER_TAKES
         self._performer_message = f"selected {self._take_label(sess)}"
 
     def _save_performer_take(self, sess) -> None:
@@ -290,8 +290,41 @@ class ClipScreen:
             self._performer_message = (
                 f"queued Take {self._performer_take_idx + 1}: {spec.name}")
         else:
+            self._play_sp_beat_bass(sess)
             self._performer_message = (
-                f"loaded Take {self._performer_take_idx + 1}: {spec.name}")
+                f"playing Take {self._performer_take_idx + 1}: {spec.name}")
+
+    def _saved_take_specs_from_selection(self, sess) -> list:
+        takes = self._performer_takes(sess)
+        ordered = (
+            list(range(self._performer_take_idx, MAX_PERFORMER_TAKES))
+            + list(range(0, self._performer_take_idx))
+        )
+        specs = []
+        for idx in ordered:
+            spec = spec_from_performer_take(takes[idx])
+            if spec is not None:
+                specs.append(spec)
+        return specs
+
+    def _toggle_take_chain(self, sess) -> None:
+        player = self._performer_player()
+        status = player.status()
+        if status.get("sequence_enabled"):
+            player.clear_sequence()
+            self._performer_message = "take chain off"
+            return
+        specs = self._saved_take_specs_from_selection(sess)
+        if not specs:
+            self._performer_message = "no saved takes to chain"
+            return
+        self._set_current_performer_spec(specs[0])
+        if status["running"]:
+            player.queue_spec(specs[0])
+        else:
+            self._play_sp_beat_bass(sess)
+        player.set_sequence(specs, start_index=0)
+        self._performer_message = f"take chain on: {len(specs)} takes"
 
     def _step_grids_path(self) -> str:
         resolver = getattr(self.app, "_step_grids_path", None)
@@ -639,6 +672,12 @@ class ClipScreen:
         ]
         if status.get("queued_pattern_name"):
             rows.append(("Queued", status["queued_pattern_name"]))
+        if status.get("sequence_enabled"):
+            rows.append((
+                "Chain",
+                f"{status.get('sequence_position', 0)}/"
+                f"{status.get('sequence_count', 0)} takes",
+            ))
         if self._performer_message:
             rows.append(("Status", self._performer_message))
         elif status["last_error"]:
@@ -698,16 +737,24 @@ class ClipScreen:
                      danger=True)
         button_top += 42
         x = 20
+        self._button(surface, "performer_take_prev",
+                     pygame.Rect(x, button_top, 78, 34), "TAKE -")
+        x += 86
         self._button(surface, "performer_take_next",
-                     pygame.Rect(x, button_top, 88, 34), "TAKE +")
-        x += 96
+                     pygame.Rect(x, button_top, 78, 34), "TAKE +")
+        x += 86
         self._button(surface, "performer_take_save",
-                     pygame.Rect(x, button_top, 78, 34), "SAVE")
-        x += 86
+                     pygame.Rect(x, button_top, 72, 34), "SAVE")
+        x += 80
+        recall_label = "QUEUE" if status["running"] else "PLAY"
         self._button(surface, "performer_take_load",
-                     pygame.Rect(x, button_top, 78, 34), "LOAD",
+                     pygame.Rect(x, button_top, 82, 34), recall_label,
                      active=bool(self._current_take(sess)))
-        x += 86
+        x += 90
+        self._button(surface, "performer_take_chain",
+                     pygame.Rect(x, button_top, 86, 34), "CHAIN",
+                     active=bool(status.get("sequence_enabled")))
+        x += 94
         self._button(surface, "performer_step_export",
                      pygame.Rect(x, button_top, 128, 34), "SEND STEP")
 
@@ -749,14 +796,20 @@ class ClipScreen:
             if key == "performer_genre":
                 self._cycle_performer_genre()
                 return True
+            if key == "performer_take_prev":
+                self._cycle_performer_take(sess, -1)
+                return True
             if key == "performer_take_next":
-                self._cycle_performer_take(sess)
+                self._cycle_performer_take(sess, 1)
                 return True
             if key == "performer_take_save":
                 self._save_performer_take(sess)
                 return True
             if key == "performer_take_load":
                 self._load_performer_take(sess)
+                return True
+            if key == "performer_take_chain":
+                self._toggle_take_chain(sess)
                 return True
             if key == "performer_step_export":
                 self._export_performer_take_to_step_grid(sess)
