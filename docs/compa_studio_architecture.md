@@ -52,6 +52,17 @@ Examples:
 - future Move/MPC profiles
 - network MIDI/audio peer
 
+Each track stores a TrackTarget separately from its InstrumentRef.
+InstrumentRef describes the internal sound generator to instantiate when the
+track is rendered inside Compa. TrackTarget describes the musical endpoint:
+an internal engine, an external groovebox profile, or a network peer. Older
+sessions without a target infer one from the track type and instrument kind.
+
+Target capabilities live in engine/studio_targets.py. The catalog records
+things Studio needs to know before exposing a workflow: pad count, chromatic
+support, audio in/out, FX CC support, whether it requires internal audio, and
+the minimum Pi generation for heavy internal engines.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:

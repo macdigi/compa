@@ -44,6 +44,54 @@ class InstrumentRef:
 
 
 @dataclass
+class TrackTarget:
+    """Where a Studio track sends or renders its musical output.
+
+    The target is separate from InstrumentRef. InstrumentRef describes the
+    internal sound engine to instantiate; TrackTarget describes the musical
+    endpoint/capability the user sees in Studio.
+    """
+
+    key: str = "internal.synth"
+    label: str = ""
+    params: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "params": self.params,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TrackTarget":
+        return cls(
+            key=str(d.get("key", "internal.synth")),
+            label=str(d.get("label", "")),
+            params=dict(d.get("params", {})),
+        )
+
+
+def default_target_for_track(
+    track_type: TrackType,
+    instrument: Optional[InstrumentRef] = None,
+) -> TrackTarget:
+    """Infer a stable default target for older sessions without targets."""
+
+    if track_type == TrackType.AUDIO:
+        return TrackTarget("internal.audio_track", "Audio Track")
+    kind = instrument.kind if instrument else ""
+    preset = (instrument.params or {}).get("preset", "") if instrument else ""
+    if kind == "drum_rack":
+        return TrackTarget("internal.sample_drum_rack", "Sample Drum Rack")
+    if kind == "synth_voice" and preset == "bass":
+        return TrackTarget("internal.mono_synth", "Mono Synth")
+    if kind == "synth_voice":
+        return TrackTarget("internal.poly_synth", "Poly Synth")
+    return TrackTarget("internal.midi", "MIDI Track")
+
+
+@dataclass
 class Track:
     """A column in the session grid."""
     id: int = 0
@@ -56,6 +104,7 @@ class Track:
     solo: bool = False
     arm: bool = False
     instrument: Optional[InstrumentRef] = None
+    target: Optional[TrackTarget] = None
     clips: list[Optional[Clip]] = field(default_factory=lambda: [None] * 8)
 
     def to_dict(self) -> dict:
@@ -70,22 +119,32 @@ class Track:
             "solo": self.solo,
             "arm": self.arm,
             "instrument": self.instrument.to_dict() if self.instrument else None,
+            "target": (
+                (self.target or default_target_for_track(
+                    self.type, self.instrument)).to_dict()
+            ),
             "clips": [c.to_dict() if c is not None else None for c in self.clips],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Track":
+        instrument = (InstrumentRef.from_dict(d["instrument"])
+                      if d.get("instrument") else None)
+        track_type = TrackType(d.get("type", "midi"))
+        target = (TrackTarget.from_dict(d["target"])
+                  if d.get("target")
+                  else default_target_for_track(track_type, instrument))
         return cls(
             id=int(d.get("id", 0)),
             name=d.get("name", ""),
             color=int(d.get("color", 0)),
-            type=TrackType(d.get("type", "midi")),
+            type=track_type,
             volume=float(d.get("volume", 0.85)),
             pan=float(d.get("pan", 0.0)),
             mute=bool(d.get("mute", False)),
             solo=bool(d.get("solo", False)),
             arm=bool(d.get("arm", False)),
-            instrument=(InstrumentRef.from_dict(d["instrument"])
-                        if d.get("instrument") else None),
+            instrument=instrument,
+            target=target,
             clips=[clip_from_dict(c) for c in d.get("clips", [None] * 8)],
         )

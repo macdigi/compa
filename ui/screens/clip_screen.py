@@ -9,6 +9,12 @@ from __future__ import annotations
 import pygame
 
 from session.clip import ClipState
+from engine.studio_targets import (
+    availability_label,
+    capability_for,
+    known_targets,
+    target_for_track,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -57,6 +63,17 @@ class ClipScreen:
     def _studio_audio_supported(self) -> bool:
         supported = getattr(self.app, "_studio_audio_supported", None)
         return bool(supported()) if callable(supported) else True
+
+    def _pi_generation(self) -> int | None:
+        generation = getattr(self.app, "_raspberry_pi_generation", None)
+        return generation() if callable(generation) else None
+
+    def _availability(self, capability) -> str:
+        return availability_label(
+            capability,
+            pi_generation=self._pi_generation(),
+            studio_audio_enabled=self._studio_audio_supported(),
+        )
 
     def _ensure_audio_started(self) -> bool:
         if not self._studio_audio_supported():
@@ -271,7 +288,8 @@ class ClipScreen:
     def _draw_placeholder_tab(self, surface: pygame.Surface, tab: str,
                               top: int, sess) -> None:
         font_big = pygame.font.SysFont("Arial", 24, bold=True)
-        font = pygame.font.SysFont("Arial", 15)
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
         labels = {
             "overview": "STUDIO OVERVIEW",
             "instruments": "INSTRUMENTS",
@@ -281,26 +299,66 @@ class ClipScreen:
         surface.blit(font_big.render(labels.get(tab, tab.upper()), True,
                                      (232, 234, 242)), (20, top + 8))
         if tab == "overview" and sess is not None:
-            items = [
-                f"Tracks: {len(sess.tracks)}",
-                f"Scenes: {len(sess.scenes)}",
-                f"Tempo: {sess.bpm:.1f} BPM",
-                f"Audio: {'running' if self._clip_audio_running() else 'stopped'}",
-            ]
+            items = []
+            for track in sess.tracks[:8]:
+                target = target_for_track(track)
+                capability = capability_for(target)
+                features = ", ".join(capability.feature_labels()[:3])
+                items.append((
+                    f"{track.name}: {target.label or capability.label}",
+                    f"{self._availability(capability)} - {features}",
+                ))
+            columns = 2
         elif tab == "instruments":
-            items = ["Sample Rack", "Drum Synth", "Mono Synth", "Poly Synth"]
+            items = []
+            for capability in known_targets("internal"):
+                if capability.key == "internal.midi":
+                    continue
+                features = ", ".join(capability.feature_labels()[:3])
+                items.append((
+                    capability.label,
+                    f"{self._availability(capability)} - {features}",
+                ))
+            columns = 2
         elif tab == "performer":
-            items = ["Pattern Targets", "Mutations", "FX Lanes", "Takes"]
+            items = []
+            for category in ("external", "network"):
+                for capability in known_targets(category):
+                    prefix = f"{capability.device}: " if capability.device else ""
+                    features = ", ".join(capability.feature_labels()[:3])
+                    items.append((
+                        f"{prefix}{capability.label}",
+                        f"{self._availability(capability)} - {features}",
+                    ))
+            columns = 1
         else:
-            items = ["Audio Gate", "Controller Map", "Targets", "Project"]
+            pi = self._pi_generation()
+            items = [
+                ("Audio Gate", "ready" if self._studio_audio_supported()
+                 else "Pi 3 internal audio gated"),
+                ("Controller Map", "Push 2 and touch share Studio targets"),
+                ("Targets", f"{len(known_targets())} capability profiles"),
+                ("Project", f"Pi generation: {pi if pi is not None else 'unknown'}"),
+            ]
+            columns = 1
         y = top + 48
-        for item in items:
-            rect = pygame.Rect(20, y, surface.get_width() - 40, 34)
+        gap = 8
+        col_w = (surface.get_width() - 40 - gap * (columns - 1)) // columns
+        row_h = 46
+        for idx, item in enumerate(items):
+            title, detail = item if isinstance(item, tuple) else (item, "")
+            col = idx % columns
+            row = idx // columns
+            x = 20 + col * (col_w + gap)
+            rect = pygame.Rect(x, y + row * (row_h + 6), col_w, row_h)
             pygame.draw.rect(surface, (24, 26, 36), rect, border_radius=4)
             pygame.draw.rect(surface, (52, 58, 78), rect, 1, border_radius=4)
-            surface.blit(font.render(item, True, (210, 214, 226)),
-                         (rect.x + 12, rect.y + 8))
-            y += 42
+            surface.blit(font.render(str(title)[:28], True, (224, 228, 238)),
+                         (rect.x + 10, rect.y + 7))
+            if detail:
+                surface.blit(font_sm.render(str(detail)[:42], True,
+                                            (156, 166, 184)),
+                             (rect.x + 10, rect.y + 27))
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:

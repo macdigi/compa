@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .session import Session, NUM_SCENES
-from .track import Track, TrackType, InstrumentRef
+from .track import Track, TrackType, InstrumentRef, TrackTarget
 from .scene import Scene
 from .clip import MidiClip, LaunchQuantize
 from .note import Note
@@ -125,6 +125,7 @@ def build_default_session() -> Session:
     drums = Track(
         id=0, name="Drums", type=TrackType.MIDI, color=drum_color,
         instrument=InstrumentRef(kind="drum_rack", name="Default Kit"),
+        target=TrackTarget("internal.sample_drum_rack", "Sample Drum Rack"),
         clips=[
             _make_clip("Four", _drum_pattern_four_on_floor(), drum_color),
             _make_clip("Hip-Hop", _drum_pattern_hiphop(), drum_color),
@@ -140,6 +141,7 @@ def build_default_session() -> Session:
         id=1, name="Bass", type=TrackType.MIDI, color=bass_color,
         instrument=InstrumentRef(kind="synth_voice", name="Bass Synth",
                                   params={"preset": "bass"}),
+        target=TrackTarget("internal.mono_synth", "Mono Synth"),
         clips=[
             _make_clip("Root-5", _bass_pattern_root_5(), bass_color),
             _make_clip("Walk", _bass_pattern_walking(), bass_color),
@@ -155,6 +157,7 @@ def build_default_session() -> Session:
         id=2, name="Lead", type=TrackType.MIDI, color=lead_color,
         instrument=InstrumentRef(kind="synth_voice", name="Lead Synth",
                                   params={"preset": "lead"}),
+        target=TrackTarget("internal.poly_synth", "Poly Synth"),
         clips=[
             _make_clip("Arp", _lead_pattern_arp(), lead_color),
             _make_clip("Riff", _lead_pattern_riff(), lead_color),
@@ -170,6 +173,7 @@ def build_default_session() -> Session:
         id=3, name="Pad", type=TrackType.MIDI, color=pad_color,
         instrument=InstrumentRef(kind="synth_voice", name="Pad Synth",
                                   params={"preset": "pad"}),
+        target=TrackTarget("internal.poly_synth", "Poly Synth"),
         clips=[
             _make_clip("Cm chord", _pad_pattern_chord(), pad_color),
             _make_clip("Cm chord", _pad_pattern_chord(), pad_color),
@@ -186,6 +190,7 @@ def build_default_session() -> Session:
             name=f"Audio {i+1}",
             type=TrackType.AUDIO,
             color=track_color_index(idx),
+            target=TrackTarget("internal.audio_track", "Audio Track"),
             clips=[None] * NUM_SCENES,
         ))
 
