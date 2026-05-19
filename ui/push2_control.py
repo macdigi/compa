@@ -145,6 +145,13 @@ class Push2Control:
         self.engine.stop_clip(track, self._beat())
         self.request_redraw()
 
+    def set_track_target(self, track: int, target) -> None:
+        if not (0 <= track < len(self.session.tracks)):
+            return
+        self.session.tracks[track].target = target
+        self._persist()
+        self.request_redraw()
+
     def stop_all_clips(self) -> None:
         self.engine.stop_all(self._beat())
         self.request_redraw()

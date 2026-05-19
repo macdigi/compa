@@ -63,6 +63,12 @@ things Studio needs to know before exposing a workflow: pad count, chromatic
 support, audio in/out, FX CC support, whether it requires internal audio, and
 the minimum Pi generation for heavy internal engines.
 
+The first runtime performer path lives in engine/studio_performer.py. It plays
+PatternSpec data to an already-open MIDI connection from Studio without
+starting Compa's internal audio stream. The initial confirmed target is
+SP-404 A1-A6 Beat+Bass: Bank A pads A1-A5 for drums plus A6 as the selected
+chromatic source on SP channel 16.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:

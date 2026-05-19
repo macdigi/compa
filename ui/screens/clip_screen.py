@@ -9,6 +9,12 @@ from __future__ import annotations
 import pygame
 
 from session.clip import ClipState
+from session.track import TrackTarget
+from engine.studio_performer import (
+    PatternPerformer,
+    SP404_BEAT_BASS_TARGET,
+    confirmed_sp404_beat_bass_spec,
+)
 from engine.studio_targets import (
     availability_label,
     capability_for,
@@ -40,6 +46,7 @@ class ClipScreen:
         self._clip_grid_geometry: tuple[int, int, int, int] = (16, 160, 40, 40)
         self._scene_button_top = 0
         self._scene_button_w = 0
+        self._performer_message = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -94,6 +101,7 @@ class ClipScreen:
     def _stop_all(self) -> None:
         ctrl = getattr(self.app, "push2_control", None)
         engine = getattr(self.app, "clip_engine", None)
+        self._performer_player().stop()
         if ctrl is not None:
             ctrl.stop_all_clips()
         elif engine is not None:
@@ -109,6 +117,106 @@ class ClipScreen:
             return
         if not self._ensure_audio_started() and engine is not None:
             engine.active = False
+
+    def _performer_player(self) -> PatternPerformer:
+        player = getattr(self.app, "studio_performer", None)
+        if player is None:
+            player = PatternPerformer()
+            setattr(self.app, "studio_performer", player)
+        return player
+
+    def _selected_track_index(self, sess) -> int:
+        ctrl = getattr(self.app, "push2_control", None)
+        idx = getattr(ctrl, "selected_track", 0) if ctrl is not None else 0
+        try:
+            idx = int(idx or 0)
+        except Exception:
+            idx = 0
+        if not sess.tracks:
+            return 0
+        return max(0, min(len(sess.tracks) - 1, idx))
+
+    def _set_selected_track_target(self, sess, target: TrackTarget) -> None:
+        track_idx = self._selected_track_index(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None and hasattr(ctrl, "set_track_target"):
+            ctrl.set_track_target(track_idx, target)
+        elif 0 <= track_idx < len(sess.tracks):
+            sess.tracks[track_idx].target = target
+        self._performer_message = f"target set: {target.label or target.key}"
+
+    def _sp_beat_bass_target(self) -> TrackTarget:
+        return TrackTarget(
+            SP404_BEAT_BASS_TARGET,
+            "SP-404 A1-A6 Beat+Bass",
+            {
+                "project": 3,
+                "bank": "A",
+                "drum_pads": "A1-A5",
+                "chromatic_pad": "A6",
+            },
+        )
+
+    def _cycle_selected_target(self, sess) -> None:
+        choices = [
+            capability for category in ("external", "network")
+            for capability in known_targets(category)
+        ]
+        if not choices:
+            return
+        track = sess.tracks[self._selected_track_index(sess)]
+        current = target_for_track(track).key
+        keys = [capability.key for capability in choices]
+        next_idx = (keys.index(current) + 1) % len(keys) if current in keys else 0
+        capability = choices[next_idx]
+        params = {}
+        if capability.key == SP404_BEAT_BASS_TARGET:
+            params = self._sp_beat_bass_target().params
+        self._set_selected_track_target(
+            sess, TrackTarget(capability.key, capability.label, params))
+
+    def _midi_sender_for_target(self, target_key: str):
+        connections = getattr(self.app, "_midi_connections", {}) or {}
+        device_key = ""
+        if target_key.startswith("external.sp404"):
+            device_key = "SP-404MKII"
+        elif target_key.startswith("external.p6"):
+            device_key = "P-6"
+        if not device_key:
+            return None, ""
+        conn = connections.get(device_key)
+        out = getattr(conn, "_out", None)
+        sender = getattr(out, "send_message", None)
+        if callable(sender):
+            return sender, device_key
+        return None, device_key
+
+    def _play_sp_beat_bass(self, sess) -> None:
+        target = self._sp_beat_bass_target()
+        self._set_selected_track_target(sess, target)
+        sender, port_label = self._midi_sender_for_target(target.key)
+        if sender is None:
+            self._performer_message = f"{port_label or 'SP-404'} MIDI unavailable"
+            return
+        try:
+            self._performer_player().play(
+                confirmed_sp404_beat_bass_spec(),
+                send_message=sender,
+                target_key=target.key,
+                port_label=port_label,
+                loops=0,
+            )
+            self._performer_message = "playing v3"
+        except Exception as exc:
+            self._performer_message = f"play failed: {exc}"
+
+    def _stop_performer(self) -> None:
+        self._performer_player().stop()
+        self._performer_message = "performer stopped"
+
+    def _toggle_performer_mute(self) -> None:
+        muted = self._performer_player().toggle_mute()
+        self._performer_message = "performer muted" if muted else "performer live"
 
     def _button(self, surface: pygame.Surface, key: str, rect: pygame.Rect,
                 label: str, *, active: bool = False,
@@ -321,16 +429,8 @@ class ClipScreen:
                 ))
             columns = 2
         elif tab == "performer":
-            items = []
-            for category in ("external", "network"):
-                for capability in known_targets(category):
-                    prefix = f"{capability.device}: " if capability.device else ""
-                    features = ", ".join(capability.feature_labels()[:3])
-                    items.append((
-                        f"{prefix}{capability.label}",
-                        f"{self._availability(capability)} - {features}",
-                    ))
-            columns = 1
+            self._draw_performer_tab(surface, top, sess)
+            return
         else:
             pi = self._pi_generation()
             items = [
@@ -360,6 +460,64 @@ class ClipScreen:
                                             (156, 166, 184)),
                              (rect.x + 10, rect.y + 27))
 
+    def _draw_performer_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        track_idx = self._selected_track_index(sess)
+        track = sess.tracks[track_idx] if sess.tracks else None
+        target = target_for_track(track) if track is not None else self._sp_beat_bass_target()
+        capability = capability_for(target)
+        status = self._performer_player().status()
+        sender, port_label = self._midi_sender_for_target(SP404_BEAT_BASS_TARGET)
+        midi_status = "ready" if sender is not None else f"{port_label or 'SP-404'} missing"
+        rows = [
+            (f"Track {track_idx + 1}", track.name if track is not None else "none"),
+            ("Target", target.label or capability.label),
+            ("Pattern", "project3-a1-a6-beat-bass-v3"),
+            ("MIDI", midi_status),
+        ]
+        if self._performer_message:
+            rows.append(("Status", self._performer_message))
+        elif status["last_error"]:
+            rows.append(("Status", status["last_error"]))
+        elif status["running"]:
+            rows.append(("Status", "playing" if not status["muted"] else "muted"))
+
+        y = top + 48
+        row_h = 38
+        for title, detail in rows:
+            rect = pygame.Rect(20, y, surface.get_width() - 40, row_h)
+            pygame.draw.rect(surface, (24, 26, 36), rect, border_radius=4)
+            pygame.draw.rect(surface, (52, 58, 78), rect, 1, border_radius=4)
+            surface.blit(font.render(str(title)[:18], True, (224, 228, 238)),
+                         (rect.x + 10, rect.y + 6))
+            surface.blit(font_sm.render(str(detail)[:62], True,
+                                        (156, 166, 184)),
+                         (rect.x + 136, rect.y + 8))
+            y += row_h + 6
+
+        button_top = y + 8
+        x = 20
+        self._button(surface, "performer_target_next",
+                     pygame.Rect(x, button_top, 112, 34), "TARGET +")
+        x += 120
+        self._button(surface, "performer_assign_sp",
+                     pygame.Rect(x, button_top, 140, 34), "SET SP A1-A6",
+                     active=target.key == SP404_BEAT_BASS_TARGET)
+        x += 148
+        self._button(surface, "performer_play_v3",
+                     pygame.Rect(x, button_top, 92, 34), "PLAY V3",
+                     active=bool(status["running"]))
+        x += 100
+        self._button(surface, "performer_mute",
+                     pygame.Rect(x, button_top, 92, 34),
+                     "UNMUTE" if status["muted"] else "MUTE",
+                     active=bool(status["muted"]))
+        x += 100
+        self._button(surface, "performer_stop",
+                     pygame.Rect(x, button_top, 84, 34), "STOP",
+                     danger=True)
+
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type != pygame.MOUSEBUTTONDOWN:
@@ -382,6 +540,21 @@ class ClipScreen:
                 return True
             if key == "toggle_audio":
                 self._toggle_audio()
+                return True
+            if key == "performer_target_next":
+                self._cycle_selected_target(sess)
+                return True
+            if key == "performer_assign_sp":
+                self._set_selected_track_target(sess, self._sp_beat_bass_target())
+                return True
+            if key == "performer_play_v3":
+                self._play_sp_beat_bass(sess)
+                return True
+            if key == "performer_mute":
+                self._toggle_performer_mute()
+                return True
+            if key == "performer_stop":
+                self._stop_performer()
                 return True
 
         if self._tab != "clips":
