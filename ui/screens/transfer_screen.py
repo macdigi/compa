@@ -654,13 +654,8 @@ class TransferScreen:
 
     def _scan_sp404_current_bank(self):
         lib = self.sp404_lib
-        proj = self._current_sp404_project()
-        if lib is None or not proj:
-            self._set_status("No SP-404 project selected")
-            return
-        if not (hasattr(lib, "is_protocol_project")
-                and lib.is_protocol_project(proj)):
-            self._refresh_sp404_assignments()
+        if lib is None:
+            self._set_status("SP-404 librarian unavailable")
             return
         if self._sp404_protocol_scanning:
             self._set_status("SP-404 bank scan already running")
@@ -669,11 +664,26 @@ class TransferScreen:
         bank_idx = self._sp404_grid.current_bank
         bank_letter = chr(ord("A") + bank_idx)
         self._sp404_protocol_scanning = True
-        self._sp404_protocol_scan_key = (proj, bank_idx)
-        self._set_status(f"Scanning SP-404 bank {bank_letter}...")
+        self._set_status(f"Preparing SP-404 bank {bank_letter} scan...")
 
         def _worker():
             try:
+                proj = self._current_sp404_project()
+                if not proj:
+                    self._set_status("Loading SP-404 projects...")
+                    self._refresh_sp404_projects()
+                    proj = self._current_sp404_project()
+                if not proj:
+                    err = getattr(lib, "last_error", "") or "No SP-404 project selected"
+                    self._set_status(err[:80])
+                    return
+                if not (hasattr(lib, "is_protocol_project")
+                        and lib.is_protocol_project(proj)):
+                    self._refresh_sp404_assignments()
+                    return
+
+                self._sp404_protocol_scan_key = (proj, bank_idx)
+                self._set_status(f"Scanning SP-404 bank {bank_letter}...")
                 pads = lib.read_project_bank_pads(proj, bank_idx)
                 self._sp404_grid.set_pads(pads)
                 self._refresh_sp404_projects()
