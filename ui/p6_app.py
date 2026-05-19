@@ -83,6 +83,10 @@ def load_config() -> dict:
         # Recall buffer length (seconds) — rolling buffer of recent audio
         # always being captured for "forgot to hit record". Configurable.
         "RECALL_BUFFER_SECONDS": "60",
+        # Local JSONL gesture logging for the Compa performer workflow.
+        # Records notes, CC moves, transport, generated clips, and
+        # performance gestures under sessions/performances/.
+        "PERFORMANCE_RECORDING_ENABLED": "1",
         # Clips tab visibility. The Clips screen (Compa 2 clip launcher)
         # is incomplete and not ready for users to interact with. Default
         # OFF — hides the nav button, the F10 keyboard shortcut, and the
@@ -589,6 +593,25 @@ class P6App:
 
         # ── Sessions directory ───────────────────────────────────────
         os.makedirs(self.config["P6_SESSIONS_DIR"], exist_ok=True)
+
+        # ── Performance recorder ────────────────────────────────────
+        # Local JSONL event stream for learning Jordan's timing,
+        # velocity, pad, and FX habits over time. This records gestures,
+        # not audio, and failures are intentionally non-fatal.
+        self.performance_recorder = None
+        try:
+            from engine.performance_recorder import PerformanceRecorder
+            perf_dir = os.path.join(self.config["P6_SESSIONS_DIR"],
+                                    "performances")
+            self.performance_recorder = PerformanceRecorder(
+                perf_dir,
+                clock_fn=lambda: float(getattr(self.link, "beat", 0.0)),
+                bpm_fn=self._get_global_bpm,
+            )
+            if self.config.get("PERFORMANCE_RECORDING_ENABLED", "1") == "1":
+                self.performance_recorder.start("session")
+        except Exception as e:
+            print(f"Performance recorder init failed: {e}", flush=True)
 
         # ── Compa 2: Clip engine + Push 2 native driver ──────────────
         # Slot declarations only here — actual init runs after the
@@ -1191,6 +1214,44 @@ class P6App:
         if len(self._hud_messages) > 3:
             self._hud_messages.pop(0)
 
+    def record_performance_event(self, event_type: str, source: str = "",
+                                 device: str = "", payload: dict = None):
+        """Append a local performance event if the recorder is active."""
+        rec = getattr(self, "performance_recorder", None)
+        if rec is None:
+            return
+        try:
+            rec.record(event_type, source=source, device=device,
+                       payload=payload or {})
+        except Exception:
+            pass
+
+    def record_performance_note(self, source: str, device: str, note: int,
+                                velocity: int, channel: int = 0,
+                                payload: dict = None):
+        rec = getattr(self, "performance_recorder", None)
+        if rec is None:
+            return
+        try:
+            rec.record_note(source=source, device=device, note=note,
+                            velocity=velocity, channel=channel,
+                            payload=payload or {})
+        except Exception:
+            pass
+
+    def record_performance_cc(self, source: str, device: str, cc: int,
+                              value: int, channel: int = 0,
+                              payload: dict = None):
+        rec = getattr(self, "performance_recorder", None)
+        if rec is None:
+            return
+        try:
+            rec.record_cc(source=source, device=device, cc=cc,
+                          value=value, channel=channel,
+                          payload=payload or {})
+        except Exception:
+            pass
+
     def _draw_hud(self, surface):
         """Draw HUD notification overlay — works on any screen."""
         import time
@@ -1265,6 +1326,8 @@ class P6App:
         """Track CCs we send to the SP-404 (it doesn't echo CC83/CC19 back)."""
         if 0 <= channel <= 15:
             self.live_cc[channel][cc] = value
+        self.record_performance_cc(
+            "twister", "SP-404MKII", cc, value, channel=channel)
 
     def _on_twister_param(self, knob: int, value: int):
         """Called when Twister adjusts a parameter. Throttled to avoid spam."""
@@ -1376,6 +1439,9 @@ class P6App:
                     midi.send_note_off(note, channel=channel)
             except Exception:
                 pass
+            self.record_performance_note(
+                "push2", "SP-404MKII", note, velocity, channel=channel,
+                payload={"bank": effective_bank, "pad": pad_in_bank})
             return
 
         if dev_key == "P-6":
@@ -1406,6 +1472,9 @@ class P6App:
                     midi.send_note_off(note, channel=channel)
             except Exception:
                 pass
+            self.record_performance_note(
+                "push2", "P-6", note, velocity, channel=channel,
+                payload={"bank": effective_bank, "pad": pad_in_bank})
             return
 
         # Generic fallback (other USB-class-compliant devices) — keep
@@ -1490,6 +1559,8 @@ class P6App:
         matching Push 2 pad while the device holds the note, restore
         on note-off. No-op if not in control mode, the device isn't
         focused, or the note doesn't decode to a visible pad."""
+        self.record_performance_note(
+            "device", dev_key, note, velocity, channel=channel)
         if self.push2_mode != "control":
             return
         if getattr(self.device_manager, "focus_key", None) != dev_key:
@@ -2042,7 +2113,17 @@ class P6App:
         if view_step >= view_n:
             return
         try:
-            seq.toggle_view_step(pad, view_step)
+            active = seq.toggle_view_step(pad, view_step)
+            dev_key = getattr(self.device_manager, "focus_key", "") or ""
+            midi = self._midi_connections.get(dev_key) if dev_key else None
+            try:
+                pat = int(midi.state.active_pattern) if midi else 0
+            except Exception:
+                pat = 0
+            self.record_performance_event(
+                "step.toggle", "push2", dev_key,
+                {"pad": pad, "view_step": view_step,
+                 "active": bool(active), "pattern": pat})
         except Exception:
             pass
 
@@ -2406,6 +2487,9 @@ class P6App:
             return
         if value <= 0:
             return  # release — no-op for the rest
+        self.record_performance_event(
+            "button", "push2", getattr(self.device_manager, "focus_key", ""),
+            {"name": name, "mode": self.push2_mode})
         if name == "play":
             # In pattern mode, Play toggles both the Compa sequencer
             # AND the focused device's transport. Press 1 starts both;
@@ -3143,6 +3227,9 @@ class P6App:
             try:
                 midi.send_cc(cc, new_val, channel=bus)
                 self.live_cc.setdefault(bus, {})[cc] = new_val
+                self.record_performance_cc(
+                    "push2", "SP-404MKII", cc, new_val, channel=bus,
+                    payload={"encoder": idx + 1})
             except Exception:
                 pass
             return
@@ -3164,6 +3251,9 @@ class P6App:
             if self.p6:
                 self.p6.send_cc(cc, new_val, channel=ch)
             self.live_cc.setdefault(ch, {})[cc] = new_val
+            self.record_performance_cc(
+                "push2", "P-6", cc, new_val, channel=ch,
+                payload={"encoder": idx + 1})
         except Exception:
             pass
 
@@ -3174,6 +3264,10 @@ class P6App:
 
         Called from MIDI poll thread — post a pygame event for thread safety.
         """
+        self.record_performance_event(
+            "transport", "device",
+            getattr(self.device_manager, "focus_key", ""),
+            {"action": action})
         pygame.event.post(pygame.event.Event(P6_TRANSPORT_EVENT, action=action))
 
     def _on_atomsq_transport(self, action: str):
@@ -4578,6 +4672,12 @@ class P6App:
                 self._save_step_grid(dev_key, int(midi.state.active_pattern))
             from engine.compa_step_persistence import save as _save_grids
             _save_grids(self._compa_step_grids, self._step_grids_path())
+        except Exception:
+            pass
+        try:
+            rec = getattr(self, "performance_recorder", None)
+            if rec:
+                rec.stop()
         except Exception:
             pass
         if self.push2_display:

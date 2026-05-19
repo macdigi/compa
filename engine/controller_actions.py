@@ -27,6 +27,8 @@ def _action_play(app, value: int):
     midi = _focused_midi(app)
     if midi and hasattr(midi, "send_start"):
         midi.send_start()
+    _record_event(app, "transport", "controller",
+                  {"action": "play", "value": int(value)})
 
 
 def _action_stop(app, value: int):
@@ -35,6 +37,8 @@ def _action_stop(app, value: int):
     midi = _focused_midi(app)
     if midi and hasattr(midi, "send_stop"):
         midi.send_stop()
+    _record_event(app, "transport", "controller",
+                  {"action": "stop", "value": int(value)})
 
 
 def _action_record(app, value: int):
@@ -49,6 +53,8 @@ def _action_record(app, value: int):
                             "1" if app.auto_record else "0")
         except Exception:
             pass
+        _record_event(app, "record.toggle", "controller",
+                      {"auto_record": bool(app.auto_record)})
 
 
 def _focused_midi(app):
@@ -57,6 +63,24 @@ def _focused_midi(app):
         return app._midi_connections.get(app.device_manager.focus_key)
     except Exception:
         return None
+
+
+def _record_event(app, event_type: str, source: str, payload: dict):
+    try:
+        device = app.device_manager.focus_key
+        app.record_performance_event(event_type, source, device, payload)
+    except Exception:
+        pass
+
+
+def _record_note(app, source: str, note: int, velocity: int,
+                 channel: int, payload: dict):
+    try:
+        device = app.device_manager.focus_key
+        app.record_performance_note(source, device, note, velocity, channel,
+                                    payload=payload)
+    except Exception:
+        pass
 
 
 # ── Pad triggers — respect current bank ──────────────────────────
@@ -117,6 +141,8 @@ def _make_pad_trigger(pad_idx: int) -> Callable:
             midi.send_note_on(note, value, channel=channel)
         else:
             midi.send_note_off(note, channel=channel)
+        _record_note(app, "controller", note, value, channel,
+                     {"bank": bank_idx, "pad": pad_idx})
     return _handler
 
 
@@ -173,6 +199,8 @@ def _notify_bank_change(app, device_key: str, bank_idx: int):
     if hasattr(app, "push_hud"):
         letter = chr(ord("A") + bank_idx)
         app.push_hud(f"Bank {letter}", None)
+    _record_event(app, "bank.select", "controller",
+                  {"bank": bank_idx})
 
 
 # ── Twister-style FX slot control ────────────────────────────────
@@ -226,6 +254,7 @@ def _action_chromatic_note(app, note: int, velocity: int = 100):
         kb.active_notes.pop(note, None)
         if kb.on_note_off:
             kb.on_note_off(note)
+    _record_note(app, "controller.chromatic", note, velocity, 0, {})
 
 
 # ── Keys tab actions ─────────────────────────────────────────────
