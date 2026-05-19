@@ -105,6 +105,13 @@ voice tone, decay, and snap macros. This gives Compa its first standalone drum
 machine block while leaving pattern clips, deeper voice editing, kit storage,
 and controller-mapped macro automation for later passes.
 
+The first melodic-instrument path is the Synths MVP. It exposes the existing
+internal SynthVoice tracks as a Studio module instead of hiding them behind the
+clip grid. The touchscreen can select Bass/Lead/Pad synth tracks, preview notes,
+switch bass/lead/pad presets, cycle waveforms, and adjust cutoff, attack,
+release, and gain. Push 2 gets a Synths mode with a playable 4ths-layout pad
+grid plus encoder macros for the same sound controls.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:

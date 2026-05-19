@@ -64,6 +64,7 @@ class Push2Control:
         from ui.push2_modes.performer import PerformerMode
         from ui.push2_modes.sampler import SamplerMode
         from ui.push2_modes.drum_synth import DrumSynthMode
+        from ui.push2_modes.studio_synth import StudioSynthMode
         from ui.push2_modes.studio import StudioMode
         from ui.push2_modes.stub_modes import (
             DeviceMode, BrowseMode, ClipEditorMode, MasterMode,
@@ -78,6 +79,7 @@ class Push2Control:
             "performer": PerformerMode(self),
             "sampler": SamplerMode(self),
             "drum_synth": DrumSynthMode(self),
+            "studio_synth": StudioSynthMode(self),
             "device": DeviceMode(self),
             "browse": BrowseMode(self),
             "clip_editor": ClipEditorMode(self),

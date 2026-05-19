@@ -65,6 +65,17 @@ from engine.studio_drum_synth import (
     set_drum_synth_kit,
     voice_display_name,
 )
+from engine.studio_synth import (
+    SYNTH_PRESETS,
+    adjust_synth_param,
+    cycle_synth_waveform,
+    ensure_synth_track,
+    note_name,
+    set_synth_preset,
+    synth_params,
+    synth_track_indices,
+    synth_track_role,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -114,6 +125,9 @@ class ClipScreen:
         self._drum_synth_pad_idx = 0
         self._drum_synth_kit_idx = 0
         self._drum_synth_message = ""
+        self._synth_track_choice_idx = 0
+        self._synth_base_note = 48
+        self._synth_message = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -136,6 +150,8 @@ class ClipScreen:
             desired = "sampler"
         elif self._tab == "drum_synth":
             desired = "drum_synth"
+        elif self._tab == "synth":
+            desired = "studio_synth"
         elif self._tab == "clips":
             desired = "session"
         else:
@@ -442,6 +458,136 @@ class ClipScreen:
             value_text = str(value)
         self._drum_synth_message = (
             f"Pad {self._drum_synth_pad_idx + 1} {field}: {value_text}")
+
+    # ── Synth helpers ─────────────────────────────────────────────
+    def _synth_track_indices(self, sess) -> list[int]:
+        return synth_track_indices(sess)
+
+    def _selected_synth_track_index(self, sess) -> int | None:
+        indices = self._synth_track_indices(sess)
+        if not indices:
+            return None
+        self._synth_track_choice_idx %= len(indices)
+        return indices[self._synth_track_choice_idx]
+
+    def _ensure_synth_track(self, sess) -> int:
+        idx = ensure_synth_track(sess, "bass")
+        indices = self._synth_track_indices(sess)
+        if idx in indices:
+            self._synth_track_choice_idx = indices.index(idx)
+        self._rebuild_synth(sess)
+        self._synth_message = f"using synth track {idx + 1}"
+        return idx
+
+    def _rebuild_synth(self, sess) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is not None and hasattr(engine, "_instantiate_instruments"):
+            engine._instantiate_instruments()
+        self._persist_session(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+
+    def _select_synth_track_slot(self, sess, slot_idx: int) -> None:
+        indices = self._synth_track_indices(sess)
+        if not indices:
+            self._ensure_synth_track(sess)
+            indices = self._synth_track_indices(sess)
+        if not indices:
+            return
+        self._synth_track_choice_idx = max(0, min(len(indices) - 1, int(slot_idx)))
+        idx = indices[self._synth_track_choice_idx]
+        self._synth_message = f"selected {sess.tracks[idx].name}"
+
+    def _cycle_synth_track(self, sess, delta: int) -> None:
+        indices = self._synth_track_indices(sess)
+        if not indices:
+            self._ensure_synth_track(sess)
+            indices = self._synth_track_indices(sess)
+        if not indices:
+            return
+        self._synth_track_choice_idx = (
+            self._synth_track_choice_idx + int(delta)) % len(indices)
+        idx = indices[self._synth_track_choice_idx]
+        self._synth_message = f"selected {sess.tracks[idx].name}"
+
+    def _synth_note_on(self, sess, pitch: int, velocity: int = 100) -> None:
+        track_idx = self._selected_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_synth_track(sess)
+        if not self._ensure_audio_started():
+            self._synth_message = "synth audio gated"
+            return
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is None:
+            self._synth_message = "clip engine unavailable"
+            return
+        engine.play_note_live(
+            track_idx,
+            max(0, min(127, int(pitch))),
+            max(1, min(127, int(velocity))),
+            link_beat=0.0,
+        )
+        self._synth_message = f"{sess.tracks[track_idx].name}: {note_name(pitch)}"
+
+    def _synth_note_off(self, sess, pitch: int) -> None:
+        track_idx = self._selected_synth_track_index(sess)
+        engine = getattr(self.app, "clip_engine", None)
+        if track_idx is not None and engine is not None:
+            engine.stop_note_live(track_idx, max(0, min(127, int(pitch))),
+                                  link_beat=0.0)
+
+    def _preview_synth_note(self, sess, pitch: int, velocity: int = 100) -> None:
+        self._synth_note_on(sess, pitch, velocity)
+        track_idx = self._selected_synth_track_index(sess)
+        engine = getattr(self.app, "clip_engine", None)
+        if track_idx is None or engine is None:
+            return
+        import threading
+        timer = threading.Timer(
+            0.32,
+            lambda: engine.stop_note_live(
+                track_idx, max(0, min(127, int(pitch))), link_beat=0.0),
+        )
+        timer.daemon = True
+        timer.start()
+
+    def _stop_synth_notes(self) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is not None:
+            engine.all_notes_off()
+        self._synth_message = "synth notes stopped"
+
+    def _set_synth_preset(self, sess, preset: str) -> None:
+        track_idx = self._selected_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_synth_track(sess)
+        set_synth_preset(sess, track_idx, preset)
+        self._rebuild_synth(sess)
+        self._synth_message = f"{sess.tracks[track_idx].name}: {preset}"
+
+    def _cycle_synth_waveform(self, sess) -> None:
+        track_idx = self._selected_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_synth_track(sess)
+        waveform = cycle_synth_waveform(sess, track_idx)
+        self._rebuild_synth(sess)
+        self._synth_message = f"waveform: {waveform}"
+
+    def _adjust_synth_param(self, sess, field: str, delta: float) -> None:
+        track_idx = self._selected_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_synth_track(sess)
+        params = adjust_synth_param(sess, track_idx, field, delta)
+        self._rebuild_synth(sess)
+        value = params.get(field)
+        if field == "cutoff_hz":
+            value_text = f"{float(value):.0f}Hz"
+        elif isinstance(value, float):
+            value_text = f"{value:.2f}"
+        else:
+            value_text = str(value)
+        self._synth_message = f"{field.replace('_', ' ')}: {value_text}"
 
     def _sp_beat_bass_target(self) -> TrackTarget:
         return TrackTarget(
@@ -1438,6 +1584,134 @@ class ClipScreen:
                      "Create / Use Drum Synth Track",
                      active=track_idx is not None)
 
+    def _draw_synth_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 24, bold=True)
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        indices = self._synth_track_indices(sess)
+        track_idx = self._selected_synth_track_index(sess)
+        track_name = "No synth track"
+        role = "-"
+        params = synth_params(sess, track_idx)
+        preset = "lead"
+        if track_idx is not None and 0 <= track_idx < len(sess.tracks):
+            track = sess.tracks[track_idx]
+            track_name = track.name
+            role = synth_track_role(track)
+            preset = str((track.instrument.params if track.instrument else {})
+                         .get("preset") or preset)
+        surface.blit(font_big.render("Synths", True, (232, 234, 242)),
+                     (20, top + 8))
+        surface.blit(font.render(f"{track_name}  {role}  {preset}", True,
+                                 (150, 162, 184)), (150, top + 16))
+        if self._synth_message:
+            self._draw_text_fit(surface, font_sm, self._synth_message,
+                                (174, 188, 222), (380, top + 19),
+                                surface.get_width() - 400)
+
+        margin = 20
+        gap = 12
+        y = top + 54
+        content_w = surface.get_width() - margin * 2
+        left_w = min(310, int(content_w * 0.40))
+        right_w = content_w - left_w - gap
+        left = pygame.Rect(margin, y, left_w, 276)
+        right = pygame.Rect(margin + left_w + gap, y, right_w, 276)
+        ly = self._panel(surface, left, "Tracks")
+        ry = self._panel(surface, right, "Sound")
+
+        button_h = 34
+        for slot, idx in enumerate(indices[:5]):
+            track = sess.tracks[idx]
+            rect = pygame.Rect(left.x + 14, ly + slot * (button_h + 8),
+                               left.width - 28, button_h)
+            label = f"{idx + 1}. {track.name}"
+            self._button(surface, f"synth_track_{slot}", rect, label,
+                         active=idx == track_idx)
+        if not indices:
+            self._button(surface, "synth_create",
+                         pygame.Rect(left.x + 14, ly, left.width - 28, button_h),
+                         "Create Synth Track")
+        nav_y = left.bottom - 44
+        nav_w = (left.width - 36) // 2
+        self._button(surface, "synth_track_prev",
+                     pygame.Rect(left.x + 14, nav_y, nav_w, 34), "Track-")
+        self._button(surface, "synth_track_next",
+                     pygame.Rect(left.x + 22 + nav_w, nav_y, nav_w, 34),
+                     "Track+")
+
+        info_w = right.width - 28
+        col_w = max(72, (info_w - 24) // 4)
+        col_x = [right.x + 14 + idx * (col_w + 8) for idx in range(4)]
+        self._info_pair(surface, col_x[0], ry, "Waveform",
+                        str(params.get("waveform", "-")), col_w)
+        self._info_pair(surface, col_x[1], ry, "Cutoff",
+                        f"{float(params.get('cutoff_hz', 0)):.0f}Hz", col_w)
+        self._info_pair(surface, col_x[2], ry, "Env",
+                        f"{float(params.get('cutoff_env', 0)):.2f}", col_w)
+        self._info_pair(surface, col_x[3], ry, "Gain",
+                        f"{float(params.get('gain', 0)):.2f}", col_w)
+        self._info_pair(surface, col_x[0], ry + 56, "Attack",
+                        f"{float(params.get('attack', 0)):.2f}s", col_w)
+        self._info_pair(surface, col_x[1], ry + 56, "Decay",
+                        f"{float(params.get('decay', 0)):.2f}s", col_w)
+        self._info_pair(surface, col_x[2], ry + 56, "Sustain",
+                        f"{float(params.get('sustain', 0)):.2f}", col_w)
+        self._info_pair(surface, col_x[3], ry + 56, "Release",
+                        f"{float(params.get('release', 0)):.2f}s", col_w)
+
+        preset_w = (info_w - 24) // 4
+        by = ry + 116
+        for idx, preset_name in enumerate(SYNTH_PRESETS):
+            self._button(
+                surface,
+                f"synth_preset_{preset_name}",
+                pygame.Rect(right.x + 14 + idx * (preset_w + 8), by,
+                            preset_w, 34),
+                preset_name.title(),
+                active=preset == preset_name,
+            )
+        self._button(surface, "synth_wave",
+                     pygame.Rect(right.x + 14 + 3 * (preset_w + 8), by,
+                                 preset_w, 34),
+                     "Wave")
+
+        controls = [
+            ("synth_cutoff_down", "Cut-"),
+            ("synth_cutoff_up", "Cut+"),
+            ("synth_attack_down", "Atk-"),
+            ("synth_attack_up", "Atk+"),
+            ("synth_release_down", "Rel-"),
+            ("synth_release_up", "Rel+"),
+            ("synth_gain_down", "Gain-"),
+            ("synth_gain_up", "Gain+"),
+        ]
+        small_w = (info_w - 7 * 6) // 8
+        for idx, (key, label) in enumerate(controls):
+            self._button(surface, key,
+                         pygame.Rect(right.x + 14 + idx * (small_w + 6),
+                                     by + 46, small_w, 30),
+                         label)
+        self._button(surface, "synth_stop",
+                     pygame.Rect(right.x + 14, by + 88, info_w, 34),
+                     "Stop Synth Notes", danger=True)
+
+        key_top = y + 292
+        key_w = max(36, (content_w - 15 * 6) // 16)
+        for idx in range(16):
+            pitch = self._synth_base_note + idx
+            rect = pygame.Rect(margin + idx * (key_w + 6), key_top,
+                               key_w, 58)
+            black = pitch % 12 in (1, 3, 6, 8, 10)
+            bg = (28, 30, 42) if black else (42, 48, 64)
+            edge = (70, 84, 110)
+            pygame.draw.rect(surface, bg, rect, border_radius=5)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=5)
+            self._buttons[f"synth_key_{pitch}"] = rect
+            self._draw_text_fit(surface, font_sm, note_name(pitch),
+                                (232, 236, 244), (rect.x + 6, rect.y + 21),
+                                rect.width - 12)
+
     def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
                                 top: int, sess) -> None:
         module = module_for_tab(tab)
@@ -1511,6 +1785,9 @@ class ClipScreen:
             return
         if tab == "drum_synth":
             self._draw_drum_synth_tab(surface, top, sess)
+            return
+        if tab == "synth":
+            self._draw_synth_tab(surface, top, sess)
             return
         if tab == "overview":
             self._draw_module_hub(surface, top, sess)
@@ -1890,6 +2167,60 @@ class ClipScreen:
                 return True
             if key == "drum_synth_snap_up":
                 self._adjust_drum_synth_param(sess, "snap", 0.05)
+                return True
+            if key.startswith("synth_track_"):
+                suffix = key.replace("synth_track_", "", 1)
+                if suffix == "prev":
+                    self._cycle_synth_track(sess, -1)
+                elif suffix == "next":
+                    self._cycle_synth_track(sess, 1)
+                else:
+                    self._select_synth_track_slot(sess, int(suffix))
+                return True
+            if key == "synth_create":
+                self._ensure_synth_track(sess)
+                return True
+            if key.startswith("synth_key_"):
+                self._preview_synth_note(sess, int(key.rsplit("_", 1)[1]))
+                return True
+            if key == "synth_stop":
+                self._stop_synth_notes()
+                return True
+            if key == "synth_wave":
+                self._cycle_synth_waveform(sess)
+                return True
+            if key == "synth_preset_bass":
+                self._set_synth_preset(sess, "bass")
+                return True
+            if key == "synth_preset_lead":
+                self._set_synth_preset(sess, "lead")
+                return True
+            if key == "synth_preset_pad":
+                self._set_synth_preset(sess, "pad")
+                return True
+            if key == "synth_cutoff_down":
+                self._adjust_synth_param(sess, "cutoff_hz", -250.0)
+                return True
+            if key == "synth_cutoff_up":
+                self._adjust_synth_param(sess, "cutoff_hz", 250.0)
+                return True
+            if key == "synth_attack_down":
+                self._adjust_synth_param(sess, "attack", -0.025)
+                return True
+            if key == "synth_attack_up":
+                self._adjust_synth_param(sess, "attack", 0.025)
+                return True
+            if key == "synth_release_down":
+                self._adjust_synth_param(sess, "release", -0.05)
+                return True
+            if key == "synth_release_up":
+                self._adjust_synth_param(sess, "release", 0.05)
+                return True
+            if key == "synth_gain_down":
+                self._adjust_synth_param(sess, "gain", -0.05)
+                return True
+            if key == "synth_gain_up":
+                self._adjust_synth_param(sess, "gain", 0.05)
                 return True
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(
