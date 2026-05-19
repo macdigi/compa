@@ -2,10 +2,12 @@ import unittest
 
 from engine.ai_pattern import ChromaticHit, PatternHit, PatternSpec
 from engine.studio_performer import (
+    SP404_VARIATION_STYLES,
     all_notes_off_messages,
     build_midi_events,
     confirmed_sp404_beat_bass_spec,
     generate_sp404_beat_bass_variation,
+    normalize_sp404_variation_style,
 )
 
 
@@ -74,6 +76,7 @@ class StudioPerformerTests(unittest.TestCase):
         specs = [generate_sp404_beat_bass_variation(i) for i in range(1, 7)]
         styles = {spec.tags[-1] for spec in specs}
         self.assertEqual(len(styles), 6)
+        self.assertEqual(styles, set(SP404_VARIATION_STYLES))
         signatures = {
             tuple((hit.pad, hit.step) for hit in spec.hits)
             for spec in specs
@@ -81,6 +84,18 @@ class StudioPerformerTests(unittest.TestCase):
         self.assertEqual(len(signatures), 6)
         bass_counts = {len(spec.chromatic_hits) for spec in specs}
         self.assertGreater(len(bass_counts), 2)
+
+    def test_generated_variation_can_force_genre(self):
+        electro = generate_sp404_beat_bass_variation(1, style="electro")
+        minimal = generate_sp404_beat_bass_variation(1, style="minimal")
+        self.assertEqual(electro.tags[-1], "electro")
+        self.assertEqual(minimal.tags[-1], "minimal")
+        self.assertNotEqual(
+            [(hit.pad, hit.step) for hit in electro.hits],
+            [(hit.pad, hit.step) for hit in minimal.hits],
+        )
+        self.assertEqual(normalize_sp404_variation_style("boom bap", 1),
+                         "busy_boom_bap")
 
 
 if __name__ == "__main__":

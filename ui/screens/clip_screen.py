@@ -13,6 +13,7 @@ from session.track import TrackTarget
 from engine.studio_performer import (
     PatternPerformer,
     SP404_BEAT_BASS_TARGET,
+    SP404_VARIATION_STYLES,
     confirmed_sp404_beat_bass_spec,
     generate_sp404_beat_bass_variation,
 )
@@ -49,6 +50,7 @@ class ClipScreen:
         self._scene_button_w = 0
         self._performer_message = ""
         self._performer_seed = 0
+        self._performer_style_idx = 0
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -209,6 +211,16 @@ class ClipScreen:
     def _set_current_performer_spec(self, spec) -> None:
         setattr(self.app, "studio_performer_spec", spec)
 
+    def _performer_style(self) -> str:
+        if not SP404_VARIATION_STYLES:
+            return "busy_boom_bap"
+        return SP404_VARIATION_STYLES[
+            self._performer_style_idx % len(SP404_VARIATION_STYLES)]
+
+    @staticmethod
+    def _style_label(style: str) -> str:
+        return style.replace("_", " ").title()
+
     def _play_sp_beat_bass(self, sess) -> None:
         target = self._sp_beat_bass_target()
         self._set_selected_track_target(sess, target)
@@ -232,12 +244,20 @@ class ClipScreen:
 
     def _generate_sp_variation(self, sess) -> None:
         self._performer_seed += 1
-        spec = generate_sp404_beat_bass_variation(self._performer_seed)
+        style = self._performer_style()
+        spec = generate_sp404_beat_bass_variation(
+            self._performer_seed, style=style)
         self._set_current_performer_spec(spec)
         status = self._performer_player().status()
-        self._performer_message = f"generated {spec.name}"
+        self._performer_message = f"generated {self._style_label(style)}"
         if status["running"]:
             self._play_sp_beat_bass(sess)
+
+    def _cycle_performer_genre(self) -> None:
+        self._performer_style_idx = (
+            self._performer_style_idx + 1) % len(SP404_VARIATION_STYLES)
+        self._performer_message = (
+            f"genre: {self._style_label(self._performer_style())}")
 
     def _stop_performer(self) -> None:
         self._performer_player().stop()
@@ -503,6 +523,7 @@ class ClipScreen:
         rows = [
             (f"Track {track_idx + 1}", track.name if track is not None else "none"),
             ("Target", target.label or capability.label),
+            ("Genre", self._style_label(self._performer_style())),
             ("Pattern", spec.name),
             ("Tempo", f"follows Studio BPM: {self._performer_bpm(sess):.1f}"),
             ("MIDI", midi_status),
@@ -536,6 +557,9 @@ class ClipScreen:
                      pygame.Rect(x, button_top, 140, 34), "SET SP A1-A6",
                      active=target.key == SP404_BEAT_BASS_TARGET)
         x += 148
+        self._button(surface, "performer_genre",
+                     pygame.Rect(x, button_top, 88, 34), "GENRE +")
+        x += 96
         self._button(surface, "performer_generate",
                      pygame.Rect(x, button_top, 72, 34), "GEN")
         x += 80
@@ -586,6 +610,9 @@ class ClipScreen:
                 return True
             if key == "performer_generate":
                 self._generate_sp_variation(sess)
+                return True
+            if key == "performer_genre":
+                self._cycle_performer_genre()
                 return True
             if key == "performer_mute":
                 self._toggle_performer_mute()

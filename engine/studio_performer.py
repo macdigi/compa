@@ -23,6 +23,32 @@ from engine.ai_pattern import (
 
 
 SP404_BEAT_BASS_TARGET = "external.sp404.a1_a6_beat_bass"
+SP404_VARIATION_STYLES = (
+    "half_time",
+    "electro",
+    "breakbeat",
+    "minimal",
+    "busy_boom_bap",
+    "dub_offbeat",
+)
+
+
+def normalize_sp404_variation_style(style: str | None, seed: int) -> str:
+    if style:
+        key = style.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "half": "half_time",
+            "halftime": "half_time",
+            "boom_bap": "busy_boom_bap",
+            "busy": "busy_boom_bap",
+            "dub": "dub_offbeat",
+            "offbeat": "dub_offbeat",
+        }
+        key = aliases.get(key, key)
+        if key in SP404_VARIATION_STYLES:
+            return key
+    return SP404_VARIATION_STYLES[
+        (max(1, int(seed)) - 1) % len(SP404_VARIATION_STYLES)]
 
 
 @dataclass(frozen=True)
@@ -342,7 +368,10 @@ def confirmed_sp404_beat_bass_spec() -> PatternSpec:
     )
 
 
-def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
+def generate_sp404_beat_bass_variation(
+    seed: int,
+    style: str | None = None,
+) -> PatternSpec:
     """Generate a distinct SP A1-A6 beat+bass variation.
 
     GEN should feel like trying another idea, not nudging the same loop. Seeds
@@ -351,15 +380,7 @@ def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
     """
 
     rng = random.Random(int(seed))
-    styles = (
-        "half_time",
-        "electro",
-        "breakbeat",
-        "minimal",
-        "busy_boom_bap",
-        "dub_offbeat",
-    )
-    style = styles[(max(1, int(seed)) - 1) % len(styles)]
+    style = normalize_sp404_variation_style(style, seed)
     hits: list[PatternHit] = []
 
     def add(pad: int, step: int, velocity: int, duration: float,
