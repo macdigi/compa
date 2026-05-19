@@ -91,15 +91,33 @@ class PerformerMode(Mode):
         sess = self.control.session
         takes = screen._performer_takes(sess)
         selected = getattr(screen, "_performer_take_idx", 0)
+        status = screen._performer_player().status()
+        playing = status.get("pattern_slot") if status.get("running") else None
+        queued = status.get("queued_slot")
+        chain_slots = {
+            slot for slot in status.get("sequence_slots", [])
+            if slot is not None
+        }
         out: dict[tuple[int, int], tuple[int, int]] = {}
         for col in range(8):
             saved = bool(takes[col])
-            color = C.COLOR_GREEN if col == selected else (
-                C.COLOR_BLUE if saved else C.COLOR_DARK_GRAY)
-            out[(col, 0)] = (color, C.ANIM_STATIC)
+            if col == queued:
+                color, anim = C.COLOR_BLUE, C.ANIM_BLINK_8TH
+            elif col == playing:
+                color, anim = C.COLOR_GREEN, C.ANIM_PULSE_QUARTER
+            elif col == selected:
+                color, anim = C.COLOR_GREEN, C.ANIM_STATIC
+            elif col in chain_slots:
+                color, anim = C.COLOR_BLUE, C.ANIM_STATIC
+            elif saved:
+                color, anim = C.COLOR_BLUE, C.ANIM_STATIC
+            else:
+                color, anim = C.COLOR_DARK_GRAY, C.ANIM_STATIC
+            out[(col, 0)] = (color, anim)
             out[(col, 1)] = (
-                C.COLOR_GREEN if saved else C.COLOR_DARK_GRAY,
-                C.ANIM_STATIC,
+                C.COLOR_BLUE if col == queued else (
+                    C.COLOR_GREEN if saved else C.COLOR_DARK_GRAY),
+                C.ANIM_BLINK_8TH if col == queued else C.ANIM_STATIC,
             )
         return out
 
@@ -148,15 +166,38 @@ class PerformerMode(Mode):
             state = "QUEUED"
         elif status.get("sequence_enabled"):
             state = "CHAIN"
+        playing = screen._slot_label(
+            status.get("pattern_slot") if status.get("running") else None,
+            status.get("pattern_label") or "")
+        if not status.get("running"):
+            playing = "-"
+        next_slot = status.get("queued_slot")
+        next_label = screen._slot_label(
+            next_slot, status.get("queued_pattern_label") or "")
+        if next_slot is None and status.get("sequence_enabled"):
+            next_slot = status.get("sequence_next_slot")
+            next_label = screen._slot_label(
+                next_slot, status.get("sequence_next_label") or "")
+        if not status.get("running") and next_slot is None:
+            next_label = "-"
         d.text((12, 5), "PERFORMER", fill=(236, 240, 248), font=f_big)
         d.text((150, 10), f"{screen._performer_bpm(sess):.1f} BPM",
                fill=(158, 174, 206), font=f_med)
         d.text((12, 34), spec.name[:78], fill=(158, 174, 206),
                font=f_med)
         d.text((12, 56),
-               f"{state}   {screen._take_label(sess)[:24]}   "
-               f"{screen._style_label(screen._performer_style())}",
+               f"{state}  Play {playing[:10]}  Next {next_label[:10]}  "
+               f"Chain {screen._chain_label(status)}",
                fill=(218, 224, 238), font=f_med)
+        progress = max(0.0, min(1.0, float(status.get("loop_progress") or 0.0)))
+        d.rectangle((12, 76, w - 12, 82), outline=(48, 56, 78))
+        if progress > 0.0:
+            d.rectangle((12, 76, 12 + int((w - 24) * progress), 82),
+                        fill=(88, 190, 150))
+        remaining = float(status.get("loop_remaining") or 0.0)
+        if status.get("running"):
+            d.text((w - 120, 84), f"{remaining:.1f}s next",
+                   fill=(144, 158, 190), font=f_sm)
         labels = [
             ("SWING", f"{feel['swing']:.0f}"),
             ("HUMAN", f"{feel['humanize']:.0f}"),
@@ -166,11 +207,11 @@ class PerformerMode(Mode):
         ]
         for i, (title, value) in enumerate(labels):
             x = 12 + i * 112
-            d.rectangle((x, 82, x + 96, 124), outline=(46, 54, 78))
-            d.text((x + 8, 87), title, fill=(144, 158, 190), font=f_sm)
-            d.text((x + 8, 104), value, fill=(240, 242, 248), font=f_med)
+            d.rectangle((x, 94, x + 96, 128), outline=(46, 54, 78))
+            d.text((x + 8, 98), title, fill=(144, 158, 190), font=f_sm)
+            d.text((x + 8, 112), value, fill=(240, 242, 248), font=f_med)
         bottom = ["PLAY", "STOP", "GEN", "SAVE", "QUEUE", "CHAIN", "REC 1X", "STEP"]
         for i, label in enumerate(bottom):
             x = 12 + i * 116
-            d.text((x, 132), label, fill=(178, 198, 236), font=f_sm)
+            d.text((x, 134), label, fill=(178, 198, 236), font=f_sm)
         return img

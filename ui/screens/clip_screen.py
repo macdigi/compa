@@ -301,6 +301,23 @@ class ClipScreen:
             return f"Take {idx}: empty"
         return f"Take {idx}: {str(take.get('name', 'saved'))[:42]}"
 
+    @staticmethod
+    def _slot_label(slot, fallback: str = "") -> str:
+        if slot is None:
+            return fallback or "-"
+        try:
+            return f"Take {int(slot) + 1}"
+        except Exception:
+            return fallback or "-"
+
+    @staticmethod
+    def _chain_label(status: dict) -> str:
+        count = int(status.get("sequence_count") or 0)
+        pos = int(status.get("sequence_position") or 0)
+        if count <= 0 or pos <= 0:
+            return "Off"
+        return f"{pos}/{count}"
+
     def _persist_session(self, sess) -> None:
         ctrl = getattr(self.app, "push2_control", None)
         if ctrl is not None and hasattr(ctrl, "_persist"):
@@ -335,33 +352,41 @@ class ClipScreen:
     def _load_performer_take(self, sess) -> None:
         take = self._current_take(sess)
         spec = spec_from_performer_take(take)
+        take_idx = self._performer_take_idx
         if spec is None:
             self._performer_message = (
-                f"Take {self._performer_take_idx + 1} is empty")
+                f"Take {take_idx + 1} is empty")
             return
         self._set_performer_feel(feel_from_performer_take(take))
         self._set_current_performer_spec(spec)
         player = self._performer_player()
-        if player.status()["running"] and player.queue_spec(spec):
+        label = f"Take {take_idx + 1}"
+        if player.status()["running"] and player.queue_spec(
+                spec, pattern_label=label, take_slot=take_idx):
             self._performer_message = (
-                f"queued Take {self._performer_take_idx + 1}: {spec.name}")
+                f"queued {label}: {spec.name}")
         else:
-            self._play_sp_beat_bass(sess)
+            self._play_sp_beat_bass(
+                sess, pattern_label=label, take_slot=take_idx)
             self._performer_message = (
-                f"playing Take {self._performer_take_idx + 1}: {spec.name}")
+                f"playing {label}: {spec.name}")
 
-    def _saved_take_specs_from_selection(self, sess) -> list:
+    def _saved_take_chain_from_selection(self, sess) -> tuple[list, list[str], list[int]]:
         takes = self._performer_takes(sess)
         ordered = (
             list(range(self._performer_take_idx, MAX_PERFORMER_TAKES))
             + list(range(0, self._performer_take_idx))
         )
         specs = []
+        labels = []
+        slots = []
         for idx in ordered:
             spec = spec_from_performer_take(takes[idx])
             if spec is not None:
                 specs.append(spec)
-        return specs
+                labels.append(f"Take {idx + 1}")
+                slots.append(idx)
+        return specs, labels, slots
 
     def _toggle_take_chain(self, sess) -> None:
         player = self._performer_player()
@@ -370,17 +395,20 @@ class ClipScreen:
             player.clear_sequence()
             self._performer_message = "take chain off"
             return
-        specs = self._saved_take_specs_from_selection(sess)
+        specs, labels, slots = self._saved_take_chain_from_selection(sess)
         if not specs:
             self._performer_message = "no saved takes to chain"
             return
         self._set_performer_feel(feel_from_performer_take(self._current_take(sess)))
         self._set_current_performer_spec(specs[0])
         if status["running"]:
-            player.queue_spec(specs[0])
+            player.queue_spec(
+                specs[0], pattern_label=labels[0], take_slot=slots[0])
         else:
-            self._play_sp_beat_bass(sess)
-        player.set_sequence(specs, start_index=0)
+            self._play_sp_beat_bass(
+                sess, pattern_label=labels[0], take_slot=slots[0])
+        player.set_sequence(
+            specs, labels=labels, take_slots=slots, start_index=0)
         self._performer_message = f"take chain on: {len(specs)} takes"
 
     def _step_grids_path(self) -> str:
@@ -418,7 +446,9 @@ class ClipScreen:
             self._performer_message = "step export failed"
 
     def _play_sp_beat_bass(self, sess, *, loops: int = 0,
-                           message_prefix: str = "playing") -> None:
+                           message_prefix: str = "playing",
+                           pattern_label: str = "",
+                           take_slot: int | None = None) -> None:
         target = self._sp_beat_bass_target()
         self._set_selected_track_target(sess, target)
         sender, port_label = self._midi_sender_for_target(target.key)
@@ -435,6 +465,8 @@ class ClipScreen:
                 loops=loops,
                 bpm_provider=lambda: self._performer_bpm(sess),
                 feel_provider=lambda: self._performer_feel(),
+                pattern_label=pattern_label or spec.name,
+                take_slot=take_slot,
             )
             self._performer_message = f"{message_prefix} {spec.name}"
         except Exception as exc:
@@ -455,7 +487,8 @@ class ClipScreen:
         status = self._performer_player().status()
         self._performer_message = f"generated {self._style_label(style)}"
         if status["running"]:
-            self._performer_player().queue_spec(spec)
+            self._performer_player().queue_spec(
+                spec, pattern_label=self._style_label(style))
             self._performer_message = (
                 f"queued {self._style_label(style)} variation")
 
@@ -475,11 +508,20 @@ class ClipScreen:
 
     def _button(self, surface: pygame.Surface, key: str, rect: pygame.Rect,
                 label: str, *, active: bool = False,
-                danger: bool = False) -> None:
+                danger: bool = False, tone: str = "") -> None:
         self._buttons[key] = rect
         if danger:
             bg = (108, 36, 42)
             edge = (210, 92, 100)
+        elif tone == "queued":
+            bg = (40, 52, 94)
+            edge = (100, 142, 238)
+        elif tone == "chain":
+            bg = (74, 62, 34)
+            edge = (214, 166, 78)
+        elif tone == "playing":
+            bg = (36, 92, 66)
+            edge = (96, 224, 156)
         elif active:
             bg = (42, 88, 78)
             edge = (90, 210, 170)
@@ -489,6 +531,9 @@ class ClipScreen:
         pygame.draw.rect(surface, bg, rect, border_radius=4)
         pygame.draw.rect(surface, edge, rect, 1, border_radius=4)
         font = pygame.font.SysFont("Arial", 13, bold=True)
+        label = str(label)
+        while len(label) > 3 and font.size(label)[0] > rect.width - 10:
+            label = label[:-4].rstrip() + "..."
         txt = font.render(label, True, (238, 238, 244))
         surface.blit(txt, txt.get_rect(center=rect.center))
 
@@ -760,16 +805,32 @@ class ClipScreen:
 
         state = "Muted" if status["muted"] else (
             "Playing" if status["running"] else "Stopped")
+        if status.get("sequence_enabled"):
+            state = f"Chain {self._chain_label(status)}"
         if status.get("queued_pattern_name"):
-            state = f"Queued: {status['queued_pattern_name'][:24]}"
-        elif status.get("sequence_enabled"):
-            state = (
-                f"Chain {status.get('sequence_position', 0)}/"
-                f"{status.get('sequence_count', 0)}")
-        elif self._performer_message:
-            state = self._performer_message[:42]
+            state = "Queued next loop"
         elif status["last_error"]:
             state = status["last_error"][:42]
+        playing_slot = (
+            status.get("pattern_slot") if status.get("running") else None)
+        queued_slot = status.get("queued_slot")
+        chain_slots = [
+            slot for slot in status.get("sequence_slots", [])
+            if slot is not None
+        ]
+        next_slot = queued_slot
+        next_label = self._slot_label(
+            queued_slot, status.get("queued_pattern_label") or "")
+        if queued_slot is None and status.get("sequence_enabled"):
+            next_slot = status.get("sequence_next_slot")
+            next_label = self._slot_label(
+                next_slot, status.get("sequence_next_label") or "")
+        if not status.get("running") and queued_slot is None:
+            next_label = "-"
+        playing_label = self._slot_label(
+            playing_slot, status.get("pattern_label") or spec.name)
+        if not status.get("running"):
+            playing_label = "-"
 
         surface.blit(font_big.render("Performer", True, (236, 240, 248)),
                      (left_x, top + 6))
@@ -781,41 +842,81 @@ class ClipScreen:
         surface.blit(bpm_surf, (left_x + left_w - bpm_surf.get_width(),
                                 top + 12))
 
-        current_rect = pygame.Rect(left_x, y, left_w, 118)
+        current_rect = pygame.Rect(left_x, y, left_w, 146)
         cy = self._panel(surface, current_rect, "Current Pattern")
-        pair_w = (left_w - 40) // 3
+        pair_w = (left_w - 58) // 4
         self._info_pair(surface, left_x + 14, cy, "Target",
                         target.label or capability.label, pair_w)
         self._info_pair(surface, left_x + 24 + pair_w, cy, "State",
                         state, pair_w)
-        self._info_pair(surface, left_x + 34 + pair_w * 2, cy, "MIDI",
-                        midi_status, pair_w)
-        cy += 52
+        self._info_pair(surface, left_x + 34 + pair_w * 2, cy, "Playing",
+                        playing_label, pair_w)
+        self._info_pair(surface, left_x + 44 + pair_w * 3, cy, "Next",
+                        next_label, pair_w)
+        bar_y = cy + 56
+        bar_rect = pygame.Rect(left_x + 14, bar_y, left_w - 28, 12)
+        pygame.draw.rect(surface, (28, 31, 44), bar_rect, border_radius=4)
+        progress = max(0.0, min(1.0, float(status.get("loop_progress") or 0.0)))
+        fill_w = int(bar_rect.width * progress)
+        if fill_w > 0:
+            pygame.draw.rect(
+                surface, (88, 190, 150),
+                pygame.Rect(bar_rect.x, bar_rect.y, fill_w, bar_rect.height),
+                border_radius=4)
+        pygame.draw.rect(surface, (62, 70, 94), bar_rect, 1, border_radius=4)
+        loop_text = "Loop stopped"
+        if status.get("running"):
+            loop_text = (
+                f"Loop {status.get('loop_count', 0)}  "
+                f"{float(status.get('loop_remaining') or 0.0):.1f}s to next loop")
+        surface.blit(font_sm.render(loop_text, True, (150, 162, 184)),
+                     (left_x + 14, bar_y + 18))
+        if self._performer_message:
+            surface.blit(font_sm.render(self._performer_message[:70], True,
+                                        (174, 188, 222)),
+                         (left_x + 220, bar_y + 18))
+        cy += 84
+        row_x = left_x + 14
+        row_w = left_w - 28
+        row_gap = 8
+        midi_w = max(86, min(126, row_w // 4))
+        action_w = (row_w - midi_w - row_gap * 3) // 3
+        self._info_pair(surface, row_x, cy, "MIDI", midi_status, midi_w)
         self._button(surface, "performer_assign_sp",
-                     pygame.Rect(left_x + 14, cy, 146, 34), "Use SP A1-A6",
+                     pygame.Rect(row_x + midi_w + row_gap, cy, action_w, 34),
+                     "Use SP A1-A6",
                      active=target.key == SP404_BEAT_BASS_TARGET)
         self._button(surface, "performer_genre",
-                     pygame.Rect(left_x + 170, cy, 168, 34),
+                     pygame.Rect(row_x + midi_w + row_gap * 2 + action_w,
+                                 cy, action_w, 34),
                      f"Genre: {self._style_label(self._performer_style())}")
         self._button(surface, "performer_generate",
-                     pygame.Rect(left_x + 348, cy, 132, 34), "Generate")
+                     pygame.Rect(row_x + midi_w + row_gap * 3 + action_w * 2,
+                                 cy, action_w, 34), "Generate")
 
-        transport_rect = pygame.Rect(left_x, y + 130, left_w, 86)
+        transport_rect = pygame.Rect(left_x, y + 158, left_w, 86)
         ty = self._panel(surface, transport_rect, "Transport")
+        row_x = left_x + 14
+        row_w = left_w - 28
+        transport_gap = 8
+        transport_w = (row_w - transport_gap * 3) // 4
         self._button(surface, "performer_play_v3",
-                     pygame.Rect(left_x + 14, ty, 132, 38), "Play Loop",
+                     pygame.Rect(row_x, ty, transport_w, 38), "Play Loop",
                      active=bool(status["running"]))
         self._button(surface, "performer_stop",
-                     pygame.Rect(left_x + 156, ty, 104, 38), "Stop",
+                     pygame.Rect(row_x + transport_w + transport_gap, ty,
+                                 transport_w, 38), "Stop",
                      danger=True)
         self._button(surface, "performer_mute",
-                     pygame.Rect(left_x + 270, ty, 124, 38),
+                     pygame.Rect(row_x + (transport_w + transport_gap) * 2,
+                                 ty, transport_w, 38),
                      "Unmute" if status["muted"] else "Mute",
                      active=bool(status["muted"]))
         self._button(surface, "performer_record_once",
-                     pygame.Rect(left_x + 404, ty, 138, 38), "Record Once")
+                     pygame.Rect(row_x + (transport_w + transport_gap) * 3,
+                                 ty, transport_w, 38), "Record Once")
 
-        takes_rect = pygame.Rect(left_x, y + 228, left_w, 224)
+        takes_rect = pygame.Rect(left_x, y + 256, left_w, 226)
         ky = self._panel(surface, takes_rect, "Take Bank")
         takes = self._performer_takes(sess)
         slot_gap = 8
@@ -827,27 +928,43 @@ class ClipScreen:
             sy = ky + row * 44
             take = takes[idx]
             label = f"Take {idx + 1}"
+            tone = ""
             if take:
-                label += " saved"
+                label += " Saved"
+            if idx == playing_slot:
+                label = f"Take {idx + 1} Playing"
+                tone = "playing"
+            elif idx == queued_slot:
+                label = f"Take {idx + 1} Queued"
+                tone = "queued"
+            elif idx in chain_slots:
+                label = f"Take {idx + 1} Chain"
+                tone = "chain"
             self._button(
                 surface,
                 f"performer_take_select_{idx}",
                 pygame.Rect(sx, sy, slot_w, 36),
                 label,
                 active=idx == self._performer_take_idx,
+                tone=tone,
             )
         ay = ky + 94
         recall_label = "Queue Take" if status["running"] else "Play Take"
+        action_x = left_x + 14
+        action_w = (left_w - 28 - slot_gap * 3) // 4
         self._button(surface, "performer_take_save",
-                     pygame.Rect(left_x + 14, ay, 126, 36), "Save Take")
+                     pygame.Rect(action_x, ay, action_w, 36), "Save Take")
         self._button(surface, "performer_take_load",
-                     pygame.Rect(left_x + 150, ay, 130, 36), recall_label,
+                     pygame.Rect(action_x + action_w + slot_gap, ay,
+                                 action_w, 36), recall_label,
                      active=bool(self._current_take(sess)))
         self._button(surface, "performer_take_chain",
-                     pygame.Rect(left_x + 290, ay, 136, 36), "Chain Takes",
+                     pygame.Rect(action_x + (action_w + slot_gap) * 2, ay,
+                                 action_w, 36), "Chain Takes",
                      active=bool(status.get("sequence_enabled")))
         self._button(surface, "performer_step_export",
-                     pygame.Rect(left_x + 436, ay, 140, 36), "Send To Steps")
+                     pygame.Rect(action_x + (action_w + slot_gap) * 3, ay,
+                                 action_w, 36), "Send To Steps")
 
         feel_rect = pygame.Rect(right_x, y, right_w, 260)
         fy = self._panel(surface, feel_rect, "Feel Controls")

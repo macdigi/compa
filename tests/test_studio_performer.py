@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from engine.ai_pattern import ChromaticHit, PatternHit, PatternSpec
@@ -177,8 +178,11 @@ class StudioPerformerTests(unittest.TestCase):
                 loops=1,
                 bpm=300.0,
             )
-            self.assertTrue(player.queue_spec(second))
+            self.assertTrue(player.queue_spec(
+                second, pattern_label="Take 2", take_slot=1))
             self.assertEqual(player.status()["queued_pattern_name"], "second")
+            self.assertEqual(player.status()["queued_pattern_label"], "Take 2")
+            self.assertEqual(player.status()["queued_slot"], 1)
         finally:
             player.stop()
 
@@ -194,13 +198,53 @@ class StudioPerformerTests(unittest.TestCase):
             hits=[PatternHit(pad=1, step=1, velocity=100)],
         )
         player = PatternPerformer()
-        self.assertTrue(player.set_sequence([first, second], start_index=1))
+        self.assertTrue(player.set_sequence(
+            [first, second],
+            labels=["Take 1", "Take 2"],
+            take_slots=[0, 1],
+            start_index=1,
+        ))
         status = player.status()
         self.assertTrue(status["sequence_enabled"])
         self.assertEqual(status["sequence_count"], 2)
         self.assertEqual(status["sequence_position"], 2)
+        self.assertEqual(status["sequence_label"], "Take 2")
+        self.assertEqual(status["sequence_slot"], 1)
+        self.assertEqual(status["sequence_next_position"], 1)
+        self.assertEqual(status["sequence_next_slot"], 0)
         player.clear_sequence()
         self.assertFalse(player.status()["sequence_enabled"])
+
+    def test_performer_reports_loop_progress_and_active_slot(self):
+        spec = PatternSpec(
+            name="progress",
+            prompt="progress",
+            bars=1,
+            bpm=60.0,
+            hits=[PatternHit(pad=0, step=0, velocity=100)],
+        )
+        messages = []
+        player = PatternPerformer()
+        try:
+            player.play(
+                spec,
+                send_message=messages.append,
+                target_key="external.sp404.a1_a6_beat_bass",
+                loops=1,
+                bpm=60.0,
+                pattern_label="Take 4",
+                take_slot=3,
+            )
+            time.sleep(0.02)
+            status = player.status()
+            self.assertTrue(status["running"])
+            self.assertEqual(status["pattern_label"], "Take 4")
+            self.assertEqual(status["pattern_slot"], 3)
+            self.assertGreater(status["loop_seconds"], 0.0)
+            self.assertGreaterEqual(status["loop_progress"], 0.0)
+            self.assertLessEqual(status["loop_progress"], 1.0)
+        finally:
+            player.stop()
 
 
 if __name__ == "__main__":

@@ -215,36 +215,100 @@ class PatternPerformer:
         self._events: list[MidiEvent] = []
         self._target_key = ""
         self._pattern_name = ""
+        self._pattern_label = ""
+        self._pattern_slot: int | None = None
         self._port_label = ""
         self._last_error = ""
         self._running = False
         self._last_bpm = 0.0
         self._last_feel = normalized_performer_feel()
         self._loop_count = 0
+        self._loop_started_at = 0.0
+        self._loop_seconds = 0.0
         self._queued_spec: PatternSpec | None = None
         self._queued_pattern_name = ""
+        self._queued_pattern_label = ""
+        self._queued_slot: int | None = None
         self._sequence_specs: list[PatternSpec] = []
+        self._sequence_labels: list[str] = []
+        self._sequence_slots: list[int | None] = []
         self._sequence_enabled = False
         self._sequence_index = 0
 
     def status(self) -> dict:
         with self._lock:
-            return {
+            running = self._running
+            loop_started_at = self._loop_started_at
+            loop_seconds = self._loop_seconds
+            sequence_slot = (
+                self._sequence_slots[self._sequence_index]
+                if self._sequence_specs
+                and self._sequence_index < len(self._sequence_slots)
+                else None
+            )
+            sequence_label = (
+                self._sequence_labels[self._sequence_index]
+                if self._sequence_specs
+                and self._sequence_index < len(self._sequence_labels)
+                else ""
+            )
+            sequence_next_index = (
+                (self._sequence_index + 1) % len(self._sequence_specs)
+                if self._sequence_enabled and self._sequence_specs
+                else None
+            )
+            sequence_next_slot = (
+                self._sequence_slots[sequence_next_index]
+                if sequence_next_index is not None
+                and sequence_next_index < len(self._sequence_slots)
+                else None
+            )
+            sequence_next_label = (
+                self._sequence_labels[sequence_next_index]
+                if sequence_next_index is not None
+                and sequence_next_index < len(self._sequence_labels)
+                else ""
+            )
+            data = {
                 "running": self._running,
                 "muted": self._mute_event.is_set(),
                 "target_key": self._target_key,
                 "pattern_name": self._pattern_name,
+                "pattern_label": self._pattern_label or self._pattern_name,
+                "pattern_slot": self._pattern_slot,
                 "port_label": self._port_label,
                 "last_error": self._last_error,
                 "last_bpm": self._last_bpm,
                 "last_feel": dict(self._last_feel),
                 "loop_count": self._loop_count,
+                "loop_seconds": self._loop_seconds,
                 "queued_pattern_name": self._queued_pattern_name,
+                "queued_pattern_label": (
+                    self._queued_pattern_label or self._queued_pattern_name),
+                "queued_slot": self._queued_slot,
                 "sequence_enabled": self._sequence_enabled,
                 "sequence_count": len(self._sequence_specs),
                 "sequence_position": self._sequence_index + 1
                 if self._sequence_specs else 0,
+                "sequence_label": sequence_label,
+                "sequence_slot": sequence_slot,
+                "sequence_next_position": (
+                    sequence_next_index + 1
+                    if sequence_next_index is not None else 0),
+                "sequence_next_label": sequence_next_label,
+                "sequence_next_slot": sequence_next_slot,
+                "sequence_slots": list(self._sequence_slots),
             }
+        progress = 0.0
+        remaining = 0.0
+        if running and loop_seconds > 0.0 and loop_started_at > 0.0:
+            elapsed = max(0.0, time.monotonic() - loop_started_at)
+            elapsed = min(loop_seconds, elapsed)
+            progress = elapsed / loop_seconds
+            remaining = max(0.0, loop_seconds - elapsed)
+        data["loop_progress"] = progress
+        data["loop_remaining"] = remaining
+        return data
 
     def play(
         self,
@@ -258,6 +322,8 @@ class PatternPerformer:
         bpm_provider: Callable[[], float] | None = None,
         feel_provider: Callable[[], dict] | None = None,
         velocity_scale: float = 1.0,
+        pattern_label: str = "",
+        take_slot: int | None = None,
     ) -> None:
         current_bpm = float(bpm_provider() if bpm_provider else (bpm or spec.bpm))
         feel = self._current_feel(spec, feel_provider)
@@ -272,7 +338,8 @@ class PatternPerformer:
         thread = threading.Thread(
             target=self._run,
             args=(spec, send_message, stop_event, mute_event, loops,
-                  current_bpm, bpm_provider, feel_provider, velocity_scale),
+                  current_bpm, bpm_provider, feel_provider, velocity_scale,
+                  pattern_label or spec.name, self._normalized_slot(take_slot)),
             daemon=True,
             name="studio-pattern-performer",
         )
@@ -284,20 +351,34 @@ class PatternPerformer:
             self._events = events
             self._target_key = target_key
             self._pattern_name = spec.name
+            self._pattern_label = pattern_label or spec.name
+            self._pattern_slot = self._normalized_slot(take_slot)
             self._port_label = port_label
             self._last_error = ""
             self._running = True
             self._last_bpm = current_bpm
             self._last_feel = feel
             self._loop_count = 0
+            self._loop_started_at = 0.0
+            self._loop_seconds = 0.0
             self._queued_spec = None
             self._queued_pattern_name = ""
+            self._queued_pattern_label = ""
+            self._queued_slot = None
             self._sequence_specs = []
+            self._sequence_labels = []
+            self._sequence_slots = []
             self._sequence_enabled = False
             self._sequence_index = 0
         thread.start()
 
-    def queue_spec(self, spec: PatternSpec) -> bool:
+    def queue_spec(
+        self,
+        spec: PatternSpec,
+        *,
+        pattern_label: str = "",
+        take_slot: int | None = None,
+    ) -> bool:
         """Queue a new spec to take over at the next loop boundary."""
 
         events = build_midi_events(spec)
@@ -308,6 +389,8 @@ class PatternPerformer:
                 return False
             self._queued_spec = spec
             self._queued_pattern_name = spec.name
+            self._queued_pattern_label = pattern_label or spec.name
+            self._queued_slot = self._normalized_slot(take_slot)
             self._last_error = ""
             return True
 
@@ -315,14 +398,32 @@ class PatternPerformer:
         self,
         specs: list[PatternSpec],
         *,
+        labels: list[str] | None = None,
+        take_slots: list[int | None] | None = None,
         start_index: int = 0,
         enabled: bool = True,
     ) -> bool:
-        playable = [spec for spec in specs if build_midi_events(spec)]
+        playable: list[PatternSpec] = []
+        playable_labels: list[str] = []
+        playable_slots: list[int | None] = []
+        for idx, spec in enumerate(specs):
+            if not build_midi_events(spec):
+                continue
+            playable.append(spec)
+            label = ""
+            if labels is not None and idx < len(labels):
+                label = str(labels[idx] or "")
+            playable_labels.append(label or spec.name)
+            slot = None
+            if take_slots is not None and idx < len(take_slots):
+                slot = self._normalized_slot(take_slots[idx])
+            playable_slots.append(slot)
         if not playable:
             return False
         with self._lock:
             self._sequence_specs = playable
+            self._sequence_labels = playable_labels
+            self._sequence_slots = playable_slots
             self._sequence_index = max(
                 0, min(len(playable) - 1, int(start_index)))
             self._sequence_enabled = bool(enabled)
@@ -331,6 +432,8 @@ class PatternPerformer:
     def clear_sequence(self) -> None:
         with self._lock:
             self._sequence_specs = []
+            self._sequence_labels = []
+            self._sequence_slots = []
             self._sequence_enabled = False
             self._sequence_index = 0
 
@@ -348,9 +451,15 @@ class PatternPerformer:
         with self._lock:
             self._queued_spec = None
             self._queued_pattern_name = ""
+            self._queued_pattern_label = ""
+            self._queued_slot = None
             self._sequence_specs = []
+            self._sequence_labels = []
+            self._sequence_slots = []
             self._sequence_enabled = False
             self._sequence_index = 0
+            self._loop_started_at = 0.0
+            self._loop_seconds = 0.0
             if thread is self._thread:
                 self._running = False
 
@@ -381,9 +490,13 @@ class PatternPerformer:
         bpm_provider: Callable[[], float] | None,
         feel_provider: Callable[[], dict] | None,
         velocity_scale: float,
+        pattern_label: str,
+        take_slot: int | None,
     ) -> None:
         loop_idx = 0
         current_spec = spec
+        current_label = pattern_label or spec.name
+        current_slot = self._normalized_slot(take_slot)
         events: list[MidiEvent] = []
         try:
             while not stop_event.is_set() and (loops <= 0 or loop_idx < loops):
@@ -399,13 +512,17 @@ class PatternPerformer:
                     humanize_seed=loop_idx,
                     **feel)
                 loop_seconds = current_spec.length_beats * 60.0 / max(1.0, current_bpm)
+                start_time = time.monotonic()
                 with self._lock:
                     self._events = events
                     self._pattern_name = current_spec.name
+                    self._pattern_label = current_label or current_spec.name
+                    self._pattern_slot = current_slot
                     self._last_bpm = current_bpm
                     self._last_feel = feel
                     self._loop_count = loop_idx + 1
-                start_time = time.monotonic()
+                    self._loop_started_at = start_time
+                    self._loop_seconds = loop_seconds
                 for event in events:
                     if stop_event.is_set():
                         break
@@ -425,19 +542,34 @@ class PatternPerformer:
                     break
                 with self._lock:
                     queued = self._queued_spec
+                    queued_label = self._queued_pattern_label
+                    queued_slot = self._queued_slot
                     if queued is not None:
                         self._queued_spec = None
                         self._queued_pattern_name = ""
+                        self._queued_pattern_label = ""
+                        self._queued_slot = None
                     sequence_spec = None
+                    sequence_label = ""
+                    sequence_slot = None
                     if queued is None and self._sequence_enabled and self._sequence_specs:
                         self._sequence_index = (
                             self._sequence_index + 1
                         ) % len(self._sequence_specs)
-                        sequence_spec = self._sequence_specs[self._sequence_index]
+                        idx = self._sequence_index
+                        sequence_spec = self._sequence_specs[idx]
+                        if idx < len(self._sequence_labels):
+                            sequence_label = self._sequence_labels[idx]
+                        if idx < len(self._sequence_slots):
+                            sequence_slot = self._sequence_slots[idx]
                 if queued is not None:
                     current_spec = queued
+                    current_label = queued_label or queued.name
+                    current_slot = queued_slot
                 elif sequence_spec is not None:
                     current_spec = sequence_spec
+                    current_label = sequence_label or sequence_spec.name
+                    current_slot = sequence_slot
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -447,9 +579,15 @@ class PatternPerformer:
                 self._running = False
                 self._queued_spec = None
                 self._queued_pattern_name = ""
+                self._queued_pattern_label = ""
+                self._queued_slot = None
                 self._sequence_specs = []
+                self._sequence_labels = []
+                self._sequence_slots = []
                 self._sequence_enabled = False
                 self._sequence_index = 0
+                self._loop_started_at = 0.0
+                self._loop_seconds = 0.0
 
     @staticmethod
     def _send_all_notes_off(
@@ -472,6 +610,18 @@ class PatternPerformer:
         except Exception:
             feel = None
         return normalized_performer_feel(feel, spec=spec)
+
+    @staticmethod
+    def _normalized_slot(slot: int | None) -> int | None:
+        if slot is None:
+            return None
+        try:
+            value = int(slot)
+        except Exception:
+            return None
+        if 0 <= value < MAX_PERFORMER_TAKES:
+            return value
+        return None
 
 
 def confirmed_sp404_beat_bass_spec() -> PatternSpec:
