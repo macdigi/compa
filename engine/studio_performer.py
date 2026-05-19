@@ -39,6 +39,18 @@ DEFAULT_GENERATOR_CONTROLS = {
     "bass_activity": 60.0,
     "variation": 50.0,
 }
+PERFORMER_LANES = ("kick", "snare", "hats", "bass")
+PERFORMER_LANE_LABELS = {
+    "kick": "Kick",
+    "snare": "Snare/Clap",
+    "hats": "Hats",
+    "bass": "Bass",
+}
+DEFAULT_LANE_CONTROL = {
+    "gate": 1.0,
+    "level": 1.0,
+    "mute": False,
+}
 
 
 def normalized_generator_controls(controls: dict | None = None) -> dict:
@@ -53,8 +65,44 @@ def normalized_generator_controls(controls: dict | None = None) -> dict:
     return normalized
 
 
+def normalized_lane_controls(controls: dict | None = None) -> dict:
+    controls = controls if isinstance(controls, dict) else {}
+    normalized = {}
+    for lane in PERFORMER_LANES:
+        src = controls.get(lane, {}) if isinstance(controls, dict) else {}
+        if not isinstance(src, dict):
+            src = {}
+        try:
+            gate = float(src.get("gate", DEFAULT_LANE_CONTROL["gate"]))
+        except Exception:
+            gate = DEFAULT_LANE_CONTROL["gate"]
+        try:
+            level = float(src.get("level", DEFAULT_LANE_CONTROL["level"]))
+        except Exception:
+            level = DEFAULT_LANE_CONTROL["level"]
+        normalized[lane] = {
+            "gate": max(0.15, min(3.0, gate)),
+            "level": max(0.0, min(2.0, level)),
+            "mute": bool(src.get("mute", DEFAULT_LANE_CONTROL["mute"])),
+        }
+    return normalized
+
+
 def _unit(value: float) -> float:
     return max(0.0, min(1.0, float(value) / 100.0))
+
+
+def lane_for_pattern_hit(hit: PatternHit) -> str:
+    label = (hit.label or "").lower()
+    if hit.pad == 0 or "kick" in label:
+        return "kick"
+    if hit.pad in (2, 3) or "hat" in label:
+        return "hats"
+    if hit.pad in (1, 4) or any(
+            word in label
+            for word in ("snare", "clap", "fill", "turnaround", "perc")):
+        return "snare"
+    return "snare"
 
 
 def normalize_sp404_variation_style(style: str | None, seed: int) -> str:
@@ -95,6 +143,7 @@ def build_midi_events(
     humanize: float = 0.0,
     gate: float = 1.0,
     humanize_seed: int = 0,
+    lane_controls: dict | None = None,
 ) -> list[MidiEvent]:
     tempo = float(bpm or spec.bpm)
     step_seconds = (60.0 / max(1.0, tempo)) * 4.0 / float(spec.steps_per_bar)
@@ -104,17 +153,22 @@ def build_midi_events(
     humanize_steps = humanize * 0.0018
     velocity_jitter = int(round(humanize * 0.18))
     gate = max(0.15, min(3.0, float(gate)))
+    lane_controls = normalized_lane_controls(lane_controls)
     rng = random.Random((int(spec.seed) << 8) + int(humanize_seed))
     events: list[MidiEvent] = []
 
     def add_pair(start_step: float, duration_steps: float, note: int,
-                 channel: int, velocity: int, label: str) -> None:
+                 channel: int, velocity: int, label: str, lane: str) -> None:
+        lane = lane if lane in lane_controls else "snare"
+        lane_ctrl = lane_controls[lane]
+        if lane_ctrl["mute"]:
+            return
         if int(round(start_step)) % 2 == 1:
             start_step += swing_amount
         if humanize_steps > 0.0:
             start_step += rng.uniform(-humanize_steps, humanize_steps)
             velocity += rng.randint(-velocity_jitter, velocity_jitter)
-        duration_steps *= gate
+        duration_steps *= gate * lane_ctrl["gate"]
         start = max(0.0, start_step * step_seconds)
         if start >= loop_seconds:
             return
@@ -123,6 +177,7 @@ def build_midi_events(
             max(start + 0.01, loop_seconds - 0.002),
         )
         velocity = max(1, min(127, int(round(velocity * velocity_scale))))
+        velocity = max(1, min(127, int(round(velocity * lane_ctrl["level"]))))
         events.append(MidiEvent(
             start, (0x90 | (channel & 0x0F), note & 0x7F, velocity), label))
         events.append(MidiEvent(
@@ -131,6 +186,7 @@ def build_midi_events(
 
     for hit in spec.hits:
         note, channel = device_note_channel(spec, hit.pad)
+        lane = lane_for_pattern_hit(hit)
         add_pair(
             hit.step + hit.nudge,
             hit.duration_steps,
@@ -138,6 +194,7 @@ def build_midi_events(
             channel,
             hit.velocity,
             hit.label or f"pad {hit.pad + 1}",
+            lane,
         )
     for hit in spec.chromatic_hits:
         note, channel = chromatic_note_channel(spec, hit.note)
@@ -148,6 +205,7 @@ def build_midi_events(
             channel,
             hit.velocity,
             hit.label or f"chromatic {hit.note}",
+            "bass",
         )
     events.sort(key=lambda event: (
         event.seconds, event.message[0] & 0xF0, event.message[1]))
@@ -176,6 +234,7 @@ def performer_take_from_spec(
     slot: int,
     target_key: str = SP404_BEAT_BASS_TARGET,
     feel: dict | None = None,
+    lane_controls: dict | None = None,
 ) -> dict:
     """Serialize a playable performer take for session persistence."""
 
@@ -189,6 +248,7 @@ def performer_take_from_spec(
         "bank": spec.bank,
         "tags": list(spec.tags),
         "feel": normalized_performer_feel(feel, spec=spec),
+        "lane_controls": normalized_lane_controls(lane_controls),
         "spec": spec.to_dict(),
     }
 
@@ -226,6 +286,11 @@ def feel_from_performer_take(take: dict | None) -> dict:
     return normalized_performer_feel(feel, spec=spec)
 
 
+def lane_controls_from_performer_take(take: dict | None) -> dict:
+    controls = take.get("lane_controls") if isinstance(take, dict) else None
+    return normalized_lane_controls(controls)
+
+
 class PatternPerformer:
     """Threaded MIDI PatternSpec player with stop and mute controls."""
 
@@ -245,6 +310,7 @@ class PatternPerformer:
         self._running = False
         self._last_bpm = 0.0
         self._last_feel = normalized_performer_feel()
+        self._last_lane_controls = normalized_lane_controls()
         self._loop_count = 0
         self._loop_started_at = 0.0
         self._loop_seconds = 0.0
@@ -303,6 +369,8 @@ class PatternPerformer:
                 "last_error": self._last_error,
                 "last_bpm": self._last_bpm,
                 "last_feel": dict(self._last_feel),
+                "last_lane_controls": normalized_lane_controls(
+                    self._last_lane_controls),
                 "loop_count": self._loop_count,
                 "loop_seconds": self._loop_seconds,
                 "queued_pattern_name": self._queued_pattern_name,
@@ -344,15 +412,17 @@ class PatternPerformer:
         bpm: float | None = None,
         bpm_provider: Callable[[], float] | None = None,
         feel_provider: Callable[[], dict] | None = None,
+        lane_controls_provider: Callable[[], dict] | None = None,
         velocity_scale: float = 1.0,
         pattern_label: str = "",
         take_slot: int | None = None,
     ) -> None:
         current_bpm = float(bpm_provider() if bpm_provider else (bpm or spec.bpm))
         feel = self._current_feel(spec, feel_provider)
+        lane_controls = self._current_lane_controls(lane_controls_provider)
         events = build_midi_events(
             spec, bpm=current_bpm, velocity_scale=velocity_scale,
-            **feel)
+            lane_controls=lane_controls, **feel)
         if not events:
             raise RuntimeError("pattern has no MIDI events")
         self.stop()
@@ -361,7 +431,8 @@ class PatternPerformer:
         thread = threading.Thread(
             target=self._run,
             args=(spec, send_message, stop_event, mute_event, loops,
-                  current_bpm, bpm_provider, feel_provider, velocity_scale,
+                  current_bpm, bpm_provider, feel_provider,
+                  lane_controls_provider, velocity_scale,
                   pattern_label or spec.name, self._normalized_slot(take_slot)),
             daemon=True,
             name="studio-pattern-performer",
@@ -381,6 +452,7 @@ class PatternPerformer:
             self._running = True
             self._last_bpm = current_bpm
             self._last_feel = feel
+            self._last_lane_controls = lane_controls
             self._loop_count = 0
             self._loop_started_at = 0.0
             self._loop_seconds = 0.0
@@ -512,6 +584,7 @@ class PatternPerformer:
         bpm: float,
         bpm_provider: Callable[[], float] | None,
         feel_provider: Callable[[], dict] | None,
+        lane_controls_provider: Callable[[], dict] | None,
         velocity_scale: float,
         pattern_label: str,
         take_slot: int | None,
@@ -529,10 +602,13 @@ class PatternPerformer:
                     current_bpm = bpm
                 current_bpm = max(20.0, min(300.0, current_bpm))
                 feel = self._current_feel(current_spec, feel_provider)
+                lane_controls = self._current_lane_controls(
+                    lane_controls_provider)
                 events = build_midi_events(
                     current_spec, bpm=current_bpm,
                     velocity_scale=velocity_scale,
                     humanize_seed=loop_idx,
+                    lane_controls=lane_controls,
                     **feel)
                 loop_seconds = current_spec.length_beats * 60.0 / max(1.0, current_bpm)
                 start_time = time.monotonic()
@@ -543,6 +619,7 @@ class PatternPerformer:
                     self._pattern_slot = current_slot
                     self._last_bpm = current_bpm
                     self._last_feel = feel
+                    self._last_lane_controls = lane_controls
                     self._loop_count = loop_idx + 1
                     self._loop_started_at = start_time
                     self._loop_seconds = loop_seconds
@@ -633,6 +710,16 @@ class PatternPerformer:
         except Exception:
             feel = None
         return normalized_performer_feel(feel, spec=spec)
+
+    @staticmethod
+    def _current_lane_controls(
+        lane_controls_provider: Callable[[], dict] | None,
+    ) -> dict:
+        try:
+            controls = lane_controls_provider() if lane_controls_provider else None
+        except Exception:
+            controls = None
+        return normalized_lane_controls(controls)
 
     @staticmethod
     def _normalized_slot(slot: int | None) -> int | None:

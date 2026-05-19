@@ -11,7 +11,7 @@ from .base import Mode
 
 class PerformerMode(Mode):
     name = "performer"
-    ENCODER_PAGES = ("feel", "gen", "takes")
+    ENCODER_PAGES = ("feel", "gen", "lanes", "takes")
 
     def __init__(self, control) -> None:
         super().__init__(control)
@@ -52,6 +52,14 @@ class PerformerMode(Mode):
             screen._adjust_performer_generator("variation", delta * 5.0)
         elif page == "gen" and name == "track6":
             screen._cycle_performer_genre()
+        elif page == "lanes" and name == "track1":
+            screen._cycle_performer_lane(delta)
+        elif page == "lanes" and name == "track2":
+            screen._adjust_performer_lane("gate", delta * 0.1)
+        elif page == "lanes" and name == "track3":
+            screen._adjust_performer_lane("level", delta * 0.1)
+        elif page == "lanes" and name == "track4":
+            screen._adjust_performer_lane("mute")
         elif page == "takes" and name == "track1":
             screen._cycle_performer_take(self.control.session, delta)
         elif page == "takes" and name == "track2":
@@ -256,6 +264,15 @@ class PerformerMode(Mode):
                 ("VAR", f"{gen['variation']:.0f}"),
                 ("GENRE", screen._style_label(screen._performer_style())[:8]),
             ]
+        elif self.encoder_page == "lanes":
+            lane = screen._performer_lane()
+            ctrl = screen._performer_lane_controls()[lane]
+            labels = [
+                ("LANE", screen._lane_label(lane)[:8]),
+                ("GATE", f"{ctrl['gate'] * 100:.0f}%"),
+                ("LEVEL", f"{ctrl['level'] * 100:.0f}%"),
+                ("MUTE", "ON" if ctrl["mute"] else "OFF"),
+            ]
         elif self.encoder_page == "takes":
             labels = [
                 ("TAKE", f"{getattr(screen, '_performer_take_idx', 0) + 1}"),
@@ -269,7 +286,7 @@ class PerformerMode(Mode):
             d.rectangle((x, 94, x + 96, 128), outline=(46, 54, 78))
             d.text((x + 8, 98), title, fill=(144, 158, 190), font=f_sm)
             d.text((x + 8, 112), value, fill=(240, 242, 248), font=f_med)
-        page_labels = ["FEEL", "GEN", "TAKES"]
+        page_labels = ["FEEL", "GEN", "LANES", "TAKES"]
         for i, label in enumerate(page_labels):
             x = 12 + i * 96
             fill = (126, 238, 186) if self.encoder_page == self.ENCODER_PAGES[i] else (112, 126, 152)

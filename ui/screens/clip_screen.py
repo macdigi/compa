@@ -17,12 +17,16 @@ from session.clip import ClipState
 from session.track import TrackTarget
 from engine.studio_performer import (
     MAX_PERFORMER_TAKES,
+    PERFORMER_LANE_LABELS,
+    PERFORMER_LANES,
     PatternPerformer,
     SP404_BEAT_BASS_TARGET,
     SP404_VARIATION_STYLES,
     confirmed_sp404_beat_bass_spec,
     feel_from_performer_take,
     generate_sp404_beat_bass_variation,
+    lane_controls_from_performer_take,
+    normalized_lane_controls,
     normalized_generator_controls,
     normalized_performer_feel,
     performer_take_from_spec,
@@ -71,6 +75,8 @@ class ClipScreen:
         self._performer_fill = 35.0
         self._performer_bass_activity = 60.0
         self._performer_variation = 50.0
+        self._performer_lane_idx = 0
+        self._performer_lane_controls_state = normalized_lane_controls()
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -315,6 +321,49 @@ class ClipScreen:
         self._performer_variation = controls["variation"]
         self._performer_message = f"generator {self._generator_label()}"
 
+    def _performer_lane_controls(self) -> dict:
+        return normalized_lane_controls(self._performer_lane_controls_state)
+
+    def _set_performer_lane_controls(self, controls: dict) -> None:
+        self._performer_lane_controls_state = normalized_lane_controls(controls)
+
+    def _performer_lane(self) -> str:
+        return PERFORMER_LANES[
+            self._performer_lane_idx % len(PERFORMER_LANES)]
+
+    def _lane_label(self, lane: str | None = None) -> str:
+        lane = lane or self._performer_lane()
+        return PERFORMER_LANE_LABELS.get(lane, str(lane).title())
+
+    def _cycle_performer_lane(self, direction: int = 1) -> None:
+        self._performer_lane_idx = (
+            self._performer_lane_idx + int(direction)) % len(PERFORMER_LANES)
+        self._performer_message = f"lane: {self._lane_label()}"
+
+    def _select_performer_lane(self, idx: int) -> None:
+        self._performer_lane_idx = max(0, min(len(PERFORMER_LANES) - 1, int(idx)))
+        self._performer_message = f"lane: {self._lane_label()}"
+
+    def _adjust_performer_lane(self, field: str, delta: float = 0.0) -> None:
+        controls = self._performer_lane_controls()
+        lane = self._performer_lane()
+        lane_ctrl = dict(controls[lane])
+        if field == "gate":
+            lane_ctrl["gate"] += delta
+        elif field == "level":
+            lane_ctrl["level"] += delta
+        elif field == "mute":
+            lane_ctrl["mute"] = not lane_ctrl["mute"]
+        else:
+            return
+        controls[lane] = lane_ctrl
+        self._set_performer_lane_controls(controls)
+        lane_ctrl = self._performer_lane_controls()[lane]
+        state = "muted" if lane_ctrl["mute"] else (
+            f"gate {lane_ctrl['gate'] * 100:.0f}% level {lane_ctrl['level'] * 100:.0f}%")
+        suffix = " next loop" if self._performer_player().status()["running"] else ""
+        self._performer_message = f"{self._lane_label(lane)} {state}{suffix}"
+
     def _performer_takes(self, sess) -> list:
         takes = getattr(sess, "studio_performer_takes", None)
         if not isinstance(takes, list):
@@ -379,7 +428,8 @@ class ClipScreen:
         takes[self._performer_take_idx] = performer_take_from_spec(
             spec, slot=self._performer_take_idx,
             target_key=SP404_BEAT_BASS_TARGET,
-            feel=self._performer_feel())
+            feel=self._performer_feel(),
+            lane_controls=self._performer_lane_controls())
         self._persist_session(sess)
         self._performer_message = (
             f"saved Take {self._performer_take_idx + 1}: {spec.name}")
@@ -393,6 +443,8 @@ class ClipScreen:
                 f"Take {take_idx + 1} is empty")
             return
         self._set_performer_feel(feel_from_performer_take(take))
+        self._set_performer_lane_controls(
+            lane_controls_from_performer_take(take))
         self._set_current_performer_spec(spec)
         player = self._performer_player()
         label = f"Take {take_idx + 1}"
@@ -500,6 +552,7 @@ class ClipScreen:
                 loops=loops,
                 bpm_provider=lambda: self._performer_bpm(sess),
                 feel_provider=lambda: self._performer_feel(),
+                lane_controls_provider=lambda: self._performer_lane_controls(),
                 pattern_label=pattern_label or spec.name,
                 take_slot=take_slot,
             )
@@ -1003,7 +1056,7 @@ class ClipScreen:
                      pygame.Rect(action_x + (action_w + slot_gap) * 3, ay,
                                  action_w, 36), "Send To Steps")
 
-        feel_rect = pygame.Rect(right_x, y, right_w, 200)
+        feel_rect = pygame.Rect(right_x, y, right_w, 158)
         fy = self._panel(surface, feel_rect, "Feel Controls")
         feel = self._performer_feel()
 
@@ -1020,41 +1073,79 @@ class ClipScreen:
                          pygame.Rect(right_x + right_w - 54, row_y, 42, 34),
                          "+")
 
+        def compact_param_row(row_y: int, title: str, value: str,
+                              down_key: str, up_key: str) -> None:
+            surface.blit(font_sm.render(title, True, (226, 230, 242)),
+                         (right_x + 16, row_y + 5))
+            surface.blit(font.render(value, True, (236, 240, 248)),
+                         (right_x + 126, row_y + 4))
+            self._button(surface, down_key,
+                         pygame.Rect(right_x + right_w - 92, row_y, 36, 24),
+                         "-")
+            self._button(surface, up_key,
+                         pygame.Rect(right_x + right_w - 48, row_y, 36, 24),
+                         "+")
+
         param_row(fy, "Swing", f"{feel['swing']:.0f}",
                   "performer_swing_down", "performer_swing_up")
-        param_row(fy + 42, "Humanize", f"{feel['humanize']:.0f}",
+        param_row(fy + 38, "Humanize", f"{feel['humanize']:.0f}",
                   "performer_human_down", "performer_human_up")
-        param_row(fy + 84, "Gate Length", f"{feel['gate'] * 100:.0f}%",
+        param_row(fy + 76, "Gate Length", f"{feel['gate'] * 100:.0f}%",
                   "performer_gate_down", "performer_gate_up")
         surface.blit(font_sm.render(
             "Running changes land on the next loop.",
-            True, (126, 138, 162)), (right_x + 16, fy + 138))
+            True, (126, 138, 162)), (right_x + 16, fy + 116))
 
-        gen_rect = pygame.Rect(right_x, y + 212, right_w, 270)
+        gen_rect = pygame.Rect(right_x, y + 170, right_w, 184)
         gy = self._panel(surface, gen_rect, "Generator")
         gen = self._performer_generator_controls()
 
         def gen_row(row_y: int, title: str, field: str) -> None:
-            surface.blit(font.render(title, True, (226, 230, 242)),
-                         (right_x + 16, row_y + 7))
-            surface.blit(font_big.render(f"{gen[field]:.0f}", True,
-                                         (236, 240, 248)),
-                         (right_x + 128, row_y + 1))
-            self._button(surface, f"performer_{field}_down",
-                         pygame.Rect(right_x + right_w - 104, row_y, 42, 34),
-                         "-")
-            self._button(surface, f"performer_{field}_up",
-                         pygame.Rect(right_x + right_w - 54, row_y, 42, 34),
-                         "+")
+            compact_param_row(
+                row_y, title, f"{gen[field]:.0f}",
+                f"performer_{field}_down", f"performer_{field}_up")
 
         gen_row(gy, "Density", "density")
-        gen_row(gy + 40, "Complexity", "complexity")
-        gen_row(gy + 80, "Fill", "fill")
-        gen_row(gy + 120, "Bass Activity", "bass_activity")
-        gen_row(gy + 160, "Variation", "variation")
+        gen_row(gy + 28, "Complexity", "complexity")
+        gen_row(gy + 56, "Fill", "fill")
+        gen_row(gy + 84, "Bass Activity", "bass_activity")
+        gen_row(gy + 112, "Variation", "variation")
         surface.blit(font_sm.render(
-            "Encoder pages: Feel / Gen / Takes",
-            True, (126, 138, 162)), (right_x + 16, gy + 214))
+            "Encoder pages: Feel / Gen / Lanes / Takes",
+            True, (126, 138, 162)), (right_x + 16, gy + 146))
+
+        lanes_rect = pygame.Rect(right_x, y + 366, right_w, 154)
+        ly = self._panel(surface, lanes_rect, "Lanes")
+        lane_controls = self._performer_lane_controls()
+        lane_gap = 6
+        lane_w = (right_w - 32 - lane_gap * 3) // 4
+        for idx, lane in enumerate(PERFORMER_LANES):
+            lx = right_x + 16 + idx * (lane_w + lane_gap)
+            label = self._lane_label(lane)
+            if lane_controls[lane]["mute"]:
+                label += " M"
+            self._button(
+                surface,
+                f"performer_lane_select_{idx}",
+                pygame.Rect(lx, ly, lane_w, 26),
+                label,
+                active=idx == self._performer_lane_idx,
+                danger=bool(lane_controls[lane]["mute"]),
+            )
+        lane = self._performer_lane()
+        lane_ctrl = lane_controls[lane]
+        compact_param_row(ly + 34, "Lane Gate",
+                          f"{lane_ctrl['gate'] * 100:.0f}%",
+                          "performer_lane_gate_down",
+                          "performer_lane_gate_up")
+        compact_param_row(ly + 62, "Lane Level",
+                          f"{lane_ctrl['level'] * 100:.0f}%",
+                          "performer_lane_level_down",
+                          "performer_lane_level_up")
+        self._button(surface, "performer_lane_mute",
+                     pygame.Rect(right_x + 16, ly + 92, right_w - 32, 24),
+                     "Mute" if not lane_ctrl["mute"] else "On",
+                     danger=bool(lane_ctrl["mute"]))
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -1076,6 +1167,10 @@ class ClipScreen:
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(
                     sess, int(key.rsplit("_", 1)[1]))
+                return True
+            if key.startswith("performer_lane_select_"):
+                self._select_performer_lane(
+                    int(key.rsplit("_", 1)[1]))
                 return True
             if key == "stop_all":
                 self._stop_all()
@@ -1136,6 +1231,21 @@ class ClipScreen:
                 return True
             if key == "performer_gate_up":
                 self._adjust_performer_feel("gate", 0.2)
+                return True
+            if key == "performer_lane_gate_down":
+                self._adjust_performer_lane("gate", -0.1)
+                return True
+            if key == "performer_lane_gate_up":
+                self._adjust_performer_lane("gate", 0.1)
+                return True
+            if key == "performer_lane_level_down":
+                self._adjust_performer_lane("level", -0.1)
+                return True
+            if key == "performer_lane_level_up":
+                self._adjust_performer_lane("level", 0.1)
+                return True
+            if key == "performer_lane_mute":
+                self._adjust_performer_lane("mute")
                 return True
             generator_buttons = {
                 "performer_density_down": ("density", -10.0),

@@ -11,8 +11,10 @@ from engine.studio_performer import (
     confirmed_sp404_beat_bass_spec,
     feel_from_performer_take,
     generate_sp404_beat_bass_variation,
+    lane_controls_from_performer_take,
     normalize_sp404_variation_style,
     normalized_generator_controls,
+    normalized_lane_controls,
     normalized_performer_feel,
     performer_take_from_spec,
     spec_from_performer_take,
@@ -102,6 +104,43 @@ class StudioPerformerTests(unittest.TestCase):
             [(e.seconds, e.message) for e in human_b],
         )
 
+    def test_lane_controls_shape_events(self):
+        spec = PatternSpec(
+            name="lanes",
+            prompt="lanes",
+            hits=[
+                PatternHit(pad=0, step=0, velocity=100, duration_steps=1.0),
+                PatternHit(pad=2, step=2, velocity=100, duration_steps=1.0),
+            ],
+            chromatic_hits=[
+                ChromaticHit(note=60, step=4, velocity=100,
+                             duration_steps=1.0),
+            ],
+        )
+        normal = build_midi_events(spec, bpm=120.0)
+        shaped = build_midi_events(
+            spec,
+            bpm=120.0,
+            lane_controls={
+                "kick": {"gate": 2.0, "level": 0.5},
+                "hats": {"mute": True},
+                "bass": {"level": 1.2},
+            },
+        )
+        normal_kick_on = [e for e in normal if e.is_note_on][0]
+        shaped_note_ons = [e for e in shaped if e.is_note_on]
+        shaped_kick_on = shaped_note_ons[0]
+        self.assertLess(shaped_kick_on.message[2], normal_kick_on.message[2])
+        self.assertFalse(any(e.label == "pad 3" and e.is_note_on
+                             for e in shaped))
+        self.assertTrue(any(e.message[0] == 0x9F and e.message[2] > 100
+                            for e in shaped_note_ons))
+        normal_kick_off = [e for e in normal
+                           if not e.is_note_on and e.message[1] == 48][0]
+        shaped_kick_off = [e for e in shaped
+                           if not e.is_note_on and e.message[1] == 48][0]
+        self.assertGreater(shaped_kick_off.seconds, normal_kick_off.seconds)
+
     def test_generated_variations_are_deterministic(self):
         a = generate_sp404_beat_bass_variation(3)
         b = generate_sp404_beat_bass_variation(3)
@@ -176,9 +215,18 @@ class StudioPerformerTests(unittest.TestCase):
         spec = generate_sp404_beat_bass_variation(2, style="breakbeat")
         feel = {"swing": 62.0, "humanize": 15.0, "gate": 1.35}
         take = performer_take_from_spec(
-            spec, slot=MAX_PERFORMER_TAKES + 2, feel=feel)
+            spec,
+            slot=MAX_PERFORMER_TAKES + 2,
+            feel=feel,
+            lane_controls={"kick": {"gate": 1.6, "level": 0.7}},
+        )
         self.assertEqual(take["slot"], MAX_PERFORMER_TAKES - 1)
         self.assertEqual(feel_from_performer_take(take), feel)
+        self.assertEqual(
+            lane_controls_from_performer_take(take)["kick"]["gate"], 1.6)
+        self.assertEqual(
+            normalized_lane_controls({"bass": {"level": 8.0}})["bass"]["level"],
+            2.0)
         self.assertEqual(normalized_performer_feel({"swing": 90.0})["swing"],
                          75.0)
 
