@@ -14,6 +14,7 @@ from engine.studio_performer import (
     PatternPerformer,
     SP404_BEAT_BASS_TARGET,
     confirmed_sp404_beat_bass_spec,
+    generate_sp404_beat_bass_variation,
 )
 from engine.studio_targets import (
     availability_label,
@@ -47,6 +48,7 @@ class ClipScreen:
         self._scene_button_top = 0
         self._scene_button_w = 0
         self._performer_message = ""
+        self._performer_seed = 0
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -191,6 +193,22 @@ class ClipScreen:
             return sender, device_key
         return None, device_key
 
+    def _performer_bpm(self, sess) -> float:
+        try:
+            return float(sess.bpm)
+        except Exception:
+            return 94.0
+
+    def _current_performer_spec(self):
+        spec = getattr(self.app, "studio_performer_spec", None)
+        if spec is None:
+            spec = confirmed_sp404_beat_bass_spec()
+            setattr(self.app, "studio_performer_spec", spec)
+        return spec
+
+    def _set_current_performer_spec(self, spec) -> None:
+        setattr(self.app, "studio_performer_spec", spec)
+
     def _play_sp_beat_bass(self, sess) -> None:
         target = self._sp_beat_bass_target()
         self._set_selected_track_target(sess, target)
@@ -198,17 +216,28 @@ class ClipScreen:
         if sender is None:
             self._performer_message = f"{port_label or 'SP-404'} MIDI unavailable"
             return
+        spec = self._current_performer_spec()
         try:
             self._performer_player().play(
-                confirmed_sp404_beat_bass_spec(),
+                spec,
                 send_message=sender,
                 target_key=target.key,
                 port_label=port_label,
                 loops=0,
+                bpm_provider=lambda: self._performer_bpm(sess),
             )
-            self._performer_message = "playing v3"
+            self._performer_message = f"playing {spec.name}"
         except Exception as exc:
             self._performer_message = f"play failed: {exc}"
+
+    def _generate_sp_variation(self, sess) -> None:
+        self._performer_seed += 1
+        spec = generate_sp404_beat_bass_variation(self._performer_seed)
+        self._set_current_performer_spec(spec)
+        status = self._performer_player().status()
+        self._performer_message = f"generated {spec.name}"
+        if status["running"]:
+            self._play_sp_beat_bass(sess)
 
     def _stop_performer(self) -> None:
         self._performer_player().stop()
@@ -468,12 +497,14 @@ class ClipScreen:
         target = target_for_track(track) if track is not None else self._sp_beat_bass_target()
         capability = capability_for(target)
         status = self._performer_player().status()
+        spec = self._current_performer_spec()
         sender, port_label = self._midi_sender_for_target(SP404_BEAT_BASS_TARGET)
         midi_status = "ready" if sender is not None else f"{port_label or 'SP-404'} missing"
         rows = [
             (f"Track {track_idx + 1}", track.name if track is not None else "none"),
             ("Target", target.label or capability.label),
-            ("Pattern", "project3-a1-a6-beat-bass-v3"),
+            ("Pattern", spec.name),
+            ("Tempo", f"follows Studio BPM: {self._performer_bpm(sess):.1f}"),
             ("MIDI", midi_status),
         ]
         if self._performer_message:
@@ -505,10 +536,13 @@ class ClipScreen:
                      pygame.Rect(x, button_top, 140, 34), "SET SP A1-A6",
                      active=target.key == SP404_BEAT_BASS_TARGET)
         x += 148
+        self._button(surface, "performer_generate",
+                     pygame.Rect(x, button_top, 72, 34), "GEN")
+        x += 80
         self._button(surface, "performer_play_v3",
-                     pygame.Rect(x, button_top, 92, 34), "PLAY V3",
+                     pygame.Rect(x, button_top, 78, 34), "PLAY",
                      active=bool(status["running"]))
-        x += 100
+        x += 86
         self._button(surface, "performer_mute",
                      pygame.Rect(x, button_top, 92, 34),
                      "UNMUTE" if status["muted"] else "MUTE",
@@ -549,6 +583,9 @@ class ClipScreen:
                 return True
             if key == "performer_play_v3":
                 self._play_sp_beat_bass(sess)
+                return True
+            if key == "performer_generate":
+                self._generate_sp_variation(sess)
                 return True
             if key == "performer_mute":
                 self._toggle_performer_mute()

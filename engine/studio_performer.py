@@ -6,6 +6,7 @@ but today it gives Studio a real performer launch/stop path.
 """
 from __future__ import annotations
 
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -43,17 +44,23 @@ def build_midi_events(
 ) -> list[MidiEvent]:
     tempo = float(bpm or spec.bpm)
     step_seconds = (60.0 / max(1.0, tempo)) * 4.0 / float(spec.steps_per_bar)
+    loop_seconds = spec.length_beats * 60.0 / max(1.0, tempo)
     events: list[MidiEvent] = []
 
     def add_pair(start_step: float, duration_steps: float, note: int,
                  channel: int, velocity: int, label: str) -> None:
         start = max(0.0, start_step * step_seconds)
-        duration = max(0.035, duration_steps * step_seconds)
+        if start >= loop_seconds:
+            return
+        note_off = min(
+            start + max(0.035, duration_steps * step_seconds),
+            max(start + 0.01, loop_seconds - 0.002),
+        )
         velocity = max(1, min(127, int(round(velocity * velocity_scale))))
         events.append(MidiEvent(
             start, (0x90 | (channel & 0x0F), note & 0x7F, velocity), label))
         events.append(MidiEvent(
-            start + duration, (0x80 | (channel & 0x0F), note & 0x7F, 0),
+            note_off, (0x80 | (channel & 0x0F), note & 0x7F, 0),
             label))
 
     for hit in spec.hits:
@@ -105,6 +112,8 @@ class PatternPerformer:
         self._port_label = ""
         self._last_error = ""
         self._running = False
+        self._last_bpm = 0.0
+        self._loop_count = 0
 
     def status(self) -> dict:
         with self._lock:
@@ -115,6 +124,8 @@ class PatternPerformer:
                 "pattern_name": self._pattern_name,
                 "port_label": self._port_label,
                 "last_error": self._last_error,
+                "last_bpm": self._last_bpm,
+                "loop_count": self._loop_count,
             }
 
     def play(
@@ -126,10 +137,12 @@ class PatternPerformer:
         port_label: str = "",
         loops: int = 0,
         bpm: float | None = None,
+        bpm_provider: Callable[[], float] | None = None,
         velocity_scale: float = 1.0,
     ) -> None:
+        current_bpm = float(bpm_provider() if bpm_provider else (bpm or spec.bpm))
         events = build_midi_events(
-            spec, bpm=bpm, velocity_scale=velocity_scale)
+            spec, bpm=current_bpm, velocity_scale=velocity_scale)
         if not events:
             raise RuntimeError("pattern has no MIDI events")
         self.stop()
@@ -137,8 +150,8 @@ class PatternPerformer:
         mute_event = threading.Event()
         thread = threading.Thread(
             target=self._run,
-            args=(spec, events, send_message, stop_event, mute_event, loops,
-                  float(bpm or spec.bpm)),
+            args=(spec, send_message, stop_event, mute_event, loops,
+                  current_bpm, bpm_provider, velocity_scale),
             daemon=True,
             name="studio-pattern-performer",
         )
@@ -153,6 +166,8 @@ class PatternPerformer:
             self._port_label = port_label
             self._last_error = ""
             self._running = True
+            self._last_bpm = current_bpm
+            self._loop_count = 0
         thread.start()
 
     def stop(self) -> None:
@@ -189,17 +204,29 @@ class PatternPerformer:
     def _run(
         self,
         spec: PatternSpec,
-        events: list[MidiEvent],
         send_message: Callable[[list[int]], None],
         stop_event: threading.Event,
         mute_event: threading.Event,
         loops: int,
         bpm: float,
+        bpm_provider: Callable[[], float] | None,
+        velocity_scale: float,
     ) -> None:
-        loop_seconds = spec.length_beats * 60.0 / max(1.0, bpm)
         loop_idx = 0
         try:
             while not stop_event.is_set() and (loops <= 0 or loop_idx < loops):
+                try:
+                    current_bpm = float(bpm_provider() if bpm_provider else bpm)
+                except Exception:
+                    current_bpm = bpm
+                current_bpm = max(20.0, min(300.0, current_bpm))
+                events = build_midi_events(
+                    spec, bpm=current_bpm, velocity_scale=velocity_scale)
+                loop_seconds = spec.length_beats * 60.0 / max(1.0, current_bpm)
+                with self._lock:
+                    self._events = events
+                    self._last_bpm = current_bpm
+                    self._loop_count = loop_idx + 1
                 start_time = time.monotonic()
                 for event in events:
                     if stop_event.is_set():
@@ -312,4 +339,96 @@ def confirmed_sp404_beat_bass_spec() -> PatternSpec:
                          duration_steps=duration, label=label)
             for note, step, velocity, duration, label in chromatic
         ],
+    )
+
+
+def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
+    """Generate a small SP A1-A6 beat+bass variation for live auditioning."""
+
+    rng = random.Random(int(seed))
+    hits: list[PatternHit] = []
+
+    def add(pad: int, step: int, velocity: int, duration: float,
+            label: str, nudge: float = 0.0, probability: float = 1.0) -> None:
+        if not 0 <= step < 64:
+            return
+        hits.append(PatternHit(
+            pad=pad,
+            step=step,
+            velocity=max(1, min(127, velocity + rng.randint(-8, 8))),
+            probability=probability,
+            nudge=nudge,
+            duration_steps=duration,
+            label=label,
+        ))
+
+    kick_templates = [
+        (0, 6, 10),
+        (0, 5, 10, 14),
+        (0, 7, 11),
+        (0, 3, 10, 13),
+    ]
+    for bar in range(4):
+        base = bar * 16
+        kicks = list(rng.choice(kick_templates))
+        if bar == 3 and rng.random() < 0.7:
+            kicks.append(rng.choice((12, 15)))
+        for step in sorted(set(kicks)):
+            add(0, base + step, 116 if step == 0 else 100, 2.0, "kick")
+        for step in (4, 12):
+            add(1, base + step, 106, 1.35, "snare", 0.01)
+        for step in (3, 11):
+            if rng.random() < 0.75:
+                add(1, base + step, 48, 1.2, "ghost snare", 0.1, 0.8)
+        hat_steps = (range(0, 16, 2) if rng.random() < 0.65
+                     else (0, 2, 4, 7, 8, 10, 12, 15))
+        for step in hat_steps:
+            add(2, base + step, 84 if step % 8 == 0 else 66, 0.65,
+                "closed hat", 0.02 if step % 4 == 0 else 0.11)
+        if rng.random() < 0.8:
+            add(3, base + 15, 78, 1.6, "open hat", 0.04)
+        if bar and rng.random() < 0.7:
+            add(4, base + 12, 72, 1.35, "clap layer")
+
+    if rng.random() < 0.8:
+        add(1, 57, 72, 1.2, "fill snare", 0.03)
+        add(4, 58, 88, 1.2, "fill clap")
+        add(1, 60, 116, 1.2, "fill snare")
+        add(4, 63, 108, 1.2, "fill clap", 0.03)
+
+    bass_shapes = [
+        [60, 55, 58, 55, 60, 63, 58, 48],
+        [48, 55, 60, 58, 55, 58, 63, 60],
+        [60, 60, 58, 55, 48, 55, 58, 60],
+    ]
+    bass_notes = rng.choice(bass_shapes)
+    bass_steps = [0, 6, 10, 15, 16, 22, 26, 31,
+                  32, 38, 42, 46, 48, 54, 58, 61]
+    chromatic: list[ChromaticHit] = []
+    for idx, step in enumerate(bass_steps):
+        note = bass_notes[idx % len(bass_notes)]
+        dur = rng.choice((1.0, 1.8, 2.8, 3.6, 4.8))
+        if step % 16 == 0:
+            dur = rng.choice((4.8, 5.2, 5.6))
+        chromatic.append(ChromaticHit(
+            note=note,
+            step=step,
+            velocity=max(84, min(116, 104 + rng.randint(-10, 10))),
+            duration_steps=dur,
+            label=f"bass {note}",
+        ))
+
+    return PatternSpec(
+        name=f"sp404-beat-bass-gen-{int(seed)}",
+        prompt="Generated SP-404 A1-A6 beat plus chromatic bass variation",
+        device=SP404,
+        bank=0,
+        bars=4,
+        steps_per_bar=16,
+        bpm=94.0,
+        swing=56.0,
+        seed=int(seed),
+        tags=["boom_bap", "swing", "bass", "chromatic", "generated"],
+        hits=sorted(hits, key=lambda hit: (hit.step + hit.nudge, hit.pad)),
+        chromatic_hits=chromatic,
     )
