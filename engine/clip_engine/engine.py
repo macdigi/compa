@@ -24,6 +24,7 @@ from .instruments.synth_voice import (SynthInstrument, SynthParams,
                                        preset_bass, preset_lead, preset_pad)
 from .instruments.synth_kit import default_kit
 from .sample_loader import load_sample
+from engine.studio_sampler import normalized_pad_spec, SAMPLER_PAD_COUNT
 
 
 class ClipEngine:
@@ -80,11 +81,38 @@ class ClipEngine:
         if kind == "drum_rack":
             rack = DrumRack(self.sr)
             kit = default_kit()
-            for idx, (name, sample) in kit.items():
-                rack.set_pad(idx, DrumPad(
-                    name=name, sample=sample, sample_rate=self.sr,
-                    gain=1.0, pan=0.0, choke_group=0,
-                ))
+            pad_specs = ref.params.get("pads")
+            if isinstance(pad_specs, list):
+                for idx in range(SAMPLER_PAD_COUNT):
+                    spec = normalized_pad_spec(
+                        pad_specs[idx] if idx < len(pad_specs) else None, idx)
+                    name = spec["name"]
+                    sample = None
+                    sample_rate = self.sr
+                    if spec["sample_path"]:
+                        loaded = load_sample(spec["sample_path"])
+                        if loaded is not None:
+                            data, sr = loaded
+                            sample = self._prepare_drum_sample(data, sr)
+                            sample_rate = self.sr
+                    elif spec["use_default"] and idx in kit:
+                        name, sample = kit[idx]
+                    rack.set_pad(idx, DrumPad(
+                        name=name,
+                        sample=sample,
+                        sample_rate=sample_rate,
+                        sample_path=spec["sample_path"],
+                        gain=spec["gain"],
+                        pan=spec["pan"],
+                        tune_semitones=spec["tune"],
+                        choke_group=spec["choke_group"],
+                    ))
+            else:
+                for idx, (name, sample) in kit.items():
+                    rack.set_pad(idx, DrumPad(
+                        name=name, sample=sample, sample_rate=self.sr,
+                        gain=1.0, pan=0.0, choke_group=0,
+                    ))
             return rack
         if kind == "synth_voice":
             preset = ref.params.get("preset", "lead")
@@ -99,6 +127,20 @@ class ClipEngine:
                     setattr(params, k, v)
             return SynthInstrument(self.sr, params, max_voices=8)
         return None
+
+    def _prepare_drum_sample(self, data: np.ndarray, sample_rate: int) -> np.ndarray:
+        if data.ndim == 2:
+            mono = data.mean(axis=1)
+        else:
+            mono = data
+        mono = mono.astype(np.float32)
+        if int(sample_rate) == int(self.sr) or len(mono) < 2:
+            return mono
+        ratio = float(self.sr) / float(sample_rate)
+        new_len = max(1, int(len(mono) * ratio))
+        x_old = np.arange(len(mono), dtype=np.float32)
+        x_new = np.linspace(0, len(mono) - 1, new_len, dtype=np.float32)
+        return np.interp(x_new, x_old, mono).astype(np.float32)
 
     # ── Public control ─────────────────────────────────────────────
     def launch_clip(self, track: int, scene: int, link_beat: float) -> None:

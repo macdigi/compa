@@ -90,6 +90,14 @@ half-time, electro, breakbeat, minimal, busy boom-bap, and dub/offbeat. The
 Performer tab exposes genre selection so GEN can target a chosen family instead
 of only cycling automatically.
 
+The first internal-instrument path is the Compa Sampler MVP. It reuses the
+clip-engine DrumRack as the audio engine, stores pad assignments on the
+drum-rack track's InstrumentRef params, and exposes a 16-pad Sampler surface on
+touchscreen and Push 2. The first surface can trigger pads, stop sampler voices,
+load the starter kit, cycle local starter samples, assign a sample to the
+selected pad, and clear a pad. Deeper sample browsing, pad editing, choke
+groups, and pattern capture remain follow-up passes.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:

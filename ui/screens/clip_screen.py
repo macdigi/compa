@@ -44,6 +44,17 @@ from engine.studio_modules import (
     module_for_key,
     module_for_tab,
 )
+from engine.studio_sampler import (
+    SAMPLER_PAD_COUNT,
+    assign_sample_to_pad,
+    clear_sampler_pad,
+    list_sampler_samples,
+    load_starter_kit,
+    pad_display_name,
+    sampler_pad_specs,
+    sampler_track_index,
+    sample_label,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -86,6 +97,10 @@ class ClipScreen:
         self._performer_variation = 50.0
         self._performer_lane_idx = 0
         self._performer_lane_controls_state = normalized_lane_controls()
+        self._sampler_pad_idx = 0
+        self._sampler_sample_idx = 0
+        self._sampler_message = ""
+        self._sampler_library: list[str] | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -104,6 +119,8 @@ class ClipScreen:
             return
         if self._tab == "performer":
             desired = "performer"
+        elif self._tab == "sampler":
+            desired = "sampler"
         elif self._tab == "clips":
             desired = "session"
         else:
@@ -222,6 +239,107 @@ class ClipScreen:
         elif 0 <= track_idx < len(sess.tracks):
             sess.tracks[track_idx].target = target
         self._performer_message = f"target set: {target.label or target.key}"
+
+    # ── Sampler helpers ──────────────────────────────────────────
+    def _sampler_track_index(self, sess) -> int | None:
+        return sampler_track_index(sess)
+
+    def _sampler_pads(self, sess) -> list[dict]:
+        track_idx = self._sampler_track_index(sess)
+        return sampler_pad_specs(sess, track_idx)
+
+    def _sampler_samples(self) -> list[str]:
+        if self._sampler_library is None:
+            self._sampler_library = list_sampler_samples()
+        return self._sampler_library
+
+    def _sampler_selected_sample(self) -> str:
+        samples = self._sampler_samples()
+        if not samples:
+            return ""
+        self._sampler_sample_idx %= len(samples)
+        return samples[self._sampler_sample_idx]
+
+    def _rebuild_sampler(self, sess) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is not None and hasattr(engine, "_instantiate_instruments"):
+            engine._instantiate_instruments()
+        self._persist_session(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+
+    def _trigger_sampler_pad(self, sess, pad_idx: int, velocity: int = 112) -> None:
+        track_idx = self._sampler_track_index(sess)
+        if track_idx is None:
+            self._sampler_message = "no sampler track"
+            return
+        self._sampler_pad_idx = max(0, min(SAMPLER_PAD_COUNT - 1, int(pad_idx)))
+        if not self._ensure_audio_started():
+            self._sampler_message = "sampler audio gated"
+            return
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is None:
+            self._sampler_message = "clip engine unavailable"
+            return
+        engine.play_note_live(
+            track_idx,
+            36 + self._sampler_pad_idx,
+            max(1, min(127, int(velocity))),
+            link_beat=0.0,
+        )
+        pads = self._sampler_pads(sess)
+        label = pad_display_name(pads[self._sampler_pad_idx],
+                                 self._sampler_pad_idx)
+        self._sampler_message = f"triggered Pad {self._sampler_pad_idx + 1}: {label}"
+
+    def _stop_sampler(self) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is not None:
+            engine.all_notes_off()
+        self._sampler_message = "sampler stopped"
+
+    def _cycle_sampler_sample(self, delta: int) -> None:
+        samples = self._sampler_samples()
+        if not samples:
+            self._sampler_message = "no local samples found"
+            return
+        self._sampler_sample_idx = (
+            self._sampler_sample_idx + int(delta)) % len(samples)
+        self._sampler_message = (
+            f"library: {sample_label(samples[self._sampler_sample_idx])}")
+
+    def _assign_sampler_sample(self, sess) -> None:
+        track_idx = self._sampler_track_index(sess)
+        path = self._sampler_selected_sample()
+        if track_idx is None:
+            self._sampler_message = "no sampler track"
+            return
+        if not path:
+            self._sampler_message = "no local samples found"
+            return
+        assign_sample_to_pad(sess, track_idx, self._sampler_pad_idx, path)
+        self._rebuild_sampler(sess)
+        self._sampler_message = (
+            f"Pad {self._sampler_pad_idx + 1} assigned: {sample_label(path)}")
+
+    def _clear_sampler_pad(self, sess) -> None:
+        track_idx = self._sampler_track_index(sess)
+        if track_idx is None:
+            self._sampler_message = "no sampler track"
+            return
+        clear_sampler_pad(sess, track_idx, self._sampler_pad_idx)
+        self._rebuild_sampler(sess)
+        self._sampler_message = f"Pad {self._sampler_pad_idx + 1} cleared"
+
+    def _load_sampler_starter(self, sess) -> None:
+        track_idx = self._sampler_track_index(sess)
+        if track_idx is None:
+            self._sampler_message = "no sampler track"
+            return
+        count = load_starter_kit(sess, track_idx)
+        self._rebuild_sampler(sess)
+        self._sampler_message = f"starter kit loaded: {count} pads"
 
     def _sp_beat_bass_target(self) -> TrackTarget:
         return TrackTarget(
@@ -995,6 +1113,110 @@ class ClipScreen:
             if x + 180 > surface.get_width() - 20:
                 break
 
+    def _draw_sampler_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 24, bold=True)
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        track_idx = self._sampler_track_index(sess)
+        pads = self._sampler_pads(sess)
+        sample_path = self._sampler_selected_sample()
+        selected = self._sampler_pad_idx
+        track_name = "No sampler track"
+        if track_idx is not None and 0 <= track_idx < len(sess.tracks):
+            track_name = sess.tracks[track_idx].name
+        surface.blit(font_big.render("Compa Sampler", True, (232, 234, 242)),
+                     (20, top + 8))
+        surface.blit(font.render(track_name, True, (150, 162, 184)),
+                     (220, top + 16))
+        if self._sampler_message:
+            self._draw_text_fit(surface, font_sm, self._sampler_message,
+                                (174, 188, 222), (380, top + 19),
+                                surface.get_width() - 400)
+
+        margin = 20
+        gap = 12
+        y = top + 54
+        content_w = surface.get_width() - margin * 2
+        left_w = min(430, int(content_w * 0.58))
+        right_w = content_w - left_w - gap
+        left = pygame.Rect(margin, y, left_w, 290)
+        right = pygame.Rect(margin + left_w + gap, y, right_w, 290)
+        py = self._panel(surface, left, "Pad Rack")
+        ry = self._panel(surface, right, "Selected Pad")
+
+        pad_gap = 8
+        pad_size = min(
+            (left.width - 28 - pad_gap * 3) // 4,
+            (left.height - 54 - pad_gap * 3) // 4,
+        )
+        grid_w = pad_size * 4 + pad_gap * 3
+        grid_x = left.x + (left.width - grid_w) // 2
+        grid_y = py
+        for idx in range(SAMPLER_PAD_COUNT):
+            row = idx // 4
+            col = idx % 4
+            rect = pygame.Rect(
+                grid_x + col * (pad_size + pad_gap),
+                grid_y + row * (pad_size + pad_gap),
+                pad_size,
+                pad_size,
+            )
+            spec = pads[idx] if idx < len(pads) else None
+            assigned = bool(spec and spec.get("sample_path"))
+            enabled = bool(spec and (spec.get("sample_path")
+                           or spec.get("use_default", True)))
+            active = idx == selected
+            bg = (38, 82, 72) if active else (
+                (34, 40, 56) if enabled else (18, 20, 28))
+            edge = (94, 220, 176) if active else (
+                (92, 112, 150) if assigned else (50, 56, 76))
+            pygame.draw.rect(surface, bg, rect, border_radius=6)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=6)
+            self._buttons[f"sampler_pad_{idx}"] = rect
+            self._draw_text_fit(surface, font_sm, f"{idx + 1}",
+                                (232, 236, 244), (rect.x + 8, rect.y + 7),
+                                rect.width - 16)
+            label = pad_display_name(spec, idx)
+            self._draw_text_fit(surface, font_sm, label, (180, 192, 210),
+                                (rect.x + 8, rect.y + rect.height - 22),
+                                rect.width - 16)
+
+        selected_spec = pads[selected] if selected < len(pads) else None
+        selected_name = pad_display_name(selected_spec, selected)
+        source = "Starter/Internal"
+        if selected_spec and selected_spec.get("sample_path"):
+            source = os.path.basename(selected_spec["sample_path"])
+        elif selected_spec and not selected_spec.get("use_default", True):
+            source = "Empty"
+        info_w = right.width - 28
+        self._info_pair(surface, right.x + 14, ry, f"Pad {selected + 1}",
+                        selected_name, info_w)
+        self._info_pair(surface, right.x + 14, ry + 50, "Source",
+                        source, info_w)
+        library_label = sample_label(sample_path) if sample_path else "No samples found"
+        self._info_pair(surface, right.x + 14, ry + 100, "Library",
+                        library_label, info_w)
+
+        bx = right.x + 14
+        by = ry + 158
+        button_gap = 8
+        button_w = (info_w - button_gap) // 2
+        self._button(surface, "sampler_sample_prev",
+                     pygame.Rect(bx, by, button_w, 34), "Prev")
+        self._button(surface, "sampler_sample_next",
+                     pygame.Rect(bx + button_w + button_gap, by, button_w, 34),
+                     "Next")
+        self._button(surface, "sampler_assign",
+                     pygame.Rect(bx, by + 44, button_w, 34), "Assign")
+        self._button(surface, "sampler_clear",
+                     pygame.Rect(bx + button_w + button_gap, by + 44,
+                                 button_w, 34), "Clear", danger=True)
+        self._button(surface, "sampler_load_starter",
+                     pygame.Rect(bx, by + 88, button_w, 34), "Starter Kit")
+        self._button(surface, "sampler_stop",
+                     pygame.Rect(bx + button_w + button_gap, by + 88,
+                                 button_w, 34), "Stop", danger=True)
+
     def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
                                 top: int, sess) -> None:
         module = module_for_tab(tab)
@@ -1062,6 +1284,9 @@ class ClipScreen:
                               top: int, sess) -> None:
         if tab == "performer":
             self._draw_performer_tab(surface, top, sess)
+            return
+        if tab == "sampler":
+            self._draw_sampler_tab(surface, top, sess)
             return
         if tab == "overview":
             self._draw_module_hub(surface, top, sess)
@@ -1385,6 +1610,28 @@ class ClipScreen:
                 continue
             if key.startswith("studio_module_"):
                 self._select_studio_module(key.replace("studio_module_", "", 1))
+                return True
+            if key.startswith("sampler_pad_"):
+                self._trigger_sampler_pad(
+                    sess, int(key.rsplit("_", 1)[1]))
+                return True
+            if key == "sampler_sample_prev":
+                self._cycle_sampler_sample(-1)
+                return True
+            if key == "sampler_sample_next":
+                self._cycle_sampler_sample(1)
+                return True
+            if key == "sampler_assign":
+                self._assign_sampler_sample(sess)
+                return True
+            if key == "sampler_clear":
+                self._clear_sampler_pad(sess)
+                return True
+            if key == "sampler_load_starter":
+                self._load_sampler_starter(sess)
+                return True
+            if key == "sampler_stop":
+                self._stop_sampler()
                 return True
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(
