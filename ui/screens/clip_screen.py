@@ -400,7 +400,8 @@ class ClipScreen:
         else:
             self._performer_message = "step export failed"
 
-    def _play_sp_beat_bass(self, sess) -> None:
+    def _play_sp_beat_bass(self, sess, *, loops: int = 0,
+                           message_prefix: str = "playing") -> None:
         target = self._sp_beat_bass_target()
         self._set_selected_track_target(sess, target)
         sender, port_label = self._midi_sender_for_target(target.key)
@@ -414,13 +415,19 @@ class ClipScreen:
                 send_message=sender,
                 target_key=target.key,
                 port_label=port_label,
-                loops=0,
+                loops=loops,
                 bpm_provider=lambda: self._performer_bpm(sess),
                 feel_provider=lambda: self._performer_feel(),
             )
-            self._performer_message = f"playing {spec.name}"
+            self._performer_message = f"{message_prefix} {spec.name}"
         except Exception as exc:
             self._performer_message = f"play failed: {exc}"
+
+    def _capture_sp_pattern_once(self, sess) -> None:
+        spec = self._current_performer_spec()
+        self._play_sp_beat_bass(sess, loops=1, message_prefix="record pass")
+        if self._performer_message.startswith("record pass"):
+            self._performer_message = f"record pass armed: {spec.name}"
 
     def _generate_sp_variation(self, sess) -> None:
         self._performer_seed += 1
@@ -799,6 +806,9 @@ class ClipScreen:
         x += 94
         self._button(surface, "performer_step_export",
                      pygame.Rect(x, button_top, 128, 34), "SEND STEP")
+        x += 136
+        self._button(surface, "performer_record_once",
+                     pygame.Rect(x, button_top, 86, 34), "REC 1X")
         button_top += 42
         x = 20
         self._button(surface, "performer_swing_down",
@@ -874,6 +884,9 @@ class ClipScreen:
                 return True
             if key == "performer_step_export":
                 self._export_performer_take_to_step_grid(sess)
+                return True
+            if key == "performer_record_once":
+                self._capture_sp_pattern_once(sess)
                 return True
             if key == "performer_swing_down":
                 self._adjust_performer_feel("swing", -2.0)
