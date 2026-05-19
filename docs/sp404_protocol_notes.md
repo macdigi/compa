@@ -182,3 +182,22 @@ import/delete/write commands.
 
 Mac capture workflow is documented in
 docs/sp404_librarian_capture_workflow.md.
+
+## Mac capture attempt (2026-05-19)
+
+Jordan provided a Mac mini capture bundle from the official Roland SP-404MKII
+App 4.05. It confirmed the expected normal-mode USB nodes:
+
+- /dev/cu.usbmodem11101
+- /dev/tty.usbmodem11101
+
+The ioreg output also confirmed the two SP USB personalities:
+
+- 0582:02e7 Roland CDC/librarian interface
+- 0582:0281 audio/MIDI interface
+
+The DTrace capture was inconclusive. Earlier attempts were blocked by SIP/probe
+compatibility, and the final trace only contained the startup banner with no
+OPEN/IOCTL/TX/RX events. Next capture path is the DYLD interposer in
+tools/mac_sp404_capture_interpose.sh, which should log serial read/write
+traffic as JSONL if macOS hardened runtime does not block library injection.

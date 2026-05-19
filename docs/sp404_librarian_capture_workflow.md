@@ -3,6 +3,10 @@
 Goal: capture the official Roland app's normal-mode librarian traffic so Compa
 can reproduce read-only project/pad listing before attempting writes.
 
+The first Mac DTrace attempt confirmed the SP-404 USB devices and app version,
+but it did not capture serial TX/RX. On this Mac, prefer the DYLD interposer
+capture below; keep the DTrace script as a fallback only.
+
 ## What to Capture
 
 Capture one action at a time. Avoid import, delete, restore, or project-write
@@ -32,23 +36,54 @@ Please run these steps on the Mac:
 
 1. Close the Roland SP-404MKII App.
 2. Keep the SP-404MKII connected normally by USB.
-3. Create ~/Desktop/sp404-capture.
-4. Create the DTrace script below as ~/Desktop/sp404-capture/sp404_serial_trace.d.
-5. Start the trace with:
-   sudo dtrace -q -s ~/Desktop/sp404-capture/sp404_serial_trace.d | tee ~/Desktop/sp404-capture/sp404_trace_$(date -u +%Y%m%dT%H%M%SZ).txt
-6. Launch the Roland SP-404MKII App.
-7. Wait for it to detect the SP, list projects/pads, then click/view one known pad.
-8. Stop the trace with Ctrl-C.
-9. Save a short notes file describing exactly what you clicked and the app version.
-10. Zip ~/Desktop/sp404-capture and report the path.
+3. In the Compa repo checkout, run:
+   git fetch origin pi-runtime-fixes
+   git checkout pi-runtime-fixes
+   bash tools/mac_sp404_capture_interpose.sh
+4. The script launches the Roland app. Wait for it to detect the SP, list
+   projects/pads, then click/view one known pad.
+5. Quit the Roland app.
+6. Save a short notes file describing exactly what you clicked and the app version.
+7. Zip ~/Desktop/sp404-capture and report the path.
 
-If DTrace is blocked by macOS security, report the exact error and still save:
+If the app refuses to launch, or the log only contains trace_start/trace_stop,
+save the exact terminal output and also run:
+   codesign -dv --verbose=4 /Applications/Roland/SP-404MKII.app
+
+Still save:
 - ls -l /dev/cu.usbmodem* /dev/tty.usbmodem*
 - ioreg -p IOUSB -l | grep -i -A20 -B5 'SP-404'
 - a zip of ~/SP404 User if it exists
 ~~~~
 
-## DTrace Script
+## Preferred Mac Capture: DYLD Interposer
+
+Use this first. It launches the Roland app with a small local interposer that
+logs serial-port open/read/write/ioctl calls as JSONL.
+
+~~~~bash
+git fetch origin pi-runtime-fixes
+git checkout pi-runtime-fixes
+bash tools/mac_sp404_capture_interpose.sh
+~~~~
+
+Expected useful lines look like:
+
+~~~~json
+{"event":"open","fd":17,"path":"/dev/cu.usbmodem11101"}
+{"event":"tx","fd":17,"len":12,"hex":"12 60 e0 05 fe 67 00 6d 33 31 31 03"}
+{"event":"rx","fd":17,"len":35,"hex":"13 e0 3f 05 44 6e e0 82 88 e8 5b 83 13 00 00 00 7e 04 00 04 00 08 00 01 ff ff ff ff 00 02 00 00 00 0b 33"}
+~~~~
+
+If the log only has trace_start/trace_stop, macOS hardened runtime or app
+launch mechanics probably blocked DYLD_INSERT_LIBRARIES. Capture the
+codesign -dv --verbose=4 output and try the fallback.
+
+## Fallback: DTrace Script
+
+This is retained for systems where syscall DTrace probes are available. The
+2026-05-19 Mac mini capture showed SIP/probe limitations and only produced the
+startup banner, so do not rely on this path first.
 
 ~~~~d
 #pragma D option quiet
