@@ -61,6 +61,7 @@ class Push2Control:
         from ui.push2_modes.note_drum import NoteDrumMode
         from ui.push2_modes.note_synth import NoteSynthMode
         from ui.push2_modes.mix import MixMode
+        from ui.push2_modes.performer import PerformerMode
         from ui.push2_modes.stub_modes import (
             DeviceMode, BrowseMode, ClipEditorMode, MasterMode,
             SetupMode, UserMode, OverviewMode,
@@ -70,6 +71,7 @@ class Push2Control:
             "note_drum": NoteDrumMode(self),
             "note_synth": NoteSynthMode(self),
             "mix": MixMode(self),
+            "performer": PerformerMode(self),
             "device": DeviceMode(self),
             "browse": BrowseMode(self),
             "clip_editor": ClipEditorMode(self),
@@ -348,6 +350,11 @@ class Push2Control:
                 self.modifiers.press(ev.name)
             else:
                 self.modifiers.release(ev.name)
+
+        if (ev.is_press and getattr(mode, "name", "") == "performer"
+                and ev.name in ("play", "stop_clip", "record")):
+            if mode.on_button(ev.name, ev.is_press):
+                return
 
         # Top-level mode switches (only on press)
         if ev.is_press:

@@ -71,10 +71,23 @@ class ClipScreen:
         ctrl = getattr(self.app, "push2_control", None)
         if ctrl is not None:
             ctrl.request_redraw()
+        self._sync_push2_mode()
 
     def on_exit(self) -> None:
         # Keep explicit user-started Studio audio running in the background.
         pass
+
+    def _sync_push2_mode(self) -> None:
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is None:
+            return
+        desired = "performer" if self._tab == "performer" else "session"
+        if getattr(ctrl, "mode_name", "") != desired:
+            ctrl.switch_mode(desired)
+
+    def _set_tab(self, tab: str) -> None:
+        self._tab = tab
+        self._sync_push2_mode()
 
     # ── Color helpers ─────────────────────────────────────────────
     def _palette_rgb(self, idx: int) -> tuple[int, int, int]:
@@ -304,6 +317,10 @@ class ClipScreen:
             self._performer_take_idx + int(direction)) % MAX_PERFORMER_TAKES
         self._performer_message = f"selected {self._take_label(sess)}"
 
+    def _select_performer_take(self, sess, idx: int) -> None:
+        self._performer_take_idx = max(0, min(MAX_PERFORMER_TAKES - 1, int(idx)))
+        self._performer_message = f"selected {self._take_label(sess)}"
+
     def _save_performer_take(self, sess) -> None:
         spec = self._current_performer_spec()
         takes = self._performer_takes(sess)
@@ -475,6 +492,26 @@ class ClipScreen:
         txt = font.render(label, True, (238, 238, 244))
         surface.blit(txt, txt.get_rect(center=rect.center))
 
+    def _panel(self, surface: pygame.Surface, rect: pygame.Rect,
+               title: str) -> int:
+        pygame.draw.rect(surface, (18, 20, 30), rect, border_radius=6)
+        pygame.draw.rect(surface, (46, 52, 72), rect, 1, border_radius=6)
+        font = pygame.font.SysFont("Arial", 13, bold=True)
+        surface.blit(font.render(title.upper(), True, (174, 188, 222)),
+                     (rect.x + 14, rect.y + 10))
+        return rect.y + 34
+
+    def _info_pair(self, surface: pygame.Surface, x: int, y: int,
+                   title: str, value: str, width: int) -> None:
+        font = pygame.font.SysFont("Arial", 12, bold=True)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        pygame.draw.rect(surface, (24, 27, 38), (x, y, width, 42),
+                         border_radius=4)
+        surface.blit(font.render(title.upper()[:16], True, (226, 230, 242)),
+                     (x + 10, y + 6))
+        surface.blit(font_sm.render(value[:32], True, (150, 162, 184)),
+                     (x + 10, y + 24))
+
     def _draw_tabs(self, surface: pygame.Surface, y: int,
                    width: int) -> int:
         self._tab_rects.clear()
@@ -532,6 +569,7 @@ class ClipScreen:
             surf = font.render("Clip engine not initialized", True, (220, 220, 220))
             surface.blit(surf, (40, 40))
             return
+        self._sync_push2_mode()
 
         # Top bar
         f_big = pygame.font.SysFont("Arial", 24, bold=True)
@@ -699,6 +737,7 @@ class ClipScreen:
                              (rect.x + 10, rect.y + 27))
 
     def _draw_performer_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 22, bold=True)
         font = pygame.font.SysFont("Arial", 14)
         font_sm = pygame.font.SysFont("Arial", 12)
         track_idx = self._selected_track_index(sess)
@@ -709,125 +748,140 @@ class ClipScreen:
         spec = self._current_performer_spec()
         sender, port_label = self._midi_sender_for_target(SP404_BEAT_BASS_TARGET)
         midi_status = "ready" if sender is not None else f"{port_label or 'SP-404'} missing"
-        rows = [
-            (f"Track {track_idx + 1}", track.name if track is not None else "none"),
-            ("Target", target.label or capability.label),
-            ("Genre", self._style_label(self._performer_style())),
-            ("Take", self._take_label(sess)),
-            ("Feel", self._feel_label()),
-            ("Pattern", spec.name),
-            ("Tempo", f"follows Studio BPM: {self._performer_bpm(sess):.1f}"),
-            ("MIDI", midi_status),
-        ]
+        w = surface.get_width()
+        margin = 20
+        gap = 12
+        content_w = w - margin * 2
+        left_w = int(content_w * 0.62)
+        right_w = content_w - left_w - gap
+        y = top + 42
+        left_x = margin
+        right_x = margin + left_w + gap
+
+        state = "Muted" if status["muted"] else (
+            "Playing" if status["running"] else "Stopped")
         if status.get("queued_pattern_name"):
-            rows.append(("Queued", status["queued_pattern_name"]))
-        if status.get("sequence_enabled"):
-            rows.append((
-                "Chain",
-                f"{status.get('sequence_position', 0)}/"
-                f"{status.get('sequence_count', 0)} takes",
-            ))
-        if self._performer_message:
-            rows.append(("Status", self._performer_message))
+            state = f"Queued: {status['queued_pattern_name'][:24]}"
+        elif status.get("sequence_enabled"):
+            state = (
+                f"Chain {status.get('sequence_position', 0)}/"
+                f"{status.get('sequence_count', 0)}")
+        elif self._performer_message:
+            state = self._performer_message[:42]
         elif status["last_error"]:
-            rows.append(("Status", status["last_error"]))
-        elif status["running"]:
-            rows.append(("Status", "playing" if not status["muted"] else "muted"))
+            state = status["last_error"][:42]
 
-        y = top + 48
-        row_h = 38
-        gap = 8
-        columns = 2
-        col_w = (surface.get_width() - 40 - gap) // columns
-        for idx, (title, detail) in enumerate(rows):
-            col = idx % columns
-            row = idx // columns
-            rect = pygame.Rect(
-                20 + col * (col_w + gap),
-                y + row * (row_h + 6),
-                col_w,
-                row_h,
-            )
-            pygame.draw.rect(surface, (24, 26, 36), rect, border_radius=4)
-            pygame.draw.rect(surface, (52, 58, 78), rect, 1, border_radius=4)
-            surface.blit(font.render(str(title)[:14], True, (224, 228, 238)),
-                         (rect.x + 10, rect.y + 6))
-            surface.blit(font_sm.render(str(detail)[:38], True,
-                                        (156, 166, 184)),
-                         (rect.x + 92, rect.y + 8))
+        surface.blit(font_big.render("Performer", True, (236, 240, 248)),
+                     (left_x, top + 8))
+        surface.blit(font.render(
+            f"{spec.name[:52]}   {self._performer_bpm(sess):.1f} BPM",
+            True, (150, 162, 184)), (left_x + 130, top + 15))
 
-        row_count = (len(rows) + columns - 1) // columns
-        button_top = y + row_count * (row_h + 6) + 8
-        x = 20
-        self._button(surface, "performer_target_next",
-                     pygame.Rect(x, button_top, 112, 34), "TARGET +")
-        x += 120
+        current_rect = pygame.Rect(left_x, y, left_w, 118)
+        cy = self._panel(surface, current_rect, "Current Pattern")
+        pair_w = (left_w - 40) // 3
+        self._info_pair(surface, left_x + 14, cy, "Target",
+                        target.label or capability.label, pair_w)
+        self._info_pair(surface, left_x + 24 + pair_w, cy, "State",
+                        state, pair_w)
+        self._info_pair(surface, left_x + 34 + pair_w * 2, cy, "MIDI",
+                        midi_status, pair_w)
+        cy += 52
         self._button(surface, "performer_assign_sp",
-                     pygame.Rect(x, button_top, 140, 34), "SET SP A1-A6",
+                     pygame.Rect(left_x + 14, cy, 146, 34), "Use SP A1-A6",
                      active=target.key == SP404_BEAT_BASS_TARGET)
-        x += 148
         self._button(surface, "performer_genre",
-                     pygame.Rect(x, button_top, 88, 34), "GENRE +")
-        x += 96
+                     pygame.Rect(left_x + 170, cy, 168, 34),
+                     f"Genre: {self._style_label(self._performer_style())}")
         self._button(surface, "performer_generate",
-                     pygame.Rect(x, button_top, 72, 34), "GEN")
-        x += 80
+                     pygame.Rect(left_x + 348, cy, 132, 34), "Generate")
+
+        transport_rect = pygame.Rect(left_x, y + 130, left_w, 86)
+        ty = self._panel(surface, transport_rect, "Transport")
         self._button(surface, "performer_play_v3",
-                     pygame.Rect(x, button_top, 78, 34), "PLAY",
+                     pygame.Rect(left_x + 14, ty, 132, 38), "Play Loop",
                      active=bool(status["running"]))
-        x += 86
-        self._button(surface, "performer_mute",
-                     pygame.Rect(x, button_top, 92, 34),
-                     "UNMUTE" if status["muted"] else "MUTE",
-                     active=bool(status["muted"]))
-        x += 100
         self._button(surface, "performer_stop",
-                     pygame.Rect(x, button_top, 84, 34), "STOP",
+                     pygame.Rect(left_x + 156, ty, 104, 38), "Stop",
                      danger=True)
-        button_top += 42
-        x = 20
-        self._button(surface, "performer_take_prev",
-                     pygame.Rect(x, button_top, 78, 34), "TAKE -")
-        x += 86
-        self._button(surface, "performer_take_next",
-                     pygame.Rect(x, button_top, 78, 34), "TAKE +")
-        x += 86
-        self._button(surface, "performer_take_save",
-                     pygame.Rect(x, button_top, 72, 34), "SAVE")
-        x += 80
-        recall_label = "QUEUE" if status["running"] else "PLAY"
-        self._button(surface, "performer_take_load",
-                     pygame.Rect(x, button_top, 82, 34), recall_label,
-                     active=bool(self._current_take(sess)))
-        x += 90
-        self._button(surface, "performer_take_chain",
-                     pygame.Rect(x, button_top, 86, 34), "CHAIN",
-                     active=bool(status.get("sequence_enabled")))
-        x += 94
-        self._button(surface, "performer_step_export",
-                     pygame.Rect(x, button_top, 128, 34), "SEND STEP")
-        x += 136
+        self._button(surface, "performer_mute",
+                     pygame.Rect(left_x + 270, ty, 124, 38),
+                     "Unmute" if status["muted"] else "Mute",
+                     active=bool(status["muted"]))
         self._button(surface, "performer_record_once",
-                     pygame.Rect(x, button_top, 86, 34), "REC 1X")
-        button_top += 42
-        x = 20
-        self._button(surface, "performer_swing_down",
-                     pygame.Rect(x, button_top, 66, 34), "SW -")
-        x += 74
-        self._button(surface, "performer_swing_up",
-                     pygame.Rect(x, button_top, 66, 34), "SW +")
-        x += 78
-        self._button(surface, "performer_human_down",
-                     pygame.Rect(x, button_top, 74, 34), "HU -")
-        x += 82
-        self._button(surface, "performer_human_up",
-                     pygame.Rect(x, button_top, 74, 34), "HU +")
-        x += 86
-        self._button(surface, "performer_gate_down",
-                     pygame.Rect(x, button_top, 86, 34), "GATE -")
-        x += 94
-        self._button(surface, "performer_gate_up",
-                     pygame.Rect(x, button_top, 86, 34), "GATE +")
+                     pygame.Rect(left_x + 404, ty, 138, 38), "Record Once")
+
+        takes_rect = pygame.Rect(left_x, y + 228, left_w, 224)
+        ky = self._panel(surface, takes_rect, "Take Bank")
+        takes = self._performer_takes(sess)
+        slot_gap = 8
+        slot_w = (left_w - 28 - slot_gap * 3) // 4
+        for idx in range(MAX_PERFORMER_TAKES):
+            row = idx // 4
+            col = idx % 4
+            sx = left_x + 14 + col * (slot_w + slot_gap)
+            sy = ky + row * 44
+            take = takes[idx]
+            label = f"Take {idx + 1}"
+            if take:
+                label += " saved"
+            self._button(
+                surface,
+                f"performer_take_select_{idx}",
+                pygame.Rect(sx, sy, slot_w, 36),
+                label,
+                active=idx == self._performer_take_idx,
+            )
+        ay = ky + 94
+        recall_label = "Queue Take" if status["running"] else "Play Take"
+        self._button(surface, "performer_take_save",
+                     pygame.Rect(left_x + 14, ay, 126, 36), "Save Take")
+        self._button(surface, "performer_take_load",
+                     pygame.Rect(left_x + 150, ay, 130, 36), recall_label,
+                     active=bool(self._current_take(sess)))
+        self._button(surface, "performer_take_chain",
+                     pygame.Rect(left_x + 290, ay, 136, 36), "Chain Takes",
+                     active=bool(status.get("sequence_enabled")))
+        self._button(surface, "performer_step_export",
+                     pygame.Rect(left_x + 436, ay, 140, 36), "Send To Steps")
+
+        feel_rect = pygame.Rect(right_x, y, right_w, 260)
+        fy = self._panel(surface, feel_rect, "Feel Controls")
+        feel = self._performer_feel()
+
+        def param_row(row_y: int, title: str, value: str,
+                      down_key: str, up_key: str) -> None:
+            surface.blit(font.render(title, True, (226, 230, 242)),
+                         (right_x + 16, row_y + 7))
+            surface.blit(font_big.render(value, True, (236, 240, 248)),
+                         (right_x + 150, row_y + 1))
+            self._button(surface, down_key,
+                         pygame.Rect(right_x + right_w - 104, row_y, 42, 34),
+                         "-")
+            self._button(surface, up_key,
+                         pygame.Rect(right_x + right_w - 54, row_y, 42, 34),
+                         "+")
+
+        param_row(fy, "Swing", f"{feel['swing']:.0f}",
+                  "performer_swing_down", "performer_swing_up")
+        param_row(fy + 54, "Humanize", f"{feel['humanize']:.0f}",
+                  "performer_human_down", "performer_human_up")
+        param_row(fy + 108, "Gate Length", f"{feel['gate'] * 100:.0f}%",
+                  "performer_gate_down", "performer_gate_up")
+        surface.blit(font_sm.render(
+            "Push 2 encoders 1-3 mirror these values.",
+            True, (126, 138, 162)), (right_x + 16, fy + 174))
+
+        map_rect = pygame.Rect(right_x, y + 272, right_w, 180)
+        my = self._panel(surface, map_rect, "Push 2")
+        lines = [
+            "Enc 1 Swing   Enc 2 Humanize   Enc 3 Gate",
+            "Lower buttons: Play Stop Gen Save Queue Chain Rec Step",
+            "Pad row 1 selects takes; row 2 plays or queues them",
+        ]
+        for i, line in enumerate(lines):
+            surface.blit(font_sm.render(line, True, (156, 166, 184)),
+                         (right_x + 16, my + i * 26))
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -841,11 +895,15 @@ class ClipScreen:
         mx, my = event.pos
         for key, rect in self._tab_rects.items():
             if rect.collidepoint(mx, my):
-                self._tab = key
+                self._set_tab(key)
                 return True
         for key, rect in self._buttons.items():
             if not rect.collidepoint(mx, my):
                 continue
+            if key.startswith("performer_take_select_"):
+                self._select_performer_take(
+                    sess, int(key.rsplit("_", 1)[1]))
+                return True
             if key == "stop_all":
                 self._stop_all()
                 return True
@@ -889,22 +947,22 @@ class ClipScreen:
                 self._capture_sp_pattern_once(sess)
                 return True
             if key == "performer_swing_down":
-                self._adjust_performer_feel("swing", -2.0)
+                self._adjust_performer_feel("swing", -5.0)
                 return True
             if key == "performer_swing_up":
-                self._adjust_performer_feel("swing", 2.0)
+                self._adjust_performer_feel("swing", 5.0)
                 return True
             if key == "performer_human_down":
-                self._adjust_performer_feel("humanize", -5.0)
+                self._adjust_performer_feel("humanize", -10.0)
                 return True
             if key == "performer_human_up":
-                self._adjust_performer_feel("humanize", 5.0)
+                self._adjust_performer_feel("humanize", 10.0)
                 return True
             if key == "performer_gate_down":
-                self._adjust_performer_feel("gate", -0.1)
+                self._adjust_performer_feel("gate", -0.2)
                 return True
             if key == "performer_gate_up":
-                self._adjust_performer_feel("gate", 0.1)
+                self._adjust_performer_feel("gate", 0.2)
                 return True
             if key == "performer_mute":
                 self._toggle_performer_mute()

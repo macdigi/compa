@@ -3901,6 +3901,7 @@ class P6App:
                         session=session,
                         link_provider=lambda: self.link.beat,
                     )
+                    control.host_app = self
                     self.push2_surface = surface
                     self.push2_control = control
                     self.push2_render = RenderThread(control, fps=60)
