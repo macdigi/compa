@@ -764,6 +764,31 @@ def _paths_in_packet(data: bytes) -> list[str]:
     ]
 
 
+def _decode_nul_string(slot: bytes) -> str:
+    return slot.split(b"\x00", 1)[0].decode("ascii", "replace")
+
+
+def _frame_data(frame: dict, stream: bytes) -> bytes:
+    start = int(frame["stream_offset"])
+    return stream[start:start + int(frame["frame_len"])]
+
+
+def _command_body(frame: dict, stream: bytes) -> bytes:
+    return stream[int(frame["body_start"]):int(frame["body_end"])]
+
+
+def _metadata_pad_index(packet: bytes) -> int | None:
+    # Two captures targeting A1 and A2 only differ in this command field:
+    # A1 has 0, A2 has 1. Treat it as a zero-based pad index candidate.
+    if (
+        len(packet) >= 191
+        and packet.startswith(bytes.fromhex("13 60 e0 05"))
+        and packet[16] == 0x1E
+    ):
+        return packet[17]
+    return None
+
+
 def _print_write_wav_match(frames: list[dict], stream: bytes, wav_path: Path):
     info, expected = _load_wav_as_big_endian_pcm(wav_path)
     print(
@@ -813,6 +838,23 @@ def _print_write_wav_match(frames: list[dict], stream: bytes, wav_path: Path):
     if complete:
         print("upload conversion: WAV 16-bit PCM bytes are byte-swapped to big-endian on the wire")
 
+    rfwv_frames = [
+        frame for frame in frames
+        if frame["op"] == 0x06 and b"RFWV" in _command_body(frame, stream)
+    ]
+    for frame in rfwv_frames[:3]:
+        header = _parse_rfwv_header(_command_body(frame, stream))
+        if not header:
+            continue
+        smp_size = int(header.get("size_be") or 0) + 8
+        non_audio = smp_size - len(expected)
+        print(
+            "RFWV size interpretation:"
+            f" field={header.get('size_be')}"
+            f" full_smp_bytes={smp_size}"
+            f" non_audio_bytes={non_audio}"
+        )
+
 
 def cmd_write_summary(args: argparse.Namespace) -> int:
     events = _load_events(Path(args.log).expanduser())
@@ -856,6 +898,19 @@ def cmd_write_summary(args: argparse.Namespace) -> int:
     for op, count in op_counts.most_common(20):
         print(f"  op=0x{op:02x}: {count}")
 
+    path_pair_frames = [frame for frame in frames if frame["op"] == 0x17]
+    if path_pair_frames:
+        print("\nop=0x17 path-pair frames:")
+        for frame in path_pair_frames:
+            body = _command_body(frame, stream)
+            src_or_final = _decode_nul_string(body[:200])
+            tmp_or_peer = _decode_nul_string(body[200:400])
+            print(
+                f"  event={frame['event_index']:05d}"
+                f" slot0={src_or_final}"
+                f" slot1={tmp_or_peer}"
+            )
+
     interesting = [
         frame for frame in frames
         if (
@@ -865,7 +920,8 @@ def cmd_write_summary(args: argparse.Namespace) -> int:
     if interesting:
         print("\nwrite/data frames:")
         for frame in interesting:
-            body = stream[frame["body_start"]:frame["body_end"]]
+            data = _frame_data(frame, stream)
+            body = _command_body(frame, stream)
             rfwv = _parse_rfwv_header(body)
             extra = ""
             if rfwv:
@@ -880,6 +936,7 @@ def cmd_write_summary(args: argparse.Namespace) -> int:
                 f" op=0x{frame['op']:02x}"
                 f" declared=0x{frame['declared']:x}"
                 f" body={frame['body_len']}"
+                f" file_handle_candidate=0x{data[25]:02x}"
                 f" f7={frame['has_f7']}{extra}"
             )
 
@@ -893,7 +950,9 @@ def cmd_write_summary(args: argparse.Namespace) -> int:
             if name in data:
                 op = data[20] if len(data) > 21 and data.startswith(bytes.fromhex("13 60 e0 06")) else None
                 op_label = f"op=0x{op:02x}" if op is not None else "op=-"
-                print(f"  {idx:05d} {event['event']} len={event.get('len')} {op_label}")
+                pad_index = _metadata_pad_index(data)
+                pad_label = "" if pad_index is None else f" pad_index_candidate={pad_index}"
+                print(f"  {idx:05d} {event['event']} len={event.get('len')} {op_label}{pad_label}")
 
     if args.wav:
         try:

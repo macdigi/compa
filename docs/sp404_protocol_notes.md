@@ -297,6 +297,12 @@ Key findings:
 - The observed path setup sequence includes op 0x0a checks, one op 0x17
   packet containing both .SMP and .TMP, and op 0x0c/0x0d directory
   open/close-style packets for the SMPL directory.
+- Comparing the first-pass A1 import and the second-pass A2 import shows the
+  op 0x17 packet is two fixed 200-byte NUL-padded path slots:
+
+      slot0 = final .SMP path
+      slot1 = temporary .TMP path
+
 - The source WAV is streamed over the CDC link as byte-swapped 16-bit PCM:
   WAV little-endian samples become big-endian samples on the wire.
 - For this 48 kHz mono 1-second WAV, the upload was exactly 96,000 bytes and
@@ -315,10 +321,16 @@ Key findings:
 
       RFWV size=96504 sr=48000 ch=1 bits=16
 
-  That size is larger than the 96,000-byte source PCM payload, so the SP/app is
-  adding header/padding/metadata beyond the original WAV data.
+  The size field appears to mean full .SMP file size minus 8 bytes. For this
+  import: 96,504 + 8 = 96,512 total bytes, which is the 96,000-byte audio
+  payload plus one 512-byte non-audio/header block.
 - The sample name compa-sp404-write-probe appears in a later metadata packet
-  and in the device response.
+  and in the device response. Comparing the A1/A2 imports shows byte 17 in the
+  outgoing sample-name metadata packet changed from 0 to 1, so it is very
+  likely the zero-based pad index.
+- The op 0x06 audio/header frames carry a command byte that matched the handle
+  returned by the preceding target-path op 0x00 response: A1 used handle 0x01,
+  A2 used handle 0x05.
 - The app then reads the new .SMP back with the same read-style op 0x00,
   0x13, 0x07, 0x04, and 0x03 sequence used by the read-only probe.
 
@@ -326,6 +338,7 @@ Safety status:
 
 - We have enough information to understand the broad write flow.
 - We do not yet have enough information to safely replay writes from Compa.
-- Before any live write attempt, decode the exact meaning of op 0x17, the
-  .TMP promotion step, the RFWV size/padding rules, and the pad metadata
-  packet. A bad write here can corrupt a project or pad assignment.
+- Before any live write attempt, decode the exact open/write/close state
+  machine, confirm the temporary-file promotion behavior, and validate pad
+  metadata on a sacrificial pad/project. A bad write here can corrupt a project
+  or pad assignment.
