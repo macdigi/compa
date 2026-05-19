@@ -41,9 +41,9 @@ class Push2Control:
         self._dirty = True
         self._dirty_lock = threading.Lock()
         # Gating: only consume Push 2 events when active. The host
-        # toggles this on entering / leaving the Clips screen so the
+        # toggles this on entering / leaving Studio so the
         # existing Compa Push 2 modes (control / keys / pattern) keep
-        # working when we're not in Clips.
+        # working when we're not in Studio.
         self.is_active = False
 
         # Modes — instantiate lazily so we don't depend on PIL at import time

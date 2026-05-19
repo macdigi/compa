@@ -69,6 +69,8 @@ from ui.wizard import run_wizard
 
 # Custom pygame events (thread-safe MIDI → UI bridge)
 P6_TRANSPORT_EVENT = pygame.USEREVENT + 1
+STUDIO_SCREEN = "studio"
+LEGACY_CLIPS_SCREEN = "clips"
 
 
 def load_config() -> dict:
@@ -87,11 +89,12 @@ def load_config() -> dict:
         # Records notes, CC moves, transport, generated clips, and
         # performance gestures under sessions/performances/.
         "PERFORMANCE_RECORDING_ENABLED": "1",
-        # Clips tab visibility. The Clips screen (Compa 2 clip launcher)
-        # is incomplete and not ready for users to interact with. Default
-        # OFF — hides the nav button, the F10 keyboard shortcut, and the
-        # Push 2 routing path that toggles into Clips. Flip to "1" when
-        # the feature is ready to ship. Long-term: gate by hardware (Pi 4+).
+        # Studio tab visibility. Studio is Compa's standalone clip /
+        # instrument surface; device cards remain for external hardware.
+        # CLIPS_TAB_ENABLED is kept as a legacy alias for older config.env
+        # files and shortcuts.
+        "STUDIO_TAB_ENABLED": "auto",
+        "STUDIO_AUDIO_ENABLED": "auto",
         "CLIPS_TAB_ENABLED": "0",
         # Default pre-roll for every REC press (seconds). 0 = off (clean
         # start at REC). Anything > 0 silently includes the prior N seconds
@@ -148,6 +151,61 @@ def save_config_key(key: str, value: str) -> None:
 
 class P6App:
     """Compa application."""
+
+    @staticmethod
+    def _config_enabled(value: object) -> bool | None:
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on", "enabled"):
+            return True
+        if text in ("0", "false", "no", "off", "disabled"):
+            return False
+        return None
+
+    @staticmethod
+    def _raspberry_pi_generation() -> int | None:
+        for path in (
+                "/proc/device-tree/model",
+                "/sys/firmware/devicetree/base/model"):
+            try:
+                with open(path, "rb") as f:
+                    model = f.read().decode("utf-8", "ignore").strip("\x00\n ")
+            except Exception:
+                continue
+            marker = "Raspberry Pi "
+            if marker not in model:
+                return None
+            rest = model.split(marker, 1)[1].strip()
+            if rest and rest[0].isdigit():
+                return int(rest[0])
+            return None
+        return None
+
+    def _studio_audio_supported(self) -> bool:
+        configured = self._config_enabled(
+            self.config.get("STUDIO_AUDIO_ENABLED", "auto"))
+        if configured is not None:
+            return configured
+        generation = self._raspberry_pi_generation()
+        if generation is None:
+            return True
+        return generation >= 4
+
+    def _studio_tab_enabled(self) -> bool:
+        configured = self._config_enabled(
+            self.config.get("STUDIO_TAB_ENABLED", "auto"))
+        if configured is not None:
+            return configured
+        legacy = self._config_enabled(self.config.get("CLIPS_TAB_ENABLED", "0"))
+        if legacy is True:
+            return True
+        return self._studio_audio_supported()
+
+    @staticmethod
+    def _is_studio_screen_name(name: str) -> bool:
+        return name in (STUDIO_SCREEN, LEGACY_CLIPS_SCREEN)
+
+    def _in_studio_screen(self) -> bool:
+        return self._is_studio_screen_name(self.current_screen_name)
 
     def __init__(self):
         self.config = load_config()
@@ -643,12 +701,15 @@ class P6App:
             "touch_calibrate": TouchCalibrateScreen(self),
         }
 
-        # Compa 2 Clips touchscreen — added after the dict to keep the
+        # Compa Studio touchscreen — added after the dict to keep the
         # registration tidy and so the screen can reference the engine
-        # we just built.
+        # we just built. A legacy "clips" alias is retained for older
+        # shortcuts/config paths.
         try:
             from ui.screens.clip_screen import ClipScreen
-            self.screens["clips"] = ClipScreen(self)
+            studio_screen = ClipScreen(self)
+            self.screens[STUDIO_SCREEN] = studio_screen
+            self.screens[LEGACY_CLIPS_SCREEN] = studio_screen
         except Exception as e:
             print(f"ClipScreen init failed: {e}", flush=True)
         self.current_screen_name = "session"
@@ -657,14 +718,14 @@ class P6App:
         # XFER is now a location inside the Files screen ("Device"), so
         # it no longer has its own nav slot. The transfer screen still
         # lives in self.screens["transfer"] and is delegated to by Files.
-        # Clips tab is feature-gated — see CLIPS_TAB_ENABLED in config.
+        # Studio tab is feature-gated — see STUDIO_TAB_ENABLED in config.
         nav_y = theme.SCREEN_HEIGHT - theme.NAV_HEIGHT
-        clips_enabled = self.config.get("CLIPS_TAB_ENABLED", "0") == "1"
+        studio_enabled = self._studio_tab_enabled()
         if theme.SCREEN_WIDTH >= 700:
             # Wide screen: full labels
             nav_labels = [
                 ("SESSION", "session"),
-                ("CLIPS",   "clips"),
+                ("STUDIO",  STUDIO_SCREEN),
                 ("RECORD",  "record"),
                 ("SAMPLE",  "sample"),
                 ("RADIO",   "radio"),
@@ -675,7 +736,7 @@ class P6App:
             # Medium screen: short labels
             nav_labels = [
                 ("SES", "session"),
-                ("CLP", "clips"),
+                ("STD", STUDIO_SCREEN),
                 ("REC", "record"),
                 ("SMP", "sample"),
                 ("RAD", "radio"),
@@ -686,15 +747,18 @@ class P6App:
             # Tiny screen: icons/minimal
             nav_labels = [
                 ("S", "session"),
-                ("C", "clips"),
+                ("ST", STUDIO_SCREEN),
                 ("R", "record"),
                 ("F", "sample"),
                 ("~", "radio"),
                 ("FB", "files"),
             ]
             font_name = "tiny"
-        if not clips_enabled:
-            nav_labels = [pair for pair in nav_labels if pair[1] != "clips"]
+        if not studio_enabled:
+            nav_labels = [
+                pair for pair in nav_labels
+                if not self._is_studio_screen_name(pair[1])
+            ]
 
         self.nav_buttons: list[tuple[Button, str]] = []
         num_btns = len(nav_labels)
@@ -1388,8 +1452,8 @@ class P6App:
         """Push 2 pad hit. Dispatch depends on the current push2_mode,
         which mirrors the focused device-workspace tab on Compa
         (control / keys / sequence / pattern / ...)."""
-        # Compa 2 takes over when on Clips screen.
-        if (self.current_screen_name == "clips"
+        # Studio takes over Push 2 while the Studio screen is active.
+        if (self._in_studio_screen()
                 and self.push2_control is not None
                 and self.push2_control.is_active):
             self.push2_surface.dispatch_pad(idx, velocity)
@@ -2248,8 +2312,8 @@ class P6App:
         """Tempo / Master / Swing encoders. Records a transient event
         so the Push 2 display can show a short popup with the current
         value when the user turns one of these knobs."""
-        # Compa 2 takeover
-        if (self.current_screen_name == "clips"
+        # Studio takeover
+        if (self._in_studio_screen()
                 and self.push2_control is not None
                 and self.push2_control.is_active):
             self.push2_surface.dispatch_special_encoder(name, delta)
@@ -2459,23 +2523,22 @@ class P6App:
 
     def _on_push2_button(self, name: str, value: int):
         """Push 2 transport / function buttons."""
-        # Push 2 Clip button (CC 113) → toggle Compa 2 Clips screen.
-        # Press goes to clips; press again from clips returns to the
-        # last device-workspace screen. Gated by CLIPS_TAB_ENABLED — when
+        # Push 2 Clip button (CC 113) → toggle Compa Studio.
+        # Press goes to Studio; press again from Studio returns to the
+        # last device-workspace screen. Gated by STUDIO_TAB_ENABLED — when
         # disabled, the Clip button is a no-op so users can't end up on
         # an incomplete screen.
-        if (name == "clip" and value > 0
-                and self.config.get("CLIPS_TAB_ENABLED", "0") == "1"):
-            if self.current_screen_name == "clips":
+        if name == "clip" and value > 0 and self._studio_tab_enabled():
+            if self._in_studio_screen():
                 # Bounce back to whatever the user was on before
                 back = getattr(self, "_pre_clips_screen", "session")
                 self.switch_screen(back)
             else:
                 self._pre_clips_screen = self.current_screen_name
-                self.switch_screen("clips")
+                self.switch_screen(STUDIO_SCREEN)
             return
-        # Compa 2 takes over when on Clips screen.
-        if (self.current_screen_name == "clips"
+        # Studio takes over Push 2 while the Studio screen is active.
+        if (self._in_studio_screen()
                 and self.push2_control is not None
                 and self.push2_control.is_active):
             self.push2_surface.dispatch_button(name, value)
@@ -3139,7 +3202,7 @@ class P6App:
     def _on_push2_encoder(self, idx: int, delta: int):
         """Push 2 performance encoder turn.
 
-        Compa 2 takes over when on Clips screen.
+        Studio takes over when the Studio screen is active.
 
         Pattern mode (overlay sequencer): encoders 1-2 are the
         "remix" knobs — encoder 1 re-rolls the step grid at a
@@ -3157,8 +3220,8 @@ class P6App:
           - encoders 1-6 adjust Ctrl 1-6 of the active bus
           - encoder 7 reserved
           - encoder 8 cycles the active effect (CC#83)."""
-        # Compa 2 takeover
-        if (self.current_screen_name == "clips"
+        # Studio takeover
+        if (self._in_studio_screen()
                 and self.push2_control is not None
                 and self.push2_control.is_active):
             self.push2_surface.dispatch_encoder(idx, delta)
@@ -3815,7 +3878,7 @@ class P6App:
             # Audio stream (own OutputStream, not shared with audio_engine)
             self.clip_stream = ClipStream(engine, link=self.link,
                                           sample_rate=44100, block_size=256)
-            # Don't start the stream until the user enters Clips screen,
+            # Don't start the stream until the user enters Studio,
             # so Compa 1 features keep working on Pi 3B + Pi 5 without
             # a parallel audio device contending for the bus.
 
@@ -4068,15 +4131,21 @@ class P6App:
             if old_screen and hasattr(old_screen, "on_exit"):
                 old_screen.on_exit()
             self._screen_context = context or {}
-            # Start / stop clip audio stream as we enter / leave clips
-            if name == "clips":
-                if self.clip_stream is not None and not self.clip_stream.running:
-                    self.clip_stream.start()
+            # Start / stop clip audio stream as we enter / leave Studio
+            if self._is_studio_screen_name(name):
+                # Do not start Studio audio just by opening the screen.
+                # The Studio surface starts it only when the user launches
+                # clips or explicitly toggles audio on.
+                if (self.clip_engine is not None
+                        and self.clip_stream is not None
+                        and self.clip_stream.running):
+                    self.clip_engine.active = True
                 if self.push2_control is not None:
                     self.push2_control.is_active = True
                     self.push2_control.request_redraw()
-            elif self.current_screen_name == "clips" and name != "clips":
-                # Leaving clips — surrender Push 2 back to the existing
+            elif (self._in_studio_screen()
+                    and not self._is_studio_screen_name(name)):
+                # Leaving Studio — surrender Push 2 back to the existing
                 # Compa Push 2 modes (control / keys / pattern), but keep
                 # clips playing in the background.
                 if self.push2_control is not None:
@@ -4203,9 +4272,9 @@ class P6App:
                     pygame.K_F7: "help", pygame.K_F8: "settings",
                     pygame.K_F9: "kit",
                 }
-                # F10 → Clips only when the feature gate is on
-                if self.config.get("CLIPS_TAB_ENABLED", "0") == "1":
-                    NAV_KEYS[pygame.K_F10] = "clips"
+                # F10 → Studio only when the feature gate is on
+                if self._studio_tab_enabled():
+                    NAV_KEYS[pygame.K_F10] = STUDIO_SCREEN
                 if event.key in NAV_KEYS:
                     self.switch_screen(NAV_KEYS[event.key])
                     continue
