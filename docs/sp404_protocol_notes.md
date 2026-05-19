@@ -263,3 +263,69 @@ Files -> Device -> SP-404 while the SP is connected normally:
 - scanned pads show RFWV sample metadata in the SP grid
 - import/delete/move/backup/restore remain disabled unless a real mass-storage
   mount is present
+
+## Write/import capture (2026-05-19)
+
+Jordan provided a clean Mac mini capture from the official Roland SP-404MKII
+App 4.05 importing:
+
+    compa-sp404-write-probe-1s-48k-mono.wav
+
+into:
+
+    PROJECT_02 / Bank A / Pad 2
+    /SP404REMOTE///ROLAND/SP-404MKII/PROJECT_02/SMPL/BANK1-02.SMP
+
+The capture can be decoded with:
+
+    tools/sp404_protocol_lab.py parse-dtrace \
+      sp404_write_trace_secondpass_20260519T023043Z.txt \
+      --only-fd 4 --out secondpass.parsed.jsonl
+
+    tools/sp404_protocol_lab.py write-summary \
+      secondpass.parsed.jsonl \
+      --wav compa-sp404-write-probe-1s-48k-mono.wav \
+      --sample-name compa-sp404-write-probe
+
+Key findings:
+
+- The app targets both the final .SMP path and a temporary .TMP path:
+
+      /SP404REMOTE///ROLAND/SP-404MKII/PROJECT_02/SMPL/BANK1-02.SMP
+      /SP404REMOTE///ROLAND/SP-404MKII/PROJECT_02/SMPL/BANK1-02.TMP
+
+- The observed path setup sequence includes op 0x0a checks, one op 0x17
+  packet containing both .SMP and .TMP, and op 0x0c/0x0d directory
+  open/close-style packets for the SMPL directory.
+- The source WAV is streamed over the CDC link as byte-swapped 16-bit PCM:
+  WAV little-endian samples become big-endian samples on the wire.
+- For this 48 kHz mono 1-second WAV, the upload was exactly 96,000 bytes and
+  matched the source audio after byte-swapping.
+- The audio upload uses op 0x06 data frames with declared lengths that are
+  sixteen bytes larger than the raw payload:
+
+      0x5010 -> 20,480 bytes of audio payload
+      0x5010 -> 20,480 bytes of audio payload
+      0x5010 -> 20,480 bytes of audio payload
+      0x5010 -> 20,480 bytes of audio payload
+      0x3710 -> 14,080 bytes of audio payload
+
+- After the raw audio upload, the app sends another op 0x06 frame containing
+  an RFWV header block:
+
+      RFWV size=96504 sr=48000 ch=1 bits=16
+
+  That size is larger than the 96,000-byte source PCM payload, so the SP/app is
+  adding header/padding/metadata beyond the original WAV data.
+- The sample name compa-sp404-write-probe appears in a later metadata packet
+  and in the device response.
+- The app then reads the new .SMP back with the same read-style op 0x00,
+  0x13, 0x07, 0x04, and 0x03 sequence used by the read-only probe.
+
+Safety status:
+
+- We have enough information to understand the broad write flow.
+- We do not yet have enough information to safely replay writes from Compa.
+- Before any live write attempt, decode the exact meaning of op 0x17, the
+  .TMP promotion step, the RFWV size/padding rules, and the pad metadata
+  packet. A bad write here can corrupt a project or pad assignment.

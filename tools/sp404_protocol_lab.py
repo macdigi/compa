@@ -17,6 +17,7 @@ import re
 import select
 import sys
 import time
+import wave
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -649,6 +650,260 @@ def _print_capture_summary(events: list[dict]):
             print(f"  {count} {value}")
 
 
+def _build_tx_stream(events: list[dict]) -> tuple[bytes, list[tuple[int, int, int]]]:
+    stream_parts: list[bytes] = []
+    spans: list[tuple[int, int, int]] = []
+    offset = 0
+    for idx, event in enumerate(events):
+        if event.get("event") != "tx":
+            continue
+        hx = event.get("hex", "")
+        if not hx:
+            continue
+        data = _parse_hex(hx)
+        stream_parts.append(data)
+        spans.append((offset, offset + len(data), idx))
+        offset += len(data)
+    return b"".join(stream_parts), spans
+
+
+def _event_index_for_stream_offset(spans: list[tuple[int, int, int]], offset: int) -> int:
+    for start, end, event_idx in spans:
+        if start <= offset < end:
+            return event_idx
+    return -1
+
+
+def _iter_serial_command_frames(
+    stream: bytes,
+    spans: list[tuple[int, int, int]],
+) -> list[dict]:
+    frames: list[dict] = []
+    pos = 0
+    prefix = bytes.fromhex("13 60 e0 06")
+    sysex = bytes.fromhex("f0 41 7a 03")
+    while True:
+        start = stream.find(prefix, pos)
+        if start < 0:
+            break
+        if start + 21 > len(stream) or stream[start + 16:start + 20] != sysex:
+            pos = start + 1
+            continue
+
+        declared = int.from_bytes(stream[start + 12:start + 16], "little")
+        end = start + 16 + declared
+        if declared < 17 or end > len(stream):
+            pos = start + 1
+            continue
+
+        body_len = max(0, declared - 16)
+        body_start = start + 31
+        body_end = min(body_start + body_len, end - 1)
+        frames.append({
+            "stream_offset": start,
+            "event_index": _event_index_for_stream_offset(spans, start),
+            "op": stream[start + 20],
+            "declared": declared,
+            "frame_len": end - start,
+            "body_start": body_start,
+            "body_end": body_end,
+            "body_len": max(0, body_end - body_start),
+            "has_f7": stream[end - 1] == 0xF7,
+        })
+        pos = end
+    return frames
+
+
+def _load_wav_as_big_endian_pcm(path: Path) -> tuple[dict, bytes]:
+    with wave.open(str(path), "rb") as handle:
+        channels = handle.getnchannels()
+        sample_width = handle.getsampwidth()
+        sample_rate = handle.getframerate()
+        frames = handle.getnframes()
+        pcm = handle.readframes(frames)
+    if sample_width != 2:
+        raise ValueError("only 16-bit PCM WAV files are supported for comparison")
+    converted = b"".join(pcm[idx:idx + 2][::-1] for idx in range(0, len(pcm), 2))
+    return {
+        "channels": channels,
+        "sample_width": sample_width,
+        "sample_rate": sample_rate,
+        "frames": frames,
+        "pcm_bytes": len(pcm),
+    }, converted
+
+
+def _prefix_match_len(left: bytes, right: bytes) -> int:
+    limit = min(len(left), len(right))
+    for idx in range(limit):
+        if left[idx] != right[idx]:
+            return idx
+    return limit
+
+
+def _infer_import_target(events: list[dict]) -> str:
+    paths: Counter[str] = Counter()
+    for event in events:
+        if event.get("event") not in {"tx", "rx"}:
+            continue
+        hx = event.get("hex", "")
+        if not hx:
+            continue
+        data = _parse_hex(hx)
+        for match in re.finditer(rb"/SP404REMOTE///[^\x00\xff\xf7\s]+\.SMP", data):
+            paths[match.group(0).decode("ascii", "replace")] += 1
+    if not paths:
+        return ""
+    return paths.most_common(1)[0][0]
+
+
+def _paths_in_packet(data: bytes) -> list[str]:
+    return [
+        match.group(0).decode("ascii", "replace")
+        for match in re.finditer(rb"/SP404REMOTE///[^\x00\xff\xf7\s]+", data)
+    ]
+
+
+def _print_write_wav_match(frames: list[dict], stream: bytes, wav_path: Path):
+    info, expected = _load_wav_as_big_endian_pcm(wav_path)
+    print(
+        "\nsource WAV:"
+        f" {info['sample_rate']} Hz {info['channels']}ch"
+        f" {info['sample_width'] * 8}bit {info['frames']} frames"
+        f" ({info['pcm_bytes']} PCM bytes)"
+    )
+
+    upload_frames = [
+        frame for frame in frames
+        if frame["op"] == 0x06 and frame["body_len"] >= 512
+    ]
+    best: tuple[int, int, list[tuple[dict, int]]] = (0, 0, [])
+    for start_idx in range(len(upload_frames)):
+        expected_pos = 0
+        matched: list[tuple[dict, int]] = []
+        for frame in upload_frames[start_idx:]:
+            body = stream[frame["body_start"]:frame["body_end"]]
+            if not body:
+                continue
+            want = expected[expected_pos:expected_pos + len(body)]
+            common = _prefix_match_len(body, want)
+            if common <= 0:
+                break
+            matched.append((frame, common))
+            expected_pos += common
+            if common != len(body) or expected_pos >= len(expected):
+                break
+        if expected_pos > best[1]:
+            best = (start_idx, expected_pos, matched)
+
+    if not best[2]:
+        print("upload match: no contiguous WAV payload match found")
+        return
+
+    complete = best[1] == len(expected)
+    first_frame = best[2][0][0]
+    last_frame = best[2][-1][0]
+    print(
+        "upload match:"
+        f" {'complete' if complete else 'partial'}"
+        f" {best[1]}/{len(expected)} bytes"
+        f" across {len(best[2])} op=06 data frames"
+        f" (events {first_frame['event_index']}..{last_frame['event_index']})"
+    )
+    if complete:
+        print("upload conversion: WAV 16-bit PCM bytes are byte-swapped to big-endian on the wire")
+
+
+def cmd_write_summary(args: argparse.Namespace) -> int:
+    events = _load_events(Path(args.log).expanduser())
+    if not events:
+        print("no JSONL events found")
+        return 1
+
+    _print_capture_summary(events)
+    target = args.target_path or _infer_import_target(events)
+    tmp_target = target[:-4] + ".TMP" if target.endswith(".SMP") else ""
+    if target:
+        print(f"\nlikely import target: {target}")
+        if tmp_target:
+            print(f"temporary target: {tmp_target}")
+
+    if target:
+        print("\ntarget path events:")
+        shown = 0
+        for idx, event in enumerate(events):
+            if event.get("event") not in {"tx", "rx"}:
+                continue
+            data = _parse_hex(event.get("hex", ""))
+            paths = _paths_in_packet(data)
+            if target not in paths and tmp_target not in paths:
+                continue
+            op = data[20] if len(data) > 21 and data.startswith(bytes.fromhex("13 60 e0 06")) else None
+            op_label = f"op=0x{op:02x}" if op is not None else "op=-"
+            print(
+                f"  {idx:05d} {event['event']} len={event.get('len')} "
+                f"{op_label} paths={', '.join(paths)}"
+            )
+            shown += 1
+            if shown >= args.show_path_events:
+                print("  ... truncated")
+                break
+
+    stream, spans = _build_tx_stream(events)
+    frames = _iter_serial_command_frames(stream, spans)
+    print(f"\nserial command frames: {len(frames)}")
+    op_counts = Counter(frame["op"] for frame in frames)
+    for op, count in op_counts.most_common(20):
+        print(f"  op=0x{op:02x}: {count}")
+
+    interesting = [
+        frame for frame in frames
+        if (
+            frame["op"] == 0x06 and frame["body_len"] >= 512
+        ) or b"RFWV" in stream[frame["body_start"]:frame["body_end"]]
+    ]
+    if interesting:
+        print("\nwrite/data frames:")
+        for frame in interesting:
+            body = stream[frame["body_start"]:frame["body_end"]]
+            rfwv = _parse_rfwv_header(body)
+            extra = ""
+            if rfwv:
+                extra = (
+                    f" RFWV size={rfwv.get('size_be')}"
+                    f" sr={rfwv.get('sample_rate')}"
+                    f" ch={rfwv.get('channels')}"
+                    f" bits={rfwv.get('bit_depth')}"
+                )
+            print(
+                f"  event={frame['event_index']:05d}"
+                f" op=0x{frame['op']:02x}"
+                f" declared=0x{frame['declared']:x}"
+                f" body={frame['body_len']}"
+                f" f7={frame['has_f7']}{extra}"
+            )
+
+    name = args.sample_name.encode("utf-8") if args.sample_name else b""
+    if name:
+        print("\nsample-name metadata events:")
+        for idx, event in enumerate(events):
+            if event.get("event") not in {"tx", "rx"}:
+                continue
+            data = _parse_hex(event.get("hex", ""))
+            if name in data:
+                op = data[20] if len(data) > 21 and data.startswith(bytes.fromhex("13 60 e0 06")) else None
+                op_label = f"op=0x{op:02x}" if op is not None else "op=-"
+                print(f"  {idx:05d} {event['event']} len={event.get('len')} {op_label}")
+
+    if args.wav:
+        try:
+            _print_write_wav_match(frames, stream, Path(args.wav).expanduser())
+        except Exception as exc:
+            print(f"\nsource WAV comparison failed: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def cmd_capture_summary(args: argparse.Namespace) -> int:
     events = _load_events(Path(args.log).expanduser())
     if not events:
@@ -733,6 +988,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show-first", type=int, default=0)
     p.add_argument("--bytes", type=int, default=96)
     p.set_defaults(func=cmd_capture_summary)
+
+    p = sub.add_parser("write-summary", help="summarize an import/write capture without replaying packets")
+    p.add_argument("log")
+    p.add_argument("--wav", default="", help="optional source WAV to compare against upload frames")
+    p.add_argument("--target-path", default="", help="override inferred SP remote .SMP path")
+    p.add_argument("--sample-name", default="", help="sample name to locate in metadata packets")
+    p.add_argument("--show-path-events", type=int, default=40)
+    p.set_defaults(func=cmd_write_summary)
     return parser
 
 
