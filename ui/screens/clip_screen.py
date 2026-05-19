@@ -23,6 +23,7 @@ from engine.studio_performer import (
     confirmed_sp404_beat_bass_spec,
     feel_from_performer_take,
     generate_sp404_beat_bass_variation,
+    normalized_generator_controls,
     normalized_performer_feel,
     performer_take_from_spec,
     spec_from_performer_take,
@@ -65,6 +66,11 @@ class ClipScreen:
         self._performer_swing = 56.0
         self._performer_humanize = 0.0
         self._performer_gate = 1.0
+        self._performer_density = 60.0
+        self._performer_complexity = 45.0
+        self._performer_fill = 35.0
+        self._performer_bass_activity = 60.0
+        self._performer_variation = 50.0
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -280,6 +286,35 @@ class ClipScreen:
         suffix = " next loop" if self._performer_player().status()["running"] else ""
         self._performer_message = f"feel {self._feel_label()}{suffix}"
 
+    def _performer_generator_controls(self) -> dict:
+        return normalized_generator_controls({
+            "density": self._performer_density,
+            "complexity": self._performer_complexity,
+            "fill": self._performer_fill,
+            "bass_activity": self._performer_bass_activity,
+            "variation": self._performer_variation,
+        })
+
+    def _generator_label(self) -> str:
+        controls = self._performer_generator_controls()
+        return (
+            f"Dn {controls['density']:.0f}  Cx {controls['complexity']:.0f}  "
+            f"Fill {controls['fill']:.0f}  Bass {controls['bass_activity']:.0f}  "
+            f"Var {controls['variation']:.0f}")
+
+    def _adjust_performer_generator(self, field: str, delta: float) -> None:
+        controls = self._performer_generator_controls()
+        if field not in controls:
+            return
+        controls[field] += delta
+        controls = normalized_generator_controls(controls)
+        self._performer_density = controls["density"]
+        self._performer_complexity = controls["complexity"]
+        self._performer_fill = controls["fill"]
+        self._performer_bass_activity = controls["bass_activity"]
+        self._performer_variation = controls["variation"]
+        self._performer_message = f"generator {self._generator_label()}"
+
     def _performer_takes(self, sess) -> list:
         takes = getattr(sess, "studio_performer_takes", None)
         if not isinstance(takes, list):
@@ -482,10 +517,12 @@ class ClipScreen:
         self._performer_seed += 1
         style = self._performer_style()
         spec = generate_sp404_beat_bass_variation(
-            self._performer_seed, style=style)
+            self._performer_seed, style=style,
+            controls=self._performer_generator_controls())
         self._set_current_performer_spec(spec)
         status = self._performer_player().status()
-        self._performer_message = f"generated {self._style_label(style)}"
+        self._performer_message = (
+            f"generated {self._style_label(style)}  {self._generator_label()}")
         if status["running"]:
             self._performer_player().queue_spec(
                 spec, pattern_label=self._style_label(style))
@@ -966,7 +1003,7 @@ class ClipScreen:
                      pygame.Rect(action_x + (action_w + slot_gap) * 3, ay,
                                  action_w, 36), "Send To Steps")
 
-        feel_rect = pygame.Rect(right_x, y, right_w, 260)
+        feel_rect = pygame.Rect(right_x, y, right_w, 200)
         fy = self._panel(surface, feel_rect, "Feel Controls")
         feel = self._performer_feel()
 
@@ -975,7 +1012,7 @@ class ClipScreen:
             surface.blit(font.render(title, True, (226, 230, 242)),
                          (right_x + 16, row_y + 7))
             surface.blit(font_big.render(value, True, (236, 240, 248)),
-                         (right_x + 150, row_y + 1))
+                         (right_x + 128, row_y + 1))
             self._button(surface, down_key,
                          pygame.Rect(right_x + right_w - 104, row_y, 42, 34),
                          "-")
@@ -985,24 +1022,39 @@ class ClipScreen:
 
         param_row(fy, "Swing", f"{feel['swing']:.0f}",
                   "performer_swing_down", "performer_swing_up")
-        param_row(fy + 54, "Humanize", f"{feel['humanize']:.0f}",
+        param_row(fy + 42, "Humanize", f"{feel['humanize']:.0f}",
                   "performer_human_down", "performer_human_up")
-        param_row(fy + 108, "Gate Length", f"{feel['gate'] * 100:.0f}%",
+        param_row(fy + 84, "Gate Length", f"{feel['gate'] * 100:.0f}%",
                   "performer_gate_down", "performer_gate_up")
         surface.blit(font_sm.render(
-            "Push 2 encoders 1-3 mirror these values.",
-            True, (126, 138, 162)), (right_x + 16, fy + 174))
+            "Running changes land on the next loop.",
+            True, (126, 138, 162)), (right_x + 16, fy + 138))
 
-        map_rect = pygame.Rect(right_x, y + 272, right_w, 180)
-        my = self._panel(surface, map_rect, "Push 2")
-        lines = [
-            "Enc 1 Swing   Enc 2 Humanize   Enc 3 Gate",
-            "Lower buttons: Play Stop Gen Save Queue Chain Rec Step",
-            "Pad row 1 selects takes; row 2 plays or queues them",
-        ]
-        for i, line in enumerate(lines):
-            surface.blit(font_sm.render(line, True, (156, 166, 184)),
-                         (right_x + 16, my + i * 26))
+        gen_rect = pygame.Rect(right_x, y + 212, right_w, 270)
+        gy = self._panel(surface, gen_rect, "Generator")
+        gen = self._performer_generator_controls()
+
+        def gen_row(row_y: int, title: str, field: str) -> None:
+            surface.blit(font.render(title, True, (226, 230, 242)),
+                         (right_x + 16, row_y + 7))
+            surface.blit(font_big.render(f"{gen[field]:.0f}", True,
+                                         (236, 240, 248)),
+                         (right_x + 128, row_y + 1))
+            self._button(surface, f"performer_{field}_down",
+                         pygame.Rect(right_x + right_w - 104, row_y, 42, 34),
+                         "-")
+            self._button(surface, f"performer_{field}_up",
+                         pygame.Rect(right_x + right_w - 54, row_y, 42, 34),
+                         "+")
+
+        gen_row(gy, "Density", "density")
+        gen_row(gy + 40, "Complexity", "complexity")
+        gen_row(gy + 80, "Fill", "fill")
+        gen_row(gy + 120, "Bass Activity", "bass_activity")
+        gen_row(gy + 160, "Variation", "variation")
+        surface.blit(font_sm.render(
+            "Encoder pages: Feel / Gen / Takes",
+            True, (126, 138, 162)), (right_x + 16, gy + 214))
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -1084,6 +1136,22 @@ class ClipScreen:
                 return True
             if key == "performer_gate_up":
                 self._adjust_performer_feel("gate", 0.2)
+                return True
+            generator_buttons = {
+                "performer_density_down": ("density", -10.0),
+                "performer_density_up": ("density", 10.0),
+                "performer_complexity_down": ("complexity", -10.0),
+                "performer_complexity_up": ("complexity", 10.0),
+                "performer_fill_down": ("fill", -10.0),
+                "performer_fill_up": ("fill", 10.0),
+                "performer_bass_activity_down": ("bass_activity", -10.0),
+                "performer_bass_activity_up": ("bass_activity", 10.0),
+                "performer_variation_down": ("variation", -10.0),
+                "performer_variation_up": ("variation", 10.0),
+            }
+            if key in generator_buttons:
+                field, delta = generator_buttons[key]
+                self._adjust_performer_generator(field, delta)
                 return True
             if key == "performer_mute":
                 self._toggle_performer_mute()

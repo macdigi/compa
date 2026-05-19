@@ -12,6 +12,7 @@ from engine.studio_performer import (
     feel_from_performer_take,
     generate_sp404_beat_bass_variation,
     normalize_sp404_variation_style,
+    normalized_generator_controls,
     normalized_performer_feel,
     performer_take_from_spec,
     spec_from_performer_take,
@@ -135,6 +136,41 @@ class StudioPerformerTests(unittest.TestCase):
         )
         self.assertEqual(normalize_sp404_variation_style("boom bap", 1),
                          "busy_boom_bap")
+
+    def test_generated_variation_controls_affect_density_and_bass(self):
+        low = generate_sp404_beat_bass_variation(
+            11,
+            style="breakbeat",
+            controls={
+                "density": 10,
+                "complexity": 10,
+                "fill": 0,
+                "bass_activity": 10,
+                "variation": 0,
+            },
+        )
+        high = generate_sp404_beat_bass_variation(
+            11,
+            style="breakbeat",
+            controls={
+                "density": 100,
+                "complexity": 100,
+                "fill": 100,
+                "bass_activity": 100,
+                "variation": 100,
+            },
+        )
+        self.assertGreater(len(high.hits), len(low.hits))
+        self.assertGreater(len(high.chromatic_hits), len(low.chromatic_hits))
+        high_fill_hits = [
+            hit for hit in high.hits
+            if hit.step >= 56 and hit.label == "fill"
+        ]
+        self.assertGreaterEqual(len(high_fill_hits), 4)
+        self.assertEqual(normalized_generator_controls(
+            {"density": -4, "variation": 104})["density"], 0.0)
+        self.assertEqual(normalized_generator_controls(
+            {"density": -4, "variation": 104})["variation"], 100.0)
 
     def test_performer_take_round_trips_through_session(self):
         spec = generate_sp404_beat_bass_variation(2, style="breakbeat")

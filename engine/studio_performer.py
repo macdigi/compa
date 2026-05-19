@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Iterable
 
 from engine.ai_pattern import (
@@ -32,6 +32,29 @@ SP404_VARIATION_STYLES = (
     "busy_boom_bap",
     "dub_offbeat",
 )
+DEFAULT_GENERATOR_CONTROLS = {
+    "density": 60.0,
+    "complexity": 45.0,
+    "fill": 35.0,
+    "bass_activity": 60.0,
+    "variation": 50.0,
+}
+
+
+def normalized_generator_controls(controls: dict | None = None) -> dict:
+    controls = controls if isinstance(controls, dict) else {}
+    normalized = {}
+    for key, default in DEFAULT_GENERATOR_CONTROLS.items():
+        try:
+            value = float(controls.get(key, default))
+        except Exception:
+            value = default
+        normalized[key] = max(0.0, min(100.0, value))
+    return normalized
+
+
+def _unit(value: float) -> float:
+    return max(0.0, min(1.0, float(value) / 100.0))
 
 
 def normalize_sp404_variation_style(style: str | None, seed: int) -> str:
@@ -706,6 +729,7 @@ def confirmed_sp404_beat_bass_spec() -> PatternSpec:
 def generate_sp404_beat_bass_variation(
     seed: int,
     style: str | None = None,
+    controls: dict | None = None,
 ) -> PatternSpec:
     """Generate a distinct SP A1-A6 beat+bass variation.
 
@@ -716,6 +740,12 @@ def generate_sp404_beat_bass_variation(
 
     rng = random.Random(int(seed))
     style = normalize_sp404_variation_style(style, seed)
+    controls = normalized_generator_controls(controls)
+    density = _unit(controls["density"])
+    complexity = _unit(controls["complexity"])
+    fill = _unit(controls["fill"])
+    bass_activity = _unit(controls["bass_activity"])
+    variation = _unit(controls["variation"])
     hits: list[PatternHit] = []
 
     def add(pad: int, step: int, velocity: int, duration: float,
@@ -739,19 +769,25 @@ def generate_sp404_beat_bass_variation(
                      claps: tuple[int, ...] = ()) -> None:
         base = bar * 16
         for step in sorted(set(kicks)):
+            if step != 0 and rng.random() > 0.35 + density * 0.65:
+                continue
             add(0, base + step, 118 if step == 0 else 100, 1.7, "kick")
         for step in snares:
             add(1, base + step, 106, 1.2, "snare", 0.01)
         for step in ghosts:
-            if rng.random() < 0.78:
+            if rng.random() < 0.18 + complexity * 0.72:
                 add(1, base + step, 46, 0.9, "ghost snare", 0.1, 0.75)
         for step in hats:
+            if step % 4 != 0 and rng.random() > 0.22 + density * 0.78:
+                continue
             add(2, base + step, 84 if step % 8 == 0 else 66, 0.55,
                 "closed hat", 0.02 if step % 4 == 0 else 0.11)
         for step in open_hats:
-            add(3, base + step, 80, 1.4, "open hat", 0.04)
+            if rng.random() < 0.18 + density * 0.55 + complexity * 0.25:
+                add(3, base + step, 80, 1.4, "open hat", 0.04)
         for step in claps:
-            add(4, base + step, 76, 1.2, "clap layer")
+            if rng.random() < 0.2 + complexity * 0.62:
+                add(4, base + step, 76, 1.2, "clap layer")
 
     bass_steps: list[int]
     bass_notes: list[int]
@@ -849,23 +885,107 @@ def generate_sp404_beat_bass_variation(
         bass_notes = [48, 60, 55, 58, 48, 63, 55, 60]
         bass_durations = (2.6, 3.8, 5.6)
 
+    extra_hits = int(round(complexity * density * 8.0))
+    syncopation_steps = (1, 2, 3, 5, 7, 9, 10, 11, 13, 14, 15)
+    for _ in range(extra_hits):
+        bar = rng.randrange(4)
+        step = bar * 16 + rng.choice(syncopation_steps)
+        pad = rng.choice((1, 2, 4))
+        label = "sync snare" if pad == 1 else (
+            "sync hat" if pad == 2 else "sync perc")
+        add(
+            pad,
+            step,
+            52 + int(complexity * 44),
+            0.45 + complexity * 0.65,
+            label,
+            rng.uniform(-0.08, 0.14) * variation,
+            0.65 + complexity * 0.3,
+        )
+
+    fill_hits = int(round(fill * 8.0))
+    fill_steps = [56, 57, 58, 59, 60, 61, 62, 63]
+    for i in range(fill_hits):
+        step = fill_steps[(i + rng.randrange(len(fill_steps))) % len(fill_steps)]
+        pad = rng.choice((1, 1, 2, 4))
+        add(
+            pad,
+            step,
+            70 + int(fill * 42),
+            0.55 + fill * 0.8,
+            "fill",
+            rng.uniform(-0.05, 0.12) * variation,
+        )
+
+    processed_hits: list[PatternHit] = []
+    for hit in hits:
+        anchor = (
+            (hit.pad == 0 and hit.step % 16 == 0)
+            or (hit.pad == 1 and hit.label == "snare")
+        )
+        jitter = 0.0 if anchor else rng.uniform(-0.08, 0.14) * variation
+        velocity_spread = int(round(18 * variation))
+        duration_scale = 1.0 + rng.uniform(-0.18, 0.28) * variation
+        processed_hits.append(replace(
+            hit,
+            velocity=max(
+                1,
+                min(127, hit.velocity + rng.randint(
+                    -velocity_spread, velocity_spread))),
+            nudge=max(-0.24, min(0.32, hit.nudge + jitter)),
+            duration_steps=max(0.25, hit.duration_steps * duration_scale),
+        ))
+
+    bass_steps = sorted(set(bass_steps))
+    if bass_activity < 0.5:
+        keep = 0.18 + bass_activity * 1.36
+        bass_steps = [
+            step for step in bass_steps
+            if step % 16 == 0 or rng.random() < keep
+        ]
+    elif bass_activity > 0.62:
+        candidates = [
+            step for step in range(0, 64, 2)
+            if step not in bass_steps
+        ]
+        rng.shuffle(candidates)
+        bass_steps += candidates[:int(round((bass_activity - 0.62) * 18))]
+        bass_steps = sorted(set(bass_steps))
+    if not bass_steps:
+        bass_steps = [0, 16, 32, 48]
+
     chromatic: list[ChromaticHit] = []
     for idx, step in enumerate(bass_steps):
         note = bass_notes[(idx + rng.randrange(len(bass_notes))) % len(bass_notes)]
+        if variation > 0.55 and rng.random() < (variation - 0.45) * 0.45:
+            note += rng.choice((-12, 0, 12))
+            note = max(36, min(72, note))
         dur = rng.choice(bass_durations)
+        if bass_activity < 0.4:
+            dur *= 1.0 + (0.4 - bass_activity)
+        elif bass_activity > 0.72:
+            dur *= 0.75 + (1.0 - bass_activity) * 0.35
         if step % 16 == 0 and style in ("half_time", "minimal", "dub_offbeat"):
             dur = max(dur, rng.choice((5.6, 7.8)))
         chromatic.append(ChromaticHit(
             note=note,
             step=step,
-            velocity=max(84, min(116, 104 + rng.randint(-10, 10))),
+            velocity=max(
+                74,
+                min(122, 104 + rng.randint(
+                    -10 - int(variation * 10),
+                    10 + int(variation * 10)))),
             duration_steps=dur,
             label=f"bass {note}",
         ))
 
     return PatternSpec(
         name=f"sp404-{style.replace('_', '-')}-{int(seed)}",
-        prompt=f"Generated {style} SP-404 A1-A6 beat plus chromatic bass",
+        prompt=(
+            f"Generated {style} SP-404 A1-A6 beat plus chromatic bass "
+            f"density {controls['density']:.0f} complexity {controls['complexity']:.0f} "
+            f"fill {controls['fill']:.0f} bass {controls['bass_activity']:.0f} "
+            f"variation {controls['variation']:.0f}"),
         device=SP404,
         bank=0,
         bars=4,
@@ -873,7 +993,16 @@ def generate_sp404_beat_bass_variation(
         bpm=94.0,
         swing=56.0,
         seed=int(seed),
-        tags=["swing", "bass", "chromatic", "generated", style],
-        hits=sorted(hits, key=lambda hit: (hit.step + hit.nudge, hit.pad)),
+        tags=[
+            "swing", "bass", "chromatic", "generated",
+            f"density_{controls['density']:.0f}",
+            f"complexity_{controls['complexity']:.0f}",
+            f"fill_{controls['fill']:.0f}",
+            f"bass_{controls['bass_activity']:.0f}",
+            f"variation_{controls['variation']:.0f}",
+            style,
+        ],
+        hits=sorted(
+            processed_hits, key=lambda hit: (hit.step + hit.nudge, hit.pad)),
         chromatic_hits=chromatic,
     )

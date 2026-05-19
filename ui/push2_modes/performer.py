@@ -11,6 +11,11 @@ from .base import Mode
 
 class PerformerMode(Mode):
     name = "performer"
+    ENCODER_PAGES = ("feel", "gen", "takes")
+
+    def __init__(self, control) -> None:
+        super().__init__(control)
+        self.encoder_page = "feel"
 
     def _screen(self):
         app = getattr(self.control, "host_app", None)
@@ -24,16 +29,33 @@ class PerformerMode(Mode):
         screen = self._screen()
         if screen is None or delta == 0:
             return False
-        if name == "track1":
+        page = self.encoder_page
+        if page == "feel" and name == "track1":
             screen._adjust_performer_feel("swing", delta * 5.0)
-        elif name == "track2":
+        elif page == "feel" and name == "track2":
             screen._adjust_performer_feel("humanize", delta * 10.0)
-        elif name == "track3":
+        elif page == "feel" and name == "track3":
             screen._adjust_performer_feel("gate", delta * 0.2)
-        elif name == "track4":
+        elif page == "feel" and name == "track4":
             screen._cycle_performer_genre()
-        elif name == "track5":
+        elif page == "feel" and name == "track5":
             screen._cycle_performer_take(self.control.session, delta)
+        elif page == "gen" and name == "track1":
+            screen._adjust_performer_generator("density", delta * 5.0)
+        elif page == "gen" and name == "track2":
+            screen._adjust_performer_generator("complexity", delta * 5.0)
+        elif page == "gen" and name == "track3":
+            screen._adjust_performer_generator("fill", delta * 5.0)
+        elif page == "gen" and name == "track4":
+            screen._adjust_performer_generator("bass_activity", delta * 5.0)
+        elif page == "gen" and name == "track5":
+            screen._adjust_performer_generator("variation", delta * 5.0)
+        elif page == "gen" and name == "track6":
+            screen._cycle_performer_genre()
+        elif page == "takes" and name == "track1":
+            screen._cycle_performer_take(self.control.session, delta)
+        elif page == "takes" and name == "track2":
+            screen._cycle_performer_genre()
         else:
             return False
         self.control.request_redraw()
@@ -44,6 +66,16 @@ class PerformerMode(Mode):
             return False
         screen = self._screen()
         if screen is None:
+            return False
+        if name.startswith("upper_display_"):
+            try:
+                idx = int(name.split("_")[2]) - 1
+            except ValueError:
+                return False
+            if idx < len(self.ENCODER_PAGES):
+                self.encoder_page = self.ENCODER_PAGES[idx]
+                self.control.request_redraw()
+                return True
             return False
         sess = self.control.session
         actions = {
@@ -139,6 +171,15 @@ class PerformerMode(Mode):
         ]
         for cc, color in zip(C.BTN_LOWER_DISPLAY_CCS, colors):
             buttons[cc] = (color, C.ANIM_STATIC)
+        for idx, cc in enumerate(C.BTN_UPPER_DISPLAY_CCS):
+            if idx >= len(self.ENCODER_PAGES):
+                continue
+            color = (
+                C.COLOR_GREEN
+                if self.encoder_page == self.ENCODER_PAGES[idx]
+                else C.COLOR_DARK_GRAY
+            )
+            buttons[cc] = (color, C.ANIM_STATIC)
         return buttons
 
     def draw_oled(self, w: int, h: int) -> Optional[Image.Image]:
@@ -202,14 +243,37 @@ class PerformerMode(Mode):
             ("SWING", f"{feel['swing']:.0f}"),
             ("HUMAN", f"{feel['humanize']:.0f}"),
             ("GATE", f"{feel['gate'] * 100:.0f}%"),
-            ("GENRE", "turn"),
-            ("TAKE", "turn"),
-        ]
+            ("GENRE", screen._style_label(screen._performer_style())[:8]),
+            ("TAKE", f"{getattr(screen, '_performer_take_idx', 0) + 1}"),
+        ] if self.encoder_page == "feel" else []
+        if self.encoder_page == "gen":
+            gen = screen._performer_generator_controls()
+            labels = [
+                ("DENS", f"{gen['density']:.0f}"),
+                ("COMPLX", f"{gen['complexity']:.0f}"),
+                ("FILL", f"{gen['fill']:.0f}"),
+                ("BASS", f"{gen['bass_activity']:.0f}"),
+                ("VAR", f"{gen['variation']:.0f}"),
+                ("GENRE", screen._style_label(screen._performer_style())[:8]),
+            ]
+        elif self.encoder_page == "takes":
+            labels = [
+                ("TAKE", f"{getattr(screen, '_performer_take_idx', 0) + 1}"),
+                ("GENRE", screen._style_label(screen._performer_style())[:8]),
+                ("PLAY", playing[:8]),
+                ("NEXT", next_label[:8]),
+                ("CHAIN", screen._chain_label(status)),
+            ]
         for i, (title, value) in enumerate(labels):
             x = 12 + i * 112
             d.rectangle((x, 94, x + 96, 128), outline=(46, 54, 78))
             d.text((x + 8, 98), title, fill=(144, 158, 190), font=f_sm)
             d.text((x + 8, 112), value, fill=(240, 242, 248), font=f_med)
+        page_labels = ["FEEL", "GEN", "TAKES"]
+        for i, label in enumerate(page_labels):
+            x = 12 + i * 96
+            fill = (126, 238, 186) if self.encoder_page == self.ENCODER_PAGES[i] else (112, 126, 152)
+            d.text((x, 84), label, fill=fill, font=f_sm)
         bottom = ["PLAY", "STOP", "GEN", "SAVE", "QUEUE", "CHAIN", "REC 1X", "STEP"]
         for i, label in enumerate(bottom):
             x = 12 + i * 116
