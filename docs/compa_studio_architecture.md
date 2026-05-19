@@ -69,7 +69,8 @@ starting Compa's internal audio stream. The initial confirmed target is
 SP-404 A1-A6 Beat+Bass: Bank A pads A1-A5 for drums plus A6 as the selected
 chromatic source on SP channel 16. Playback timing follows the live Studio BPM
 at loop boundaries, clips note-offs to the pattern length for cleaner loops,
-and can generate simple A1-A6 beat+bass variations for auditioning.
+and can generate A1-A6 beat+bass variations across distinct groove families:
+half-time, electro, breakbeat, minimal, busy boom-bap, and dub/offbeat.
 
 ### Device Workspaces
 

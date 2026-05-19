@@ -67,8 +67,20 @@ class StudioPerformerTests(unittest.TestCase):
         self.assertEqual(a.to_dict(), b.to_dict())
         self.assertNotEqual(a.to_dict(), c.to_dict())
         self.assertEqual(a.device, "SP-404MKII")
-        self.assertGreater(len(a.hits), 30)
-        self.assertEqual(len(a.chromatic_hits), 16)
+        self.assertGreater(len(a.hits), 20)
+        self.assertGreaterEqual(len(a.chromatic_hits), 5)
+
+    def test_generated_variations_cover_distinct_groove_families(self):
+        specs = [generate_sp404_beat_bass_variation(i) for i in range(1, 7)]
+        styles = {spec.tags[-1] for spec in specs}
+        self.assertEqual(len(styles), 6)
+        signatures = {
+            tuple((hit.pad, hit.step) for hit in spec.hits)
+            for spec in specs
+        }
+        self.assertEqual(len(signatures), 6)
+        bass_counts = {len(spec.chromatic_hits) for spec in specs}
+        self.assertGreater(len(bass_counts), 2)
 
 
 if __name__ == "__main__":

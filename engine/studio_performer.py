@@ -343,9 +343,23 @@ def confirmed_sp404_beat_bass_spec() -> PatternSpec:
 
 
 def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
-    """Generate a small SP A1-A6 beat+bass variation for live auditioning."""
+    """Generate a distinct SP A1-A6 beat+bass variation.
+
+    GEN should feel like trying another idea, not nudging the same loop. Seeds
+    intentionally cycle through broad groove families before randomizing within
+    each family.
+    """
 
     rng = random.Random(int(seed))
+    styles = (
+        "half_time",
+        "electro",
+        "breakbeat",
+        "minimal",
+        "busy_boom_bap",
+        "dub_offbeat",
+    )
+    style = styles[(max(1, int(seed)) - 1) % len(styles)]
     hits: list[PatternHit] = []
 
     def add(pad: int, step: int, velocity: int, duration: float,
@@ -362,54 +376,129 @@ def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
             label=label,
         ))
 
-    kick_templates = [
-        (0, 6, 10),
-        (0, 5, 10, 14),
-        (0, 7, 11),
-        (0, 3, 10, 13),
-    ]
-    for bar in range(4):
+    def add_bar_hits(bar: int, *, kicks: tuple[int, ...],
+                     snares: tuple[int, ...], hats: tuple[int, ...],
+                     ghosts: tuple[int, ...] = (),
+                     open_hats: tuple[int, ...] = (),
+                     claps: tuple[int, ...] = ()) -> None:
         base = bar * 16
-        kicks = list(rng.choice(kick_templates))
-        if bar == 3 and rng.random() < 0.7:
-            kicks.append(rng.choice((12, 15)))
         for step in sorted(set(kicks)):
-            add(0, base + step, 116 if step == 0 else 100, 2.0, "kick")
-        for step in (4, 12):
-            add(1, base + step, 106, 1.35, "snare", 0.01)
-        for step in (3, 11):
-            if rng.random() < 0.75:
-                add(1, base + step, 48, 1.2, "ghost snare", 0.1, 0.8)
-        hat_steps = (range(0, 16, 2) if rng.random() < 0.65
-                     else (0, 2, 4, 7, 8, 10, 12, 15))
-        for step in hat_steps:
-            add(2, base + step, 84 if step % 8 == 0 else 66, 0.65,
+            add(0, base + step, 118 if step == 0 else 100, 1.7, "kick")
+        for step in snares:
+            add(1, base + step, 106, 1.2, "snare", 0.01)
+        for step in ghosts:
+            if rng.random() < 0.78:
+                add(1, base + step, 46, 0.9, "ghost snare", 0.1, 0.75)
+        for step in hats:
+            add(2, base + step, 84 if step % 8 == 0 else 66, 0.55,
                 "closed hat", 0.02 if step % 4 == 0 else 0.11)
-        if rng.random() < 0.8:
-            add(3, base + 15, 78, 1.6, "open hat", 0.04)
-        if bar and rng.random() < 0.7:
-            add(4, base + 12, 72, 1.35, "clap layer")
+        for step in open_hats:
+            add(3, base + step, 80, 1.4, "open hat", 0.04)
+        for step in claps:
+            add(4, base + step, 76, 1.2, "clap layer")
 
-    if rng.random() < 0.8:
-        add(1, 57, 72, 1.2, "fill snare", 0.03)
-        add(4, 58, 88, 1.2, "fill clap")
-        add(1, 60, 116, 1.2, "fill snare")
-        add(4, 63, 108, 1.2, "fill clap", 0.03)
+    bass_steps: list[int]
+    bass_notes: list[int]
+    bass_durations: tuple[float, ...]
 
-    bass_shapes = [
-        [60, 55, 58, 55, 60, 63, 58, 48],
-        [48, 55, 60, 58, 55, 58, 63, 60],
-        [60, 60, 58, 55, 48, 55, 58, 60],
-    ]
-    bass_notes = rng.choice(bass_shapes)
-    bass_steps = [0, 6, 10, 15, 16, 22, 26, 31,
-                  32, 38, 42, 46, 48, 54, 58, 61]
+    if style == "half_time":
+        for bar in range(4):
+            add_bar_hits(
+                bar,
+                kicks=tuple(rng.choice(((0, 7, 11), (0, 6, 10), (0, 3, 11)))),
+                snares=(8,),
+                hats=(0, 4, 8, 12),
+                ghosts=(6, 14),
+                open_hats=(15,),
+            )
+        bass_steps = [0, 8, 16, 24, 32, 40, 48, 56]
+        bass_notes = [48, 48, 55, 58, 48, 60, 55, 48]
+        bass_durations = (5.8, 6.8, 7.8)
+    elif style == "electro":
+        for bar in range(4):
+            add_bar_hits(
+                bar,
+                kicks=(0, 4, 8, 12),
+                snares=(4, 12),
+                hats=(2, 6, 10, 14),
+                open_hats=(6, 14),
+                claps=(12,),
+            )
+            add(4, bar * 16 + rng.choice((3, 7, 11, 15)), 72, 0.7,
+                "sync perc", 0.02)
+        bass_steps = list(range(0, 64, 4))
+        bass_notes = [48, 60, 55, 60, 48, 63, 55, 58]
+        bass_durations = (1.6, 2.0, 2.6)
+    elif style == "breakbeat":
+        for bar in range(4):
+            kicks = tuple(rng.choice(((0, 3, 7, 10), (0, 5, 8, 14),
+                                      (0, 2, 7, 11))))
+            add_bar_hits(
+                bar,
+                kicks=kicks,
+                snares=(4, 9, 12),
+                hats=tuple(step for step in range(16)
+                           if step % 2 == 0 or rng.random() < 0.35),
+                ghosts=(3, 11, 14),
+                open_hats=(15,),
+                claps=(9,) if bar % 2 else (),
+            )
+        bass_steps = [0, 3, 7, 10, 15, 16, 21, 24, 30,
+                      32, 35, 39, 43, 48, 54, 59, 62]
+        bass_notes = [60, 58, 55, 63, 48, 60, 55, 58, 63]
+        bass_durations = (1.0, 1.4, 2.2)
+    elif style == "minimal":
+        for bar in range(4):
+            add_bar_hits(
+                bar,
+                kicks=tuple(rng.choice(((0, 10), (0, 6), (0, 14)))),
+                snares=(12,) if bar % 2 else (4,),
+                hats=(4, 12),
+                open_hats=(15,) if bar in (1, 3) else (),
+            )
+        bass_steps = [0, 16, 32, 48, 56]
+        bass_notes = [48, 55, 58, 48, 60]
+        bass_durations = (7.8, 11.8, 15.6)
+    elif style == "busy_boom_bap":
+        for bar in range(4):
+            add_bar_hits(
+                bar,
+                kicks=tuple(rng.choice(((0, 5, 10, 13), (0, 6, 9, 14),
+                                        (0, 3, 8, 11, 15)))),
+                snares=(4, 12),
+                hats=tuple(range(16)),
+                ghosts=(2, 3, 7, 11, 14),
+                open_hats=(7, 15),
+                claps=(12,),
+            )
+        for step in (57, 58, 60, 61, 62, 63):
+            add(1 if step % 2 == 0 else 4, step, 92, 0.8,
+                "turnaround", 0.02)
+        bass_steps = [0, 3, 6, 10, 15, 16, 19, 22, 26, 31,
+                      32, 35, 38, 42, 46, 48, 51, 54, 58, 61]
+        bass_notes = [60, 55, 58, 63, 48, 60, 60, 55, 58, 48]
+        bass_durations = (0.8, 1.2, 1.8, 2.4)
+    else:
+        for bar in range(4):
+            add_bar_hits(
+                bar,
+                kicks=tuple(rng.choice(((0, 6, 14), (0, 8, 13), (0, 10)))),
+                snares=(4, 12),
+                hats=(2, 6, 10, 14),
+                ghosts=(11,),
+                open_hats=(7, 15),
+                claps=(4, 12) if bar in (1, 3) else (),
+            )
+        bass_steps = [0, 7, 15, 16, 28, 31, 32, 39, 46, 48, 55, 61]
+        bass_notes = [48, 60, 55, 58, 48, 63, 55, 60]
+        bass_durations = (2.6, 3.8, 5.6)
+
     chromatic: list[ChromaticHit] = []
     for idx, step in enumerate(bass_steps):
-        note = bass_notes[idx % len(bass_notes)]
-        dur = rng.choice((1.0, 1.8, 2.8, 3.6, 4.8))
-        if step % 16 == 0:
-            dur = rng.choice((4.8, 5.2, 5.6))
+        note = bass_notes[(idx + rng.randrange(len(bass_notes))) % len(bass_notes)]
+        dur = rng.choice(bass_durations)
+        if step % 16 == 0 and style in ("half_time", "minimal", "dub_offbeat"):
+            dur = max(dur, rng.choice((5.6, 7.8)))
         chromatic.append(ChromaticHit(
             note=note,
             step=step,
@@ -419,8 +508,8 @@ def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
         ))
 
     return PatternSpec(
-        name=f"sp404-beat-bass-gen-{int(seed)}",
-        prompt="Generated SP-404 A1-A6 beat plus chromatic bass variation",
+        name=f"sp404-{style.replace('_', '-')}-{int(seed)}",
+        prompt=f"Generated {style} SP-404 A1-A6 beat plus chromatic bass",
         device=SP404,
         bank=0,
         bars=4,
@@ -428,7 +517,7 @@ def generate_sp404_beat_bass_variation(seed: int) -> PatternSpec:
         bpm=94.0,
         swing=56.0,
         seed=int(seed),
-        tags=["boom_bap", "swing", "bass", "chromatic", "generated"],
+        tags=["swing", "bass", "chromatic", "generated", style],
         hits=sorted(hits, key=lambda hit: (hit.step + hit.nudge, hit.pad)),
         chromatic_hits=chromatic,
     )
