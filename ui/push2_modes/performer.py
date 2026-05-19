@@ -148,9 +148,12 @@ class PerformerMode(Mode):
             state = "QUEUED"
         elif status.get("sequence_enabled"):
             state = "CHAIN"
-        d.text((12, 8), "PERFORMER", fill=(236, 240, 248), font=f_big)
-        d.text((150, 13), spec.name[:58], fill=(158, 174, 206), font=f_med)
-        d.text((12, 42),
+        d.text((12, 5), "PERFORMER", fill=(236, 240, 248), font=f_big)
+        d.text((150, 10), f"{screen._performer_bpm(sess):.1f} BPM",
+               fill=(158, 174, 206), font=f_med)
+        d.text((12, 34), spec.name[:78], fill=(158, 174, 206),
+               font=f_med)
+        d.text((12, 56),
                f"{state}   {screen._take_label(sess)[:24]}   "
                f"{screen._style_label(screen._performer_style())}",
                fill=(218, 224, 238), font=f_med)
@@ -163,9 +166,9 @@ class PerformerMode(Mode):
         ]
         for i, (title, value) in enumerate(labels):
             x = 12 + i * 112
-            d.rectangle((x, 72, x + 96, 116), outline=(46, 54, 78))
-            d.text((x + 8, 78), title, fill=(144, 158, 190), font=f_sm)
-            d.text((x + 8, 96), value, fill=(240, 242, 248), font=f_med)
+            d.rectangle((x, 82, x + 96, 124), outline=(46, 54, 78))
+            d.text((x + 8, 87), title, fill=(144, 158, 190), font=f_sm)
+            d.text((x + 8, 104), value, fill=(240, 242, 248), font=f_med)
         bottom = ["PLAY", "STOP", "GEN", "SAVE", "QUEUE", "CHAIN", "REC 1X", "STEP"]
         for i, label in enumerate(bottom):
             x = 12 + i * 116

@@ -754,7 +754,7 @@ class ClipScreen:
         content_w = w - margin * 2
         left_w = int(content_w * 0.62)
         right_w = content_w - left_w - gap
-        y = top + 42
+        y = top + 66
         left_x = margin
         right_x = margin + left_w + gap
 
@@ -772,10 +772,14 @@ class ClipScreen:
             state = status["last_error"][:42]
 
         surface.blit(font_big.render("Performer", True, (236, 240, 248)),
-                     (left_x, top + 8))
+                     (left_x, top + 6))
         surface.blit(font.render(
-            f"{spec.name[:52]}   {self._performer_bpm(sess):.1f} BPM",
-            True, (150, 162, 184)), (left_x + 130, top + 15))
+            f"Pattern: {spec.name[:62]}",
+            True, (150, 162, 184)), (left_x, top + 36))
+        bpm_text = f"{self._performer_bpm(sess):.1f} BPM"
+        bpm_surf = font.render(bpm_text, True, (150, 162, 184))
+        surface.blit(bpm_surf, (left_x + left_w - bpm_surf.get_width(),
+                                top + 12))
 
         current_rect = pygame.Rect(left_x, y, left_w, 118)
         cy = self._panel(surface, current_rect, "Current Pattern")
