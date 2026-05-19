@@ -27,7 +27,9 @@ def project_path(name: str) -> str:
 
 def save_session(session: Session, name: Optional[str] = None) -> str:
     """Write the session JSON. Returns the path written."""
-    path = project_path(name or session.name)
+    name_or_path = name or session.name
+    path = name_or_path if os.path.isabs(name_or_path) else project_path(name_or_path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(session.to_dict(), f, indent=2)

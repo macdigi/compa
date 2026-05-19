@@ -56,6 +56,38 @@ class PatternHit:
 
 
 @dataclass
+class ChromaticHit:
+    """One melodic hit for a device's chromatic/keys lane.
+
+    note is a MIDI note number. For SP-404 MKII this is sent on channel 16,
+    using the sample selected on the hardware/Compa Keys tab as the source.
+    """
+
+    note: int
+    step: int
+    velocity: int = 100
+    probability: float = 1.0
+    nudge: float = 0.0
+    duration_steps: float = 1.0
+    label: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChromaticHit":
+        return cls(
+            note=max(0, min(127, int(data.get("note", 60)))),
+            step=int(data.get("step", 0)),
+            velocity=int(data.get("velocity", 100)),
+            probability=float(data.get("probability", 1.0)),
+            nudge=float(data.get("nudge", 0.0)),
+            duration_steps=float(data.get("duration_steps", 1.0)),
+            label=str(data.get("label", "")),
+        )
+
+
+@dataclass
 class PatternSpec:
     """Portable pattern representation used by Compa performer tools."""
 
@@ -70,6 +102,7 @@ class PatternSpec:
     seed: int = 0
     tags: list[str] = field(default_factory=list)
     hits: list[PatternHit] = field(default_factory=list)
+    chromatic_hits: list[ChromaticHit] = field(default_factory=list)
 
     @property
     def total_steps(self) -> int:
@@ -86,11 +119,16 @@ class PatternSpec:
     def to_dict(self) -> dict:
         data = asdict(self)
         data["hits"] = [h.to_dict() for h in self.hits]
+        data["chromatic_hits"] = [h.to_dict() for h in self.chromatic_hits]
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "PatternSpec":
         hits = [PatternHit.from_dict(h) for h in data.get("hits", [])]
+        chromatic_hits = [
+            ChromaticHit.from_dict(h)
+            for h in data.get("chromatic_hits", [])
+        ]
         return cls(
             name=str(data.get("name", "Generated")),
             prompt=str(data.get("prompt", "")),
@@ -103,6 +141,7 @@ class PatternSpec:
             seed=int(data.get("seed", 0)),
             tags=[str(t) for t in data.get("tags", [])],
             hits=hits,
+            chromatic_hits=chromatic_hits,
         )
 
 
@@ -444,6 +483,18 @@ def device_note_channel(spec: PatternSpec, pad: int) -> tuple[int, int]:
     return 48 + bank * 6 + pad, 10
 
 
+def chromatic_note_channel(spec: PatternSpec, note: int) -> tuple[int, int]:
+    """Return (note, zero-indexed MIDI channel) for a chromatic hit."""
+
+    device = normalize_device(spec.device)
+    note = max(0, min(127, int(note)))
+    if device == SP404:
+        return note, 15
+    if device == P6:
+        return note, 3
+    return note, 0
+
+
 def write_spec_json(spec: PatternSpec, path: str) -> str:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
@@ -470,6 +521,15 @@ def export_midi(spec: PatternSpec, path: str, *,
         start = max(0, int(round((hit.step + hit.nudge) * step_ticks)))
         dur = max(1, int(round(hit.duration_steps * step_ticks)))
         on = bytes([0x90 | (channel & 0x0F), note & 0x7F, hit.velocity & 0x7F])
+        off = bytes([0x80 | (channel & 0x0F), note & 0x7F, 0])
+        events.append((start, 1, on))
+        events.append((start + dur, 0, off))
+    for hit in spec.chromatic_hits:
+        note, channel = chromatic_note_channel(spec, hit.note)
+        start = max(0, int(round((hit.step + hit.nudge) * step_ticks)))
+        dur = max(1, int(round(hit.duration_steps * step_ticks)))
+        velocity = max(1, min(127, int(hit.velocity)))
+        on = bytes([0x90 | (channel & 0x0F), note & 0x7F, velocity & 0x7F])
         off = bytes([0x80 | (channel & 0x0F), note & 0x7F, 0])
         events.append((start, 1, on))
         events.append((start + dur, 0, off))

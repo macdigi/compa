@@ -36,6 +36,11 @@ _SPEC.loader.exec_module(sp404_protocol)
 
 
 CAPTURE_DIR = ROOT / "sessions" / "sp404_protocol"
+WRITE_TEMPLATE_CAPTURE = CAPTURE_DIR / "live_write_probe_retry_20260519T031709Z.jsonl"
+WRITE_TEMPLATE_PROJECT = b"PROJECT_05"
+WRITE_TEMPLATE_PAD = b"BANK1-02"
+WRITE_TEMPLATE_SAMPLE_NAME = b"compa-sp404-write-probe"
+WRITE_TEMPLATE_AUDIO_BYTES = 96_000
 
 APP_HANDSHAKE = bytes.fromhex("12 60 e0 05 fe 67 00 74 68 2d 49 03")
 PROJECT_INIT = bytes.fromhex("12 60 e0 05 9a 04 00 00 00 20 20 03")
@@ -847,6 +852,328 @@ def _load_wav_as_big_endian_pcm(path: Path) -> tuple[dict, bytes]:
     }, converted
 
 
+def _load_template_write_wav(path: Path) -> tuple[dict, bytes]:
+    info, converted = _load_wav_as_big_endian_pcm(path)
+    if info["sample_rate"] != 48000:
+        raise ValueError("template writer requires a 48 kHz WAV")
+    if info["channels"] != 1:
+        raise ValueError("template writer requires a mono WAV")
+    if info["sample_width"] != 2:
+        raise ValueError("template writer requires a 16-bit PCM WAV")
+    if info["frames"] != 48000 or len(converted) != WRITE_TEMPLATE_AUDIO_BYTES:
+        raise ValueError("template writer requires exactly 1.000s / 48,000 frames")
+    return info, converted
+
+
+def _copy_replace_fixed(data: bytearray, old: bytes, new: bytes) -> None:
+    if len(old) != len(new):
+        raise ValueError(f"replacement length mismatch: {old!r} -> {new!r}")
+    start = 0
+    replaced = 0
+    while True:
+        pos = data.find(old, start)
+        if pos < 0:
+            break
+        data[pos:pos + len(old)] = new
+        replaced += 1
+        start = pos + len(old)
+    if replaced == 0:
+        raise ValueError(f"template token not found: {old!r}")
+
+
+def _patch_template_audio(stream: bytearray, pcm_be: bytes) -> int:
+    frames = _iter_serial_command_frames(bytes(stream), [(0, len(stream), 0)])
+    audio_frames = []
+    for frame in frames:
+        if frame["op"] != 0x06:
+            continue
+        body = stream[int(frame["body_start"]):int(frame["body_end"])]
+        if len(body) >= 512 and b"RFWV" not in body:
+            audio_frames.append(frame)
+
+    total = sum(int(frame["body_len"]) for frame in audio_frames)
+    if total != len(pcm_be):
+        raise ValueError(f"template audio payload is {total} bytes, source is {len(pcm_be)} bytes")
+
+    offset = 0
+    for frame in audio_frames:
+        body_start = int(frame["body_start"])
+        body_end = int(frame["body_end"])
+        chunk = pcm_be[offset:offset + (body_end - body_start)]
+        stream[body_start:body_end] = chunk
+        offset += len(chunk)
+    return len(audio_frames)
+
+
+def _patch_template_metadata(stream: bytearray, sample_name: str, pad_index: int) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_. -]+", "_", sample_name).strip(" .")
+    if not safe:
+        safe = "sample"
+    name_bytes = safe.encode("ascii", "ignore")[:len(WRITE_TEMPLATE_SAMPLE_NAME)]
+    replacement = name_bytes + (b"\x00" * (len(WRITE_TEMPLATE_SAMPLE_NAME) - len(name_bytes)))
+
+    pos = stream.find(WRITE_TEMPLATE_SAMPLE_NAME)
+    if pos < 0:
+        raise ValueError("template sample-name packet not found")
+    packet_start = stream.rfind(bytes.fromhex("13 60 e0 05"), 0, pos)
+    if packet_start < 0 or packet_start + 18 >= len(stream) or stream[packet_start + 16] != 0x1E:
+        raise ValueError("template sample-name metadata packet shape changed")
+    stream[pos:pos + len(WRITE_TEMPLATE_SAMPLE_NAME)] = replacement
+    stream[packet_start + 17] = pad_index & 0xFF
+    return name_bytes.decode("ascii", "ignore")
+
+
+def _tx_event_offsets(events: list[dict]) -> list[tuple[int, int, int]]:
+    offsets: list[tuple[int, int, int]] = []
+    cursor = 0
+    for idx, event in enumerate(events):
+        if event.get("event") != "tx":
+            continue
+        data = _parse_hex(event.get("hex", ""))
+        offsets.append((idx, cursor, cursor + len(data)))
+        cursor += len(data)
+    return offsets
+
+
+def _ops_in_stream_slice(stream: bytes) -> set[int]:
+    frames = _iter_serial_command_frames(stream, [(0, len(stream), 0)])
+    return {int(frame["op"]) for frame in frames}
+
+
+def _extract_response_status(response: bytes) -> bytes | None:
+    pos = response.rfind(PATH_OPEN_RESPONSE_MARKER)
+    if pos < 0 or pos + 9 > len(response):
+        return None
+    status = response[pos + 4:pos + 9]
+    if status == b"\x7f" * 5:
+        return None
+    return status
+
+
+def _patch_future_file_key(stream: bytearray, cursor: int, file_key: bytes) -> int:
+    frames = _iter_serial_command_frames(bytes(stream[cursor:]), [(0, len(stream) - cursor, 0)])
+    patched = 0
+    for frame in frames:
+        op = int(frame["op"])
+        if op not in {0x03, 0x04, 0x06, 0x07, 0x13}:
+            continue
+        start = cursor + int(frame["stream_offset"])
+        key_start = start + 24
+        key_end = key_start + 2
+        if key_end <= len(stream):
+            stream[key_start:key_end] = file_key
+            patched += 1
+    return patched
+
+
+def _patch_future_dir_key(stream: bytearray, cursor: int, dir_key: bytes) -> int:
+    frames = _iter_serial_command_frames(bytes(stream[cursor:]), [(0, len(stream) - cursor, 0)])
+    patched = 0
+    for frame in frames:
+        if int(frame["op"]) != 0x0D:
+            continue
+        start = cursor + int(frame["stream_offset"])
+        key_start = start + 21
+        key_end = key_start + 5
+        if key_end <= len(stream):
+            stream[key_start:key_end] = dir_key
+            patched += 1
+            break
+    return patched
+
+
+def _build_template_write_stream(
+    *,
+    template: Path,
+    wav: Path,
+    project: str,
+    bank: int,
+    pad: int,
+    sample_name: str,
+) -> tuple[list[dict], bytearray, dict]:
+    if not re.fullmatch(r"PROJECT_[0-9]{2}", project):
+        raise ValueError("project must look like PROJECT_03")
+    if bank != 1:
+        raise ValueError("template writer is currently limited to Bank A / bank=1")
+    if not 1 <= pad <= 16:
+        raise ValueError("pad must be 1-16")
+
+    events = _load_events(template)
+    if not events:
+        raise ValueError(f"template capture has no events: {template}")
+
+    info, pcm_be = _load_template_write_wav(wav)
+    stream, _spans = _build_tx_stream(events)
+    data = bytearray(stream)
+
+    _copy_replace_fixed(data, WRITE_TEMPLATE_PROJECT, project.encode("ascii"))
+    target_pad = f"BANK{bank}-{pad:02d}".encode("ascii")
+    _copy_replace_fixed(data, WRITE_TEMPLATE_PAD, target_pad)
+    audio_frames = _patch_template_audio(data, pcm_be)
+    patched_name = _patch_template_metadata(data, sample_name, pad - 1)
+
+    return events, data, {
+        "audio_frames": audio_frames,
+        "sample_name": patched_name,
+        "wav_info": info,
+        "target_path": _sp404_pad_path(project, bank, pad),
+        "template": str(template),
+    }
+
+
+def cmd_write_pad_template(args: argparse.Namespace) -> int:
+    if not args.i_understand_this_writes_to_the_sp:
+        print("Refusing write without --i-understand-this-writes-to-the-sp", file=sys.stderr)
+        return 2
+
+    try:
+        events, stream, plan = _build_template_write_stream(
+            template=Path(args.template).expanduser(),
+            wav=Path(args.wav).expanduser(),
+            project=args.project,
+            bank=args.bank,
+            pad=args.pad,
+            sample_name=args.sample_name or Path(args.wav).stem,
+        )
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"template: {plan['template']}")
+    print(f"target: {plan['target_path']}")
+    print(
+        "wav:"
+        f" {plan['wav_info']['sample_rate']} Hz"
+        f" {plan['wav_info']['channels']}ch"
+        f" {plan['wav_info']['sample_width'] * 8}bit"
+        f" {plan['wav_info']['frames']} frames"
+    )
+    print(f"sample_name: {plan['sample_name']}")
+    print(f"audio_frames: {plan['audio_frames']}")
+    if args.dry_run:
+        print("dry_run: not sending")
+        return 0
+
+    port = sp404_protocol.find_sp404_librarian_port()
+    if not port:
+        print("ERROR: SP-404 CDC port not found", file=sys.stderr)
+        return 1
+
+    log_path, handle = _open_log(args.log)
+    print(f"port: {port}")
+    print(f"log: {log_path}")
+
+    offsets = _tx_event_offsets(events)
+    offset_by_event = {idx: (start, end) for idx, start, end in offsets}
+    cursor = 0
+    response_count = 0
+    file_keys: list[str] = []
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        sp404_protocol.configure_sp404_librarian_fd(fd)
+        time.sleep(0.2)
+        last_response_cursor = 0
+        for idx, event in enumerate(events):
+            if event.get("event") != "tx":
+                continue
+            start, end = offset_by_event[idx]
+            payload = bytes(stream[start:end])
+            os.write(fd, payload)
+            cursor = end
+            _write_event(handle, {
+                "event": "tx",
+                "template_event": idx,
+                "len": len(payload),
+                "hex": _hex(payload),
+            })
+
+            next_is_rx = idx + 1 < len(events) and events[idx + 1].get("event") == "rx"
+            if next_is_rx:
+                response = _read_until_quiet(fd, args.timeout)
+                response_count += 1
+                _write_event(handle, {
+                    "event": "rx",
+                    "template_event": idx + 1,
+                    "len": len(response),
+                    "hex": _hex(response),
+                })
+                sent_since_response = bytes(stream[last_response_cursor:cursor])
+                ops = _ops_in_stream_slice(sent_since_response)
+                status = _extract_response_status(response)
+                if 0x0C in ops:
+                    if not status:
+                        raise RuntimeError("directory open did not return a usable key")
+                    patched = _patch_future_dir_key(stream, cursor, status)
+                    _write_event(handle, {
+                        "event": "info",
+                        "label": "dir_key",
+                        "hex": _hex(status),
+                        "patched": patched,
+                    })
+                if 0x00 in ops:
+                    file_key = _extract_file_key(response)
+                    if not file_key:
+                        raise RuntimeError("target path open did not return a usable file key")
+                    patched = _patch_future_file_key(stream, cursor, file_key)
+                    key_text = file_key.hex(" ")
+                    file_keys.append(key_text)
+                    _write_event(handle, {
+                        "event": "info",
+                        "label": "file_key",
+                        "hex": key_text,
+                        "patched": patched,
+                    })
+                last_response_cursor = cursor
+            if args.delay:
+                time.sleep(args.delay)
+    except Exception as exc:
+        _write_event(handle, {"event": "error", "error": str(exc)})
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        os.close(fd)
+        handle.close()
+
+    print(f"responses: {response_count}")
+    if file_keys:
+        print(f"file_keys: {', '.join(file_keys)}")
+
+    if args.verify:
+        verify_error = "RFWV not found"
+        for attempt in range(1, 4):
+            time.sleep(0.5 * attempt)
+            try:
+                _port, results, file_key = _transact_read_path(
+                    plan["target_path"],
+                    args.timeout,
+                    preamble=True,
+                    dynamic_key=True,
+                )
+                combined = b"".join(response for _label, _payload, response in results)
+                header = _parse_rfwv_header(combined)
+                key_text = file_key.hex(" ") if file_key else "-"
+                print(f"verify_file_key: {key_text}")
+                if not header:
+                    continue
+                duration = _duration_from_rfwv(header)
+                print(
+                    "verify:"
+                    f" RFWV {header.get('sample_rate')} Hz"
+                    f" {header.get('channels')}ch"
+                    f" {header.get('bit_depth')}bit"
+                    f" {header.get('size_be')} bytes"
+                    f" {duration:.2f}s"
+                )
+                break
+            except Exception as exc:
+                verify_error = str(exc)
+        else:
+            print(f"verify failed: {verify_error}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
 def _prefix_match_len(left: bytes, right: bytes) -> int:
     limit = min(len(left), len(right))
     for idx in range(limit):
@@ -1156,6 +1483,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", default="")
     p.add_argument("--i-understand-this-can-write-to-the-sp", action="store_true")
     p.set_defaults(func=cmd_send_hex)
+
+    p = sub.add_parser(
+        "write-pad-template",
+        help="lab-only 1s mono sample write using the verified write capture template",
+    )
+    p.add_argument("wav", help="48 kHz mono 16-bit 1-second WAV")
+    p.add_argument("--project", required=True)
+    p.add_argument("--bank", type=int, default=1)
+    p.add_argument("--pad", type=int, required=True)
+    p.add_argument("--sample-name", default="")
+    p.add_argument("--template", default=str(WRITE_TEMPLATE_CAPTURE))
+    p.add_argument("--timeout", type=float, default=1.5)
+    p.add_argument("--delay", type=float, default=0.05)
+    p.add_argument("--log", default="")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-verify", dest="verify", action="store_false")
+    p.add_argument("--i-understand-this-writes-to-the-sp", action="store_true")
+    p.set_defaults(func=cmd_write_pad_template, verify=True)
 
     p = sub.add_parser("analyze", help="summarize rx packets from a JSONL log")
     p.add_argument("log")

@@ -4011,12 +4011,27 @@ class P6App:
                 profile = self.device_manager.connected.get(focus) if focus else None
                 hint = getattr(profile, "audio_hint", "") or getattr(rec, "_device_hint", "")
                 if hint:
-                    rec.switch_device(hint)
+                    normalized_hint = hint.replace("-", "").replace(" ", "").upper()
+                    # The SP-404 can reload its active project when Compa
+                    # repeatedly tears down/reopens the USB audio stream. Keep
+                    # background recovery off that device; direct user-initiated
+                    # recorder switches still go through the normal path.
+                    if "SP404" in normalized_hint:
+                        self._rec_retry_next_at = now_mono + 60.0
+                        queued = False
+                    else:
+                        rec.switch_device(hint)
+                        queued = True
                 else:
                     rec.start_monitoring()
-                queued = True
-                self._rec_retry_pending = True
-                print("Recorder hot-plug: queued monitoring retry", flush=True)
+                    queued = True
+                if queued:
+                    self._rec_retry_pending = True
+                    print("Recorder hot-plug: queued monitoring retry", flush=True)
+                elif hint and "SP404" in hint.replace("-", "").replace(" ", "").upper():
+                    if now_mono - self._rec_retry_last_log > 60.0:
+                        print("Recorder hot-plug: skipped automatic SP-404 retry", flush=True)
+                        self._rec_retry_last_log = now_mono
             except Exception as _e:
                 print(f"Recorder hot-plug queue failed: {_e}", flush=True)
 

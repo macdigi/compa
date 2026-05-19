@@ -351,8 +351,18 @@ Safety status:
 
       RFWV size=96504 sr=48000 ch=1 bits=16 duration=1.01s
 
+- Added a gated lab-only `write-pad-template` command. It is still a template
+  writer, not a general SP import implementation: it rewrites the verified
+  capture for PROJECT_XX / Bank A / a selected pad, patches live dynamic
+  handles returned by op 0x00, and only accepts 48 kHz mono 16-bit 1-second
+  WAVs. A literal PROJECT_03 test created readable A1-A5 RFWV files, but Jordan
+  confirmed they were not visible on the hardware as Project 3 / Bank A.
+  Follow-up project-list probing showed PROJECT_03 was not a visible project
+  slot at the time. Treat this as an orphan-path lab write until the displayed
+  SP project slot is mapped to its librarian PROJECT_XX path.
+
 - The current implementation still keeps normal Compa write/import behavior
-  behind lab tooling. Before exposing this as a regular UI action, build a
-  first-class writer that generates packets from audio input instead of
-  replaying captured traffic, validates P-6/SP constraints, and limits writes
-  to explicit user-selected pads.
+  behind lab tooling. Before exposing this as a regular UI action, replace the
+  capture-template writer with a first-class writer that generates every
+  packet from audio input, supports variable length/stereo where safe, validates
+  P-6/SP constraints, and limits writes to explicit user-selected pads.
