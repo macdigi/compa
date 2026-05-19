@@ -246,7 +246,9 @@ class TransferScreen:
         pad_label = f"{bank_label}-{pad_idx + 1}" if device_type == "p6" else f"{bank_label}{pad_idx + 1:02d}"
         pad = pads[selected]
         if not pad:
-            if device_type == "sp404" and self._sp404_current_project_is_protocol():
+            if device_type == "sp404" and (
+                    self._sp404_current_project_is_protocol()
+                    or self._sp404_normal_mode()):
                 return {
                     "selected": True,
                     "title": pad_label,
