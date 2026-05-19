@@ -36,6 +36,10 @@ _SPEC.loader.exec_module(sp404_protocol)
 
 CAPTURE_DIR = ROOT / "sessions" / "sp404_protocol"
 
+APP_HANDSHAKE = bytes.fromhex("12 60 e0 05 fe 67 00 74 68 2d 49 03")
+PROJECT_INIT = bytes.fromhex("12 60 e0 05 9a 04 00 00 00 20 20 03")
+PROJECT_LIST = bytes.fromhex("12 60 e0 05 fd 04 00 00 07 00 00 03")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -117,6 +121,44 @@ def transact(payload: bytes, timeout: float, label: str) -> tuple[str, bytes]:
     return port, b"".join(chunks)
 
 
+def _read_until_quiet(fd: int, timeout: float, quiet: float = 0.2) -> bytes:
+    chunks: list[bytes] = []
+    deadline = time.time() + timeout
+    last_data = time.time()
+    while time.time() < deadline:
+        readable, _, _ = select.select([fd], [], [], 0.05)
+        if readable:
+            try:
+                data = os.read(fd, 8192)
+            except BlockingIOError:
+                continue
+            if data:
+                chunks.append(data)
+                last_data = time.time()
+        elif chunks and time.time() - last_data >= quiet:
+            break
+    return b"".join(chunks)
+
+
+def _transact_many(payloads: list[tuple[str, bytes]], timeout: float) -> tuple[str, list[tuple[str, bytes, bytes]]]:
+    port = sp404_protocol.find_sp404_librarian_port()
+    if not port:
+        raise RuntimeError("SP-404 CDC port not found")
+
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    results: list[tuple[str, bytes, bytes]] = []
+    try:
+        sp404_protocol.configure_sp404_librarian_fd(fd)
+        time.sleep(0.2)
+        for label, payload in payloads:
+            os.write(fd, payload)
+            response = _read_until_quiet(fd, timeout)
+            results.append((label, payload, response))
+    finally:
+        os.close(fd)
+    return port, results
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     log_path, handle = _open_log(args.log)
     print(f"log: {log_path}")
@@ -166,6 +208,38 @@ def cmd_probe(args: argparse.Namespace) -> int:
         handle.close()
     print(f"responses: {ok_count}/{args.count}")
     return 0 if ok_count else 1
+
+
+def cmd_project_probe(args: argparse.Namespace) -> int:
+    """Run the captured read-only project-list init sequence."""
+    payloads = [
+        ("app_handshake", APP_HANDSHAKE),
+        ("project_init", PROJECT_INIT),
+        ("project_list", PROJECT_LIST),
+    ]
+    try:
+        port, results = _transact_many(payloads, args.timeout)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"port: {port}")
+    combined = b""
+    for label, payload, response in results:
+        combined += response
+        print(f"\n{label}")
+        print(f"  tx {len(payload)}: {_hex(payload)}")
+        print(f"  rx {len(response)}: {_hex(response[:args.bytes])}")
+        if len(response) > args.bytes:
+            print(f"  ... truncated {len(response) - args.bytes} bytes")
+
+    projects = []
+    for match in re.finditer(rb"PROJECT_[0-9]{2}", combined):
+        name = match.group(0).decode("ascii")
+        if name not in projects:
+            projects.append(name)
+    print(f"\nprojects: {', '.join(projects) if projects else '(none parsed)'}")
+    return 0 if projects else 1
 
 
 def cmd_send_hex(args: argparse.Namespace) -> int:
@@ -409,6 +483,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=3.0)
     p.add_argument("--log", default="")
     p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser("project-probe", help="run captured read-only project-list commands")
+    p.add_argument("--timeout", type=float, default=1.5)
+    p.add_argument("--bytes", type=int, default=256)
+    p.set_defaults(func=cmd_project_probe)
 
     p = sub.add_parser("send-hex", help="send captured hex bytes to the SP")
     p.add_argument("hex_bytes", type=_parse_hex)
