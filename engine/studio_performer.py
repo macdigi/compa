@@ -318,6 +318,10 @@ class PatternPerformer:
         self._queued_pattern_name = ""
         self._queued_pattern_label = ""
         self._queued_slot: int | None = None
+        self._return_spec: PatternSpec | None = None
+        self._return_pattern_name = ""
+        self._return_pattern_label = ""
+        self._return_slot: int | None = None
         self._sequence_specs: list[PatternSpec] = []
         self._sequence_labels: list[str] = []
         self._sequence_slots: list[int | None] = []
@@ -377,6 +381,10 @@ class PatternPerformer:
                 "queued_pattern_label": (
                     self._queued_pattern_label or self._queued_pattern_name),
                 "queued_slot": self._queued_slot,
+                "return_pattern_name": self._return_pattern_name,
+                "return_pattern_label": (
+                    self._return_pattern_label or self._return_pattern_name),
+                "return_slot": self._return_slot,
                 "sequence_enabled": self._sequence_enabled,
                 "sequence_count": len(self._sequence_specs),
                 "sequence_position": self._sequence_index + 1
@@ -460,6 +468,10 @@ class PatternPerformer:
             self._queued_pattern_name = ""
             self._queued_pattern_label = ""
             self._queued_slot = None
+            self._return_spec = None
+            self._return_pattern_name = ""
+            self._return_pattern_label = ""
+            self._return_slot = None
             self._sequence_specs = []
             self._sequence_labels = []
             self._sequence_slots = []
@@ -473,6 +485,9 @@ class PatternPerformer:
         *,
         pattern_label: str = "",
         take_slot: int | None = None,
+        return_spec: PatternSpec | None = None,
+        return_pattern_label: str = "",
+        return_take_slot: int | None = None,
     ) -> bool:
         """Queue a new spec to take over at the next loop boundary."""
 
@@ -486,6 +501,12 @@ class PatternPerformer:
             self._queued_pattern_name = spec.name
             self._queued_pattern_label = pattern_label or spec.name
             self._queued_slot = self._normalized_slot(take_slot)
+            self._return_spec = return_spec
+            self._return_pattern_name = return_spec.name if return_spec else ""
+            self._return_pattern_label = (
+                return_pattern_label
+                or (return_spec.name if return_spec else ""))
+            self._return_slot = self._normalized_slot(return_take_slot)
             self._last_error = ""
             return True
 
@@ -548,6 +569,10 @@ class PatternPerformer:
             self._queued_pattern_name = ""
             self._queued_pattern_label = ""
             self._queued_slot = None
+            self._return_spec = None
+            self._return_pattern_name = ""
+            self._return_pattern_label = ""
+            self._return_slot = None
             self._sequence_specs = []
             self._sequence_labels = []
             self._sequence_slots = []
@@ -649,10 +674,25 @@ class PatternPerformer:
                         self._queued_pattern_name = ""
                         self._queued_pattern_label = ""
                         self._queued_slot = None
+                    return_spec = None
+                    return_label = ""
+                    return_slot = None
                     sequence_spec = None
                     sequence_label = ""
                     sequence_slot = None
-                    if queued is None and self._sequence_enabled and self._sequence_specs:
+                    if queued is None and self._return_spec is not None:
+                        return_spec = self._return_spec
+                        return_label = self._return_pattern_label
+                        return_slot = self._return_slot
+                        self._return_spec = None
+                        self._return_pattern_name = ""
+                        self._return_pattern_label = ""
+                        self._return_slot = None
+                    if (
+                            queued is None
+                            and return_spec is None
+                            and self._sequence_enabled
+                            and self._sequence_specs):
                         self._sequence_index = (
                             self._sequence_index + 1
                         ) % len(self._sequence_specs)
@@ -666,6 +706,10 @@ class PatternPerformer:
                     current_spec = queued
                     current_label = queued_label or queued.name
                     current_slot = queued_slot
+                elif return_spec is not None:
+                    current_spec = return_spec
+                    current_label = return_label or return_spec.name
+                    current_slot = return_slot
                 elif sequence_spec is not None:
                     current_spec = sequence_spec
                     current_label = sequence_label or sequence_spec.name
@@ -681,6 +725,10 @@ class PatternPerformer:
                 self._queued_pattern_name = ""
                 self._queued_pattern_label = ""
                 self._queued_slot = None
+                self._return_spec = None
+                self._return_pattern_name = ""
+                self._return_pattern_label = ""
+                self._return_slot = None
                 self._sequence_specs = []
                 self._sequence_labels = []
                 self._sequence_slots = []

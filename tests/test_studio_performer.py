@@ -270,6 +270,42 @@ class StudioPerformerTests(unittest.TestCase):
         finally:
             player.stop()
 
+    def test_performer_can_queue_one_shot_return(self):
+        base = PatternSpec(
+            name="base",
+            prompt="base",
+            bars=1,
+            bpm=300.0,
+            hits=[PatternHit(pad=0, step=0, velocity=100)],
+        )
+        fill = PatternSpec(
+            name="fill",
+            prompt="fill",
+            bars=1,
+            bpm=300.0,
+            hits=[PatternHit(pad=1, step=0, velocity=100)],
+        )
+        player = PatternPerformer()
+        try:
+            player.play(
+                base,
+                send_message=lambda msg: None,
+                target_key="external.sp404.a1_a6_beat_bass",
+                bpm=300.0,
+            )
+            self.assertTrue(player.queue_spec(
+                fill,
+                pattern_label="Fill",
+                return_spec=base,
+                return_pattern_label="Return",
+            ))
+            status = player.status()
+            self.assertEqual(status["queued_pattern_label"], "Fill")
+            self.assertEqual(status["return_pattern_label"], "Return")
+            self.assertEqual(status["return_pattern_name"], "base")
+        finally:
+            player.stop()
+
     def test_performer_take_sequence_status(self):
         first = PatternSpec(
             name="first",

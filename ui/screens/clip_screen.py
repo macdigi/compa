@@ -364,6 +364,71 @@ class ClipScreen:
         suffix = " next loop" if self._performer_player().status()["running"] else ""
         self._performer_message = f"{self._lane_label(lane)} {state}{suffix}"
 
+    def _apply_performer_gesture(self, sess, gesture: str) -> None:
+        controls = self._performer_lane_controls()
+
+        def set_mutes(*, kick: bool = False, snare: bool = False,
+                      hats: bool = False, bass: bool = False) -> None:
+            controls["kick"]["mute"] = kick
+            controls["snare"]["mute"] = snare
+            controls["hats"]["mute"] = hats
+            controls["bass"]["mute"] = bass
+
+        if gesture == "all":
+            set_mutes()
+            self._set_performer_lane_controls(controls)
+            self._performer_message = "all lanes in next loop"
+            return
+        if gesture == "drums":
+            set_mutes(bass=True)
+            self._set_performer_lane_controls(controls)
+            self._performer_message = "drums only next loop"
+            return
+        if gesture == "bass":
+            set_mutes(kick=True, snare=True, hats=True)
+            self._set_performer_lane_controls(controls)
+            self._performer_message = "bass only next loop"
+            return
+        if gesture == "drop_drums":
+            set_mutes(kick=True, snare=True, hats=True, bass=False)
+            self._set_performer_lane_controls(controls)
+            self._performer_message = "drum drop next loop"
+            return
+        if gesture == "reset":
+            self._set_performer_lane_controls(normalized_lane_controls())
+            self._performer_message = "lane controls reset"
+            return
+        if gesture == "fill":
+            self._queue_fill_once(sess)
+
+    def _queue_fill_once(self, sess) -> None:
+        player = self._performer_player()
+        if not player.status()["running"]:
+            self._performer_message = "play loop before firing fill"
+            return
+        base_spec = self._current_performer_spec()
+        self._performer_seed += 1
+        controls = self._performer_generator_controls()
+        controls.update({
+            "density": max(controls["density"], 82.0),
+            "complexity": max(controls["complexity"], 78.0),
+            "fill": 100.0,
+            "variation": max(controls["variation"], 70.0),
+        })
+        fill_spec = generate_sp404_beat_bass_variation(
+            self._performer_seed,
+            style=self._performer_style(),
+            controls=controls,
+        )
+        if player.queue_spec(
+                fill_spec,
+                pattern_label="Fill",
+                return_spec=base_spec,
+                return_pattern_label="Return"):
+            self._performer_message = "fill queued, returns after one loop"
+        else:
+            self._performer_message = "fill queue failed"
+
     def _performer_takes(self, sess) -> list:
         takes = getattr(sess, "studio_performer_takes", None)
         if not isinstance(takes, list):
@@ -1142,10 +1207,32 @@ class ClipScreen:
                           f"{lane_ctrl['level'] * 100:.0f}%",
                           "performer_lane_level_down",
                           "performer_lane_level_up")
-        self._button(surface, "performer_lane_mute",
-                     pygame.Rect(right_x + 16, ly + 92, right_w - 32, 24),
-                     "Mute" if not lane_ctrl["mute"] else "On",
-                     danger=bool(lane_ctrl["mute"]))
+        gesture_gap = 5
+        gesture_x = right_x + 16
+        gesture_w = (right_w - 32 - gesture_gap * 5) // 6
+        gestures = [
+            ("performer_lane_mute", "Mute" if not lane_ctrl["mute"] else "On",
+             bool(lane_ctrl["mute"])),
+            ("performer_gesture_all", "All", False),
+            ("performer_gesture_drums", "Drums", False),
+            ("performer_gesture_bass", "Bass", False),
+            ("performer_gesture_drop_drums", "Drop", False),
+            ("performer_gesture_fill", "Fill", False),
+        ]
+        for idx, (key, label, danger) in enumerate(gestures):
+            self._button(
+                surface,
+                key,
+                pygame.Rect(
+                    gesture_x + idx * (gesture_w + gesture_gap),
+                    ly + 92,
+                    gesture_w,
+                    24,
+                ),
+                label,
+                danger=danger,
+                tone="queued" if key == "performer_gesture_fill" else "",
+            )
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -1246,6 +1333,16 @@ class ClipScreen:
                 return True
             if key == "performer_lane_mute":
                 self._adjust_performer_lane("mute")
+                return True
+            gesture_buttons = {
+                "performer_gesture_all": "all",
+                "performer_gesture_drums": "drums",
+                "performer_gesture_bass": "bass",
+                "performer_gesture_drop_drums": "drop_drums",
+                "performer_gesture_fill": "fill",
+            }
+            if key in gesture_buttons:
+                self._apply_performer_gesture(sess, gesture_buttons[key])
                 return True
             generator_buttons = {
                 "performer_density_down": ("density", -10.0),

@@ -122,6 +122,20 @@ class PerformerMode(Mode):
             screen._load_performer_take(sess)
             self.control.request_redraw()
             return True
+        if row == 2:
+            gestures = {
+                0: "all",
+                1: "drums",
+                2: "bass",
+                3: "drop_drums",
+                4: "fill",
+                5: "reset",
+            }
+            gesture = gestures.get(col)
+            if gesture is not None:
+                screen._apply_performer_gesture(sess, gesture)
+                self.control.request_redraw()
+            return True
         return True
 
     def draw_pads(self) -> dict[tuple[int, int], tuple[int, int]]:
@@ -158,6 +172,19 @@ class PerformerMode(Mode):
                 C.COLOR_BLUE if col == queued else (
                     C.COLOR_GREEN if saved else C.COLOR_DARK_GRAY),
                 C.ANIM_BLINK_8TH if col == queued else C.ANIM_STATIC,
+            )
+        gesture_colors = {
+            0: C.COLOR_GREEN,
+            1: C.COLOR_BLUE,
+            2: C.COLOR_BLUE,
+            3: C.COLOR_RED,
+            4: C.COLOR_GREEN,
+            5: C.COLOR_DARK_GRAY,
+        }
+        for col, color in gesture_colors.items():
+            out[(col, 2)] = (
+                color,
+                C.ANIM_BLINK_QUARTER if col == 4 else C.ANIM_STATIC,
             )
         return out
 
@@ -272,6 +299,7 @@ class PerformerMode(Mode):
                 ("GATE", f"{ctrl['gate'] * 100:.0f}%"),
                 ("LEVEL", f"{ctrl['level'] * 100:.0f}%"),
                 ("MUTE", "ON" if ctrl["mute"] else "OFF"),
+                ("PADS", "All Drum Bass Drop Fill"),
             ]
         elif self.encoder_page == "takes":
             labels = [
