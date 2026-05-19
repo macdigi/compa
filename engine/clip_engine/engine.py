@@ -19,11 +19,13 @@ from session.clip import AudioClip, MidiClip, ClipState
 from .scheduler import ClipScheduler
 from .capture_buffer import CaptureBuffer
 from .audio_clip_voice import AudioClipVoice
+from .instruments.drum_synth import DrumSynthInstrument
 from .instruments.drum_rack import DrumRack, DrumPad
 from .instruments.synth_voice import (SynthInstrument, SynthParams,
                                        preset_bass, preset_lead, preset_pad)
 from .instruments.synth_kit import default_kit
 from .sample_loader import load_sample
+from engine.studio_drum_synth import drum_synth_voice_specs
 from engine.studio_sampler import normalized_pad_spec, SAMPLER_PAD_COUNT
 
 
@@ -126,6 +128,17 @@ class ClipEngine:
                 if hasattr(params, k):
                     setattr(params, k, v)
             return SynthInstrument(self.sr, params, max_voices=8)
+        if kind == "drum_synth":
+            return DrumSynthInstrument(
+                self.sr,
+                drum_synth_voice_specs(self.session, self._instrument_ref_track(ref)),
+            )
+        return None
+
+    def _instrument_ref_track(self, ref: InstrumentRef) -> int | None:
+        for idx, track in enumerate(self.session.tracks):
+            if track.instrument is ref:
+                return idx
         return None
 
     def _prepare_drum_sample(self, data: np.ndarray, sample_rate: int) -> np.ndarray:

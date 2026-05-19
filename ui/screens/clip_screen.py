@@ -55,6 +55,16 @@ from engine.studio_sampler import (
     sampler_track_index,
     sample_label,
 )
+from engine.studio_drum_synth import (
+    DRUM_SYNTH_KITS,
+    DRUM_SYNTH_PAD_COUNT,
+    adjust_voice_param,
+    drum_synth_track_index,
+    drum_synth_voice_specs,
+    ensure_drum_synth_track,
+    set_drum_synth_kit,
+    voice_display_name,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -101,6 +111,9 @@ class ClipScreen:
         self._sampler_sample_idx = 0
         self._sampler_message = ""
         self._sampler_library: list[str] | None = None
+        self._drum_synth_pad_idx = 0
+        self._drum_synth_kit_idx = 0
+        self._drum_synth_message = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -121,6 +134,8 @@ class ClipScreen:
             desired = "performer"
         elif self._tab == "sampler":
             desired = "sampler"
+        elif self._tab == "drum_synth":
+            desired = "drum_synth"
         elif self._tab == "clips":
             desired = "session"
         else:
@@ -340,6 +355,93 @@ class ClipScreen:
         count = load_starter_kit(sess, track_idx)
         self._rebuild_sampler(sess)
         self._sampler_message = f"starter kit loaded: {count} pads"
+
+    # ── Drum Synth helpers ───────────────────────────────────────
+    def _drum_synth_track_index(self, sess) -> int | None:
+        return drum_synth_track_index(sess)
+
+    def _drum_synth_specs(self, sess) -> list[dict]:
+        idx = self._drum_synth_track_index(sess)
+        return drum_synth_voice_specs(sess, idx)
+
+    def _ensure_drum_synth_track(self, sess) -> int:
+        idx = ensure_drum_synth_track(sess)
+        self._rebuild_drum_synth(sess)
+        self._drum_synth_message = f"using Drum Synth track {idx + 1}"
+        return idx
+
+    def _rebuild_drum_synth(self, sess) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is not None and hasattr(engine, "_instantiate_instruments"):
+            engine._instantiate_instruments()
+        self._persist_session(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+
+    def _trigger_drum_synth_pad(self, sess, pad_idx: int, velocity: int = 112) -> None:
+        track_idx = self._drum_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_drum_synth_track(sess)
+        self._drum_synth_pad_idx = max(
+            0, min(DRUM_SYNTH_PAD_COUNT - 1, int(pad_idx)))
+        if not self._ensure_audio_started():
+            self._drum_synth_message = "drum synth audio gated"
+            return
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is None:
+            self._drum_synth_message = "clip engine unavailable"
+            return
+        engine.play_note_live(
+            track_idx,
+            36 + self._drum_synth_pad_idx,
+            max(1, min(127, int(velocity))),
+            link_beat=0.0,
+        )
+        specs = self._drum_synth_specs(sess)
+        label = voice_display_name(specs[self._drum_synth_pad_idx],
+                                   self._drum_synth_pad_idx)
+        self._drum_synth_message = (
+            f"triggered Pad {self._drum_synth_pad_idx + 1}: {label}")
+
+    def _stop_drum_synth(self) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        if engine is not None:
+            engine.all_notes_off()
+        self._drum_synth_message = "drum synth stopped"
+
+    def _set_drum_synth_kit(self, sess, kit: str) -> None:
+        track_idx = self._drum_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_drum_synth_track(sess)
+        set_drum_synth_kit(sess, track_idx, kit)
+        self._drum_synth_kit_idx = DRUM_SYNTH_KITS.index(kit)
+        self._rebuild_drum_synth(sess)
+        self._drum_synth_message = f"{kit} kit loaded"
+
+    def _cycle_drum_synth_kit(self, sess) -> None:
+        self._drum_synth_kit_idx = (
+            self._drum_synth_kit_idx + 1) % len(DRUM_SYNTH_KITS)
+        self._set_drum_synth_kit(
+            sess, DRUM_SYNTH_KITS[self._drum_synth_kit_idx])
+
+    def _adjust_drum_synth_param(self, sess, field: str, delta: float) -> None:
+        track_idx = self._drum_synth_track_index(sess)
+        if track_idx is None:
+            track_idx = self._ensure_drum_synth_track(sess)
+        spec = adjust_voice_param(
+            sess, track_idx, self._drum_synth_pad_idx, field, delta)
+        self._rebuild_drum_synth(sess)
+        value = spec.get(field)
+        if isinstance(value, float):
+            if field in ("tone", "snap"):
+                value_text = f"{value * 100:.0f}"
+            else:
+                value_text = f"{value:.2f}"
+        else:
+            value_text = str(value)
+        self._drum_synth_message = (
+            f"Pad {self._drum_synth_pad_idx + 1} {field}: {value_text}")
 
     def _sp_beat_bass_target(self) -> TrackTarget:
         return TrackTarget(
@@ -1217,6 +1319,125 @@ class ClipScreen:
                      pygame.Rect(bx + button_w + button_gap, by + 88,
                                  button_w, 34), "Stop", danger=True)
 
+    def _draw_drum_synth_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 24, bold=True)
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        track_idx = self._drum_synth_track_index(sess)
+        specs = self._drum_synth_specs(sess)
+        selected = self._drum_synth_pad_idx
+        track_name = "No drum synth track"
+        kit = DRUM_SYNTH_KITS[self._drum_synth_kit_idx]
+        if track_idx is not None and 0 <= track_idx < len(sess.tracks):
+            track = sess.tracks[track_idx]
+            track_name = track.name
+            kit = str((track.instrument.params if track.instrument else {})
+                      .get("kit") or kit)
+        surface.blit(font_big.render("Drum Synth", True, (232, 234, 242)),
+                     (20, top + 8))
+        surface.blit(font.render(f"{track_name}  {kit}", True,
+                                 (150, 162, 184)), (190, top + 16))
+        if self._drum_synth_message:
+            self._draw_text_fit(surface, font_sm, self._drum_synth_message,
+                                (174, 188, 222), (380, top + 19),
+                                surface.get_width() - 400)
+
+        margin = 20
+        gap = 12
+        y = top + 54
+        content_w = surface.get_width() - margin * 2
+        left_w = min(430, int(content_w * 0.58))
+        right_w = content_w - left_w - gap
+        left = pygame.Rect(margin, y, left_w, 290)
+        right = pygame.Rect(margin + left_w + gap, y, right_w, 290)
+        py = self._panel(surface, left, "Synth Voices")
+        ry = self._panel(surface, right, "Selected Voice")
+
+        pad_gap = 8
+        pad_size = min(
+            (left.width - 28 - pad_gap * 3) // 4,
+            (left.height - 54 - pad_gap * 3) // 4,
+        )
+        grid_w = pad_size * 4 + pad_gap * 3
+        grid_x = left.x + (left.width - grid_w) // 2
+        grid_y = py
+        for idx in range(DRUM_SYNTH_PAD_COUNT):
+            row = idx // 4
+            col = idx % 4
+            rect = pygame.Rect(
+                grid_x + col * (pad_size + pad_gap),
+                grid_y + row * (pad_size + pad_gap),
+                pad_size,
+                pad_size,
+            )
+            spec = specs[idx] if idx < len(specs) else None
+            active = idx == selected
+            bg = (44, 72, 62) if active else (28, 30, 42)
+            edge = (112, 226, 166) if active else (62, 72, 96)
+            pygame.draw.rect(surface, bg, rect, border_radius=6)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=6)
+            self._buttons[f"drum_synth_pad_{idx}"] = rect
+            self._draw_text_fit(surface, font_sm, f"{idx + 1}",
+                                (232, 236, 244), (rect.x + 8, rect.y + 7),
+                                rect.width - 16)
+            self._draw_text_fit(surface, font_sm, voice_display_name(spec, idx),
+                                (180, 192, 210),
+                                (rect.x + 8, rect.y + rect.height - 22),
+                                rect.width - 16)
+
+        selected_spec = specs[selected] if selected < len(specs) else None
+        if not selected_spec:
+            selected_spec = {}
+        voice_name = voice_display_name(selected_spec, selected)
+        voice_type = str(selected_spec.get("voice_type", "-")).replace("_", " ")
+        info_w = right.width - 28
+        self._info_pair(surface, right.x + 14, ry, f"Pad {selected + 1}",
+                        voice_name, info_w)
+        self._info_pair(surface, right.x + 14, ry + 50, "Type",
+                        voice_type, info_w)
+        control_w = (info_w - 16) // 3
+        self._info_pair(surface, right.x + 14, ry + 100, "Tone",
+                        f"{float(selected_spec.get('tone', 0.0)) * 100:.0f}",
+                        control_w)
+        self._info_pair(surface, right.x + 22 + control_w, ry + 100, "Decay",
+                        f"{float(selected_spec.get('decay', 0.0)):.2f}s",
+                        control_w)
+        self._info_pair(surface, right.x + 30 + control_w * 2, ry + 100, "Snap",
+                        f"{float(selected_spec.get('snap', 0.0)) * 100:.0f}",
+                        control_w)
+
+        bx = right.x + 14
+        by = ry + 158
+        button_gap = 8
+        button_w = (info_w - button_gap * 2) // 3
+        self._button(surface, "drum_synth_kit_808",
+                     pygame.Rect(bx, by, button_w, 34), "808",
+                     active=kit == "808")
+        self._button(surface, "drum_synth_kit_909",
+                     pygame.Rect(bx + button_w + button_gap, by, button_w, 34),
+                     "909", active=kit == "909")
+        self._button(surface, "drum_synth_stop",
+                     pygame.Rect(bx + (button_w + button_gap) * 2, by,
+                                 button_w, 34), "Stop", danger=True)
+        small_w = (info_w - button_gap * 5) // 6
+        controls = [
+            ("drum_synth_tone_down", "Tone-"),
+            ("drum_synth_tone_up", "Tone+"),
+            ("drum_synth_decay_down", "Dec-"),
+            ("drum_synth_decay_up", "Dec+"),
+            ("drum_synth_snap_down", "Snap-"),
+            ("drum_synth_snap_up", "Snap+"),
+        ]
+        for idx, (key, label) in enumerate(controls):
+            self._button(surface, key,
+                         pygame.Rect(bx + idx * (small_w + button_gap),
+                                     by + 46, small_w, 30),
+                         label)
+        self._button(surface, "drum_synth_create",
+                     pygame.Rect(bx, by + 88, info_w, 34),
+                     "Create / Use Drum Synth Track",
+                     active=track_idx is not None)
+
     def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
                                 top: int, sess) -> None:
         module = module_for_tab(tab)
@@ -1287,6 +1508,9 @@ class ClipScreen:
             return
         if tab == "sampler":
             self._draw_sampler_tab(surface, top, sess)
+            return
+        if tab == "drum_synth":
+            self._draw_drum_synth_tab(surface, top, sess)
             return
         if tab == "overview":
             self._draw_module_hub(surface, top, sess)
@@ -1632,6 +1856,40 @@ class ClipScreen:
                 return True
             if key == "sampler_stop":
                 self._stop_sampler()
+                return True
+            if key.startswith("drum_synth_pad_"):
+                self._trigger_drum_synth_pad(
+                    sess, int(key.rsplit("_", 1)[1]))
+                return True
+            if key == "drum_synth_create":
+                self._ensure_drum_synth_track(sess)
+                return True
+            if key == "drum_synth_kit_808":
+                self._set_drum_synth_kit(sess, "808")
+                return True
+            if key == "drum_synth_kit_909":
+                self._set_drum_synth_kit(sess, "909")
+                return True
+            if key == "drum_synth_stop":
+                self._stop_drum_synth()
+                return True
+            if key == "drum_synth_tone_down":
+                self._adjust_drum_synth_param(sess, "tone", -0.05)
+                return True
+            if key == "drum_synth_tone_up":
+                self._adjust_drum_synth_param(sess, "tone", 0.05)
+                return True
+            if key == "drum_synth_decay_down":
+                self._adjust_drum_synth_param(sess, "decay", -0.05)
+                return True
+            if key == "drum_synth_decay_up":
+                self._adjust_drum_synth_param(sess, "decay", 0.05)
+                return True
+            if key == "drum_synth_snap_down":
+                self._adjust_drum_synth_param(sess, "snap", -0.05)
+                return True
+            if key == "drum_synth_snap_up":
+                self._adjust_drum_synth_param(sess, "snap", 0.05)
                 return True
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(

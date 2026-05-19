@@ -98,6 +98,13 @@ load the starter kit, cycle local starter samples, assign a sample to the
 selected pad, and clear a pad. Deeper sample browsing, pad editing, choke
 groups, and pattern capture remain follow-up passes.
 
+The first generated-instrument path is the Drum Synth MVP. Studio can create an
+internal Drum Synth track with 16 procedural voices, switch between 808 and 909
+starter kits, trigger pads from the touchscreen or Push 2, and adjust selected
+voice tone, decay, and snap macros. This gives Compa its first standalone drum
+machine block while leaving pattern clips, deeper voice editing, kit storage,
+and controller-mapped macro automation for later passes.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:
