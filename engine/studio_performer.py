@@ -23,6 +23,7 @@ from engine.ai_pattern import (
 
 
 SP404_BEAT_BASS_TARGET = "external.sp404.a1_a6_beat_bass"
+MAX_PERFORMER_TAKES = 8
 SP404_VARIATION_STYLES = (
     "half_time",
     "electro",
@@ -123,6 +124,38 @@ def all_notes_off_messages(events: Iterable[MidiEvent]) -> list[tuple[int, int, 
     return [(0x80 | channel, note, 0) for channel, note in sorted(pairs)]
 
 
+def performer_take_from_spec(
+    spec: PatternSpec,
+    *,
+    slot: int,
+    target_key: str = SP404_BEAT_BASS_TARGET,
+) -> dict:
+    """Serialize a playable performer take for session persistence."""
+
+    slot = max(0, min(MAX_PERFORMER_TAKES - 1, int(slot)))
+    return {
+        "schema_version": 1,
+        "slot": slot,
+        "target_key": target_key,
+        "name": spec.name,
+        "device": spec.device,
+        "bank": spec.bank,
+        "tags": list(spec.tags),
+        "spec": spec.to_dict(),
+    }
+
+
+def spec_from_performer_take(take: dict | None) -> PatternSpec | None:
+    """Restore a PatternSpec from a persisted performer take."""
+
+    if not isinstance(take, dict):
+        return None
+    data = take.get("spec")
+    if not isinstance(data, dict):
+        return None
+    return PatternSpec.from_dict(data)
+
+
 class PatternPerformer:
     """Threaded MIDI PatternSpec player with stop and mute controls."""
 
@@ -140,6 +173,8 @@ class PatternPerformer:
         self._running = False
         self._last_bpm = 0.0
         self._loop_count = 0
+        self._queued_spec: PatternSpec | None = None
+        self._queued_pattern_name = ""
 
     def status(self) -> dict:
         with self._lock:
@@ -152,6 +187,7 @@ class PatternPerformer:
                 "last_error": self._last_error,
                 "last_bpm": self._last_bpm,
                 "loop_count": self._loop_count,
+                "queued_pattern_name": self._queued_pattern_name,
             }
 
     def play(
@@ -194,7 +230,23 @@ class PatternPerformer:
             self._running = True
             self._last_bpm = current_bpm
             self._loop_count = 0
+            self._queued_spec = None
+            self._queued_pattern_name = ""
         thread.start()
+
+    def queue_spec(self, spec: PatternSpec) -> bool:
+        """Queue a new spec to take over at the next loop boundary."""
+
+        events = build_midi_events(spec)
+        if not events:
+            raise RuntimeError("pattern has no MIDI events")
+        with self._lock:
+            if not self._running:
+                return False
+            self._queued_spec = spec
+            self._queued_pattern_name = spec.name
+            self._last_error = ""
+            return True
 
     def stop(self) -> None:
         with self._lock:
@@ -208,6 +260,8 @@ class PatternPerformer:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=0.35)
         with self._lock:
+            self._queued_spec = None
+            self._queued_pattern_name = ""
             if thread is self._thread:
                 self._running = False
 
@@ -239,6 +293,8 @@ class PatternPerformer:
         velocity_scale: float,
     ) -> None:
         loop_idx = 0
+        current_spec = spec
+        events: list[MidiEvent] = []
         try:
             while not stop_event.is_set() and (loops <= 0 or loop_idx < loops):
                 try:
@@ -247,10 +303,12 @@ class PatternPerformer:
                     current_bpm = bpm
                 current_bpm = max(20.0, min(300.0, current_bpm))
                 events = build_midi_events(
-                    spec, bpm=current_bpm, velocity_scale=velocity_scale)
-                loop_seconds = spec.length_beats * 60.0 / max(1.0, current_bpm)
+                    current_spec, bpm=current_bpm,
+                    velocity_scale=velocity_scale)
+                loop_seconds = current_spec.length_beats * 60.0 / max(1.0, current_bpm)
                 with self._lock:
                     self._events = events
+                    self._pattern_name = current_spec.name
                     self._last_bpm = current_bpm
                     self._loop_count = loop_idx + 1
                 start_time = time.monotonic()
@@ -269,6 +327,15 @@ class PatternPerformer:
                     break
                 if (loops <= 0 or loop_idx < loops) and elapsed < loop_seconds:
                     stop_event.wait(loop_seconds - elapsed)
+                if stop_event.is_set():
+                    break
+                with self._lock:
+                    queued = self._queued_spec
+                    if queued is not None:
+                        self._queued_spec = None
+                        self._queued_pattern_name = ""
+                if queued is not None:
+                    current_spec = queued
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -276,6 +343,8 @@ class PatternPerformer:
             self._send_all_notes_off(send_message, events)
             with self._lock:
                 self._running = False
+                self._queued_spec = None
+                self._queued_pattern_name = ""
 
     @staticmethod
     def _send_all_notes_off(

@@ -6,16 +6,24 @@ as the pads. Tap-to-launch matches Push 2 behavior.
 """
 from __future__ import annotations
 
+import os
+
 import pygame
 
+from engine.ai_pattern import install_step_grid
+from engine.compa_step_persistence import load as load_step_grids
+from engine.compa_step_persistence import save as save_step_grids
 from session.clip import ClipState
 from session.track import TrackTarget
 from engine.studio_performer import (
+    MAX_PERFORMER_TAKES,
     PatternPerformer,
     SP404_BEAT_BASS_TARGET,
     SP404_VARIATION_STYLES,
     confirmed_sp404_beat_bass_spec,
     generate_sp404_beat_bass_variation,
+    performer_take_from_spec,
+    spec_from_performer_take,
 )
 from engine.studio_targets import (
     availability_label,
@@ -51,6 +59,7 @@ class ClipScreen:
         self._performer_message = ""
         self._performer_seed = 0
         self._performer_style_idx = 0
+        self._performer_take_idx = 0
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -221,6 +230,103 @@ class ClipScreen:
     def _style_label(style: str) -> str:
         return style.replace("_", " ").title()
 
+    def _performer_takes(self, sess) -> list:
+        takes = getattr(sess, "studio_performer_takes", None)
+        if not isinstance(takes, list):
+            takes = []
+        takes = takes[:MAX_PERFORMER_TAKES]
+        while len(takes) < MAX_PERFORMER_TAKES:
+            takes.append(None)
+        sess.studio_performer_takes = takes
+        return takes
+
+    def _current_take(self, sess) -> dict | None:
+        takes = self._performer_takes(sess)
+        return takes[self._performer_take_idx % MAX_PERFORMER_TAKES]
+
+    def _take_label(self, sess) -> str:
+        take = self._current_take(sess)
+        idx = self._performer_take_idx + 1
+        if not take:
+            return f"Take {idx}: empty"
+        return f"Take {idx}: {str(take.get('name', 'saved'))[:42]}"
+
+    def _persist_session(self, sess) -> None:
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None and hasattr(ctrl, "_persist"):
+            ctrl._persist()
+            return
+        try:
+            from session.persistence import save_session
+            save_session(sess, "default")
+        except Exception:
+            pass
+
+    def _cycle_performer_take(self, sess) -> None:
+        self._performer_take_idx = (
+            self._performer_take_idx + 1) % MAX_PERFORMER_TAKES
+        self._performer_message = f"selected {self._take_label(sess)}"
+
+    def _save_performer_take(self, sess) -> None:
+        spec = self._current_performer_spec()
+        takes = self._performer_takes(sess)
+        takes[self._performer_take_idx] = performer_take_from_spec(
+            spec, slot=self._performer_take_idx,
+            target_key=SP404_BEAT_BASS_TARGET)
+        self._persist_session(sess)
+        self._performer_message = (
+            f"saved Take {self._performer_take_idx + 1}: {spec.name}")
+
+    def _load_performer_take(self, sess) -> None:
+        take = self._current_take(sess)
+        spec = spec_from_performer_take(take)
+        if spec is None:
+            self._performer_message = (
+                f"Take {self._performer_take_idx + 1} is empty")
+            return
+        self._set_current_performer_spec(spec)
+        player = self._performer_player()
+        if player.status()["running"] and player.queue_spec(spec):
+            self._performer_message = (
+                f"queued Take {self._performer_take_idx + 1}: {spec.name}")
+        else:
+            self._performer_message = (
+                f"loaded Take {self._performer_take_idx + 1}: {spec.name}")
+
+    def _step_grids_path(self) -> str:
+        resolver = getattr(self.app, "_step_grids_path", None)
+        if callable(resolver):
+            return resolver()
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            "sessions",
+            "compa_step_grids.json",
+        )
+
+    def _export_performer_take_to_step_grid(self, sess) -> None:
+        spec = self._current_performer_spec()
+        pattern_idx = self._performer_take_idx
+        path = self._step_grids_path()
+        grids = getattr(self.app, "_compa_step_grids", None)
+        if not isinstance(grids, dict):
+            grids = load_step_grids(path)
+            setattr(self.app, "_compa_step_grids", grids)
+        install_step_grid(grids, spec, pattern_idx)
+        if save_step_grids(grids, path):
+            loader = getattr(self.app, "_load_step_grid", None)
+            focus = getattr(getattr(self.app, "device_manager", None),
+                            "focus_key", "")
+            if callable(loader) and focus == spec.device:
+                try:
+                    loader(spec.device, pattern_idx)
+                except Exception:
+                    pass
+            self._performer_message = (
+                f"sent drums to Push pattern {pattern_idx + 1}")
+        else:
+            self._performer_message = "step export failed"
+
     def _play_sp_beat_bass(self, sess) -> None:
         target = self._sp_beat_bass_target()
         self._set_selected_track_target(sess, target)
@@ -251,7 +357,9 @@ class ClipScreen:
         status = self._performer_player().status()
         self._performer_message = f"generated {self._style_label(style)}"
         if status["running"]:
-            self._play_sp_beat_bass(sess)
+            self._performer_player().queue_spec(spec)
+            self._performer_message = (
+                f"queued {self._style_label(style)} variation")
 
     def _cycle_performer_genre(self) -> None:
         self._performer_style_idx = (
@@ -524,10 +632,13 @@ class ClipScreen:
             (f"Track {track_idx + 1}", track.name if track is not None else "none"),
             ("Target", target.label or capability.label),
             ("Genre", self._style_label(self._performer_style())),
+            ("Take", self._take_label(sess)),
             ("Pattern", spec.name),
             ("Tempo", f"follows Studio BPM: {self._performer_bpm(sess):.1f}"),
             ("MIDI", midi_status),
         ]
+        if status.get("queued_pattern_name"):
+            rows.append(("Queued", status["queued_pattern_name"]))
         if self._performer_message:
             rows.append(("Status", self._performer_message))
         elif status["last_error"]:
@@ -537,18 +648,28 @@ class ClipScreen:
 
         y = top + 48
         row_h = 38
-        for title, detail in rows:
-            rect = pygame.Rect(20, y, surface.get_width() - 40, row_h)
+        gap = 8
+        columns = 2
+        col_w = (surface.get_width() - 40 - gap) // columns
+        for idx, (title, detail) in enumerate(rows):
+            col = idx % columns
+            row = idx // columns
+            rect = pygame.Rect(
+                20 + col * (col_w + gap),
+                y + row * (row_h + 6),
+                col_w,
+                row_h,
+            )
             pygame.draw.rect(surface, (24, 26, 36), rect, border_radius=4)
             pygame.draw.rect(surface, (52, 58, 78), rect, 1, border_radius=4)
-            surface.blit(font.render(str(title)[:18], True, (224, 228, 238)),
+            surface.blit(font.render(str(title)[:14], True, (224, 228, 238)),
                          (rect.x + 10, rect.y + 6))
-            surface.blit(font_sm.render(str(detail)[:62], True,
+            surface.blit(font_sm.render(str(detail)[:38], True,
                                         (156, 166, 184)),
-                         (rect.x + 136, rect.y + 8))
-            y += row_h + 6
+                         (rect.x + 92, rect.y + 8))
 
-        button_top = y + 8
+        row_count = (len(rows) + columns - 1) // columns
+        button_top = y + row_count * (row_h + 6) + 8
         x = 20
         self._button(surface, "performer_target_next",
                      pygame.Rect(x, button_top, 112, 34), "TARGET +")
@@ -575,6 +696,20 @@ class ClipScreen:
         self._button(surface, "performer_stop",
                      pygame.Rect(x, button_top, 84, 34), "STOP",
                      danger=True)
+        button_top += 42
+        x = 20
+        self._button(surface, "performer_take_next",
+                     pygame.Rect(x, button_top, 88, 34), "TAKE +")
+        x += 96
+        self._button(surface, "performer_take_save",
+                     pygame.Rect(x, button_top, 78, 34), "SAVE")
+        x += 86
+        self._button(surface, "performer_take_load",
+                     pygame.Rect(x, button_top, 78, 34), "LOAD",
+                     active=bool(self._current_take(sess)))
+        x += 86
+        self._button(surface, "performer_step_export",
+                     pygame.Rect(x, button_top, 128, 34), "SEND STEP")
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -613,6 +748,18 @@ class ClipScreen:
                 return True
             if key == "performer_genre":
                 self._cycle_performer_genre()
+                return True
+            if key == "performer_take_next":
+                self._cycle_performer_take(sess)
+                return True
+            if key == "performer_take_save":
+                self._save_performer_take(sess)
+                return True
+            if key == "performer_take_load":
+                self._load_performer_take(sess)
+                return True
+            if key == "performer_step_export":
+                self._export_performer_take_to_step_grid(sess)
                 return True
             if key == "performer_mute":
                 self._toggle_performer_mute()

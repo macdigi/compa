@@ -25,6 +25,7 @@ class Session:
     tracks: list[Track] = field(default_factory=list)
     scenes: list[Scene] = field(default_factory=list)
     master_volume: float = 0.85
+    studio_performer_takes: list[dict | None] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +40,7 @@ class Session:
             "tracks": [t.to_dict() for t in self.tracks],
             "scenes": [s.to_dict() for s in self.scenes],
             "master_volume": self.master_volume,
+            "studio_performer_takes": self.studio_performer_takes,
         }
 
     @classmethod
@@ -54,6 +56,10 @@ class Session:
             tracks=[Track.from_dict(t) for t in d.get("tracks", [])],
             scenes=[Scene.from_dict(s) for s in d.get("scenes", [])],
             master_volume=float(d.get("master_volume", 0.85)),
+            studio_performer_takes=[
+                take if isinstance(take, dict) else None
+                for take in d.get("studio_performer_takes", [])
+            ],
         )
 
     def get_clip(self, track_idx: int, scene_idx: int) -> Optional[Clip]:

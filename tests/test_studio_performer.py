@@ -2,13 +2,18 @@ import unittest
 
 from engine.ai_pattern import ChromaticHit, PatternHit, PatternSpec
 from engine.studio_performer import (
+    MAX_PERFORMER_TAKES,
+    PatternPerformer,
     SP404_VARIATION_STYLES,
     all_notes_off_messages,
     build_midi_events,
     confirmed_sp404_beat_bass_spec,
     generate_sp404_beat_bass_variation,
     normalize_sp404_variation_style,
+    performer_take_from_spec,
+    spec_from_performer_take,
 )
+from session.session import Session
 
 
 class StudioPerformerTests(unittest.TestCase):
@@ -96,6 +101,48 @@ class StudioPerformerTests(unittest.TestCase):
         )
         self.assertEqual(normalize_sp404_variation_style("boom bap", 1),
                          "busy_boom_bap")
+
+    def test_performer_take_round_trips_through_session(self):
+        spec = generate_sp404_beat_bass_variation(2, style="breakbeat")
+        take = performer_take_from_spec(spec, slot=MAX_PERFORMER_TAKES + 2)
+        self.assertEqual(take["slot"], MAX_PERFORMER_TAKES - 1)
+
+        sess = Session.empty()
+        sess.studio_performer_takes = [take]
+        loaded = Session.from_dict(sess.to_dict())
+        restored = spec_from_performer_take(loaded.studio_performer_takes[0])
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.to_dict(), spec.to_dict())
+
+    def test_performer_can_queue_next_pattern(self):
+        first = PatternSpec(
+            name="first",
+            prompt="first",
+            bars=1,
+            bpm=300.0,
+            hits=[PatternHit(pad=0, step=0, velocity=100)],
+        )
+        second = PatternSpec(
+            name="second",
+            prompt="second",
+            bars=1,
+            bpm=300.0,
+            hits=[PatternHit(pad=1, step=0, velocity=100)],
+        )
+        messages = []
+        player = PatternPerformer()
+        try:
+            player.play(
+                first,
+                send_message=messages.append,
+                target_key="external.sp404.a1_a6_beat_bass",
+                loops=1,
+                bpm=300.0,
+            )
+            self.assertTrue(player.queue_spec(second))
+            self.assertEqual(player.status()["queued_pattern_name"], "second")
+        finally:
+            player.stop()
 
 
 if __name__ == "__main__":
