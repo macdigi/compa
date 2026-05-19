@@ -39,6 +39,23 @@ CAPTURE_DIR = ROOT / "sessions" / "sp404_protocol"
 APP_HANDSHAKE = bytes.fromhex("12 60 e0 05 fe 67 00 74 68 2d 49 03")
 PROJECT_INIT = bytes.fromhex("12 60 e0 05 9a 04 00 00 00 20 20 03")
 PROJECT_LIST = bytes.fromhex("12 60 e0 05 fd 04 00 00 07 00 00 03")
+FILE_OPEN_PREAMBLE = bytes.fromhex("12 60 e0 05 b3 00 00 00 c0 93 91 02")
+READ_META_13 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 13 00 00 00 03 0d 00 00 00 00 00 00 f7"
+)
+READ_META_07 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 07 00 00 00 03 0d 00 00 00 00 00 00 f7"
+)
+READ_HEADER_04 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 04 00 00 00 03 0d 00 00 00 04 00 00 f7"
+)
+READ_DONE_03 = bytes.fromhex(
+    "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
+    "f0 41 7a 03 03 00 00 00 03 0d 00 00 00 00 00 00 f7"
+)
 
 
 def _now() -> str:
@@ -159,6 +176,55 @@ def _transact_many(payloads: list[tuple[str, bytes]], timeout: float) -> tuple[s
     return port, results
 
 
+def _sp404_pad_path(project: str, bank: int, pad: int) -> str:
+    if not re.fullmatch(r"PROJECT_[0-9]{2}", project):
+        raise ValueError("project must look like PROJECT_05")
+    if not 1 <= bank <= 10:
+        raise ValueError("bank must be 1-10")
+    if not 1 <= pad <= 16:
+        raise ValueError("pad must be 1-16")
+    return (
+        f"/SP404REMOTE///ROLAND/SP-404MKII/{project}/SMPL/"
+        f"BANK{bank}-{pad:02d}.SMP"
+    )
+
+
+def _build_file_read_path(path: str) -> bytes:
+    path_bytes = path.encode("ascii")
+    if len(path_bytes) > 220:
+        raise ValueError("path is too long for one observed librarian packet")
+    # Captured from Roland Librarian 4.05. The length fields are the path plus
+    # its NUL terminator, and the full F0...F7 sub-payload size.
+    return b"".join([
+        bytes.fromhex("13 60 e0 06 00 0c 00 00 a0 57 a5 e2"),
+        bytes([len(path_bytes) + 17, 0x00, 0x00, 0x00]),
+        bytes.fromhex("f0 41 7a 03 00 00 00 00 00 00 00 00 00 00"),
+        bytes([len(path_bytes) + 1]),
+        path_bytes,
+        b"\x00\xf7",
+    ])
+
+
+def _parse_rfwv_header(data: bytes) -> dict | None:
+    pos = data.find(b"RFWV")
+    if pos < 0:
+        return None
+    header = data[pos:pos + 32]
+    parsed = {
+        "offset": pos,
+        "header_hex": _hex(header),
+    }
+    if len(data) >= pos + 20:
+        parsed.update({
+            "size_be": int.from_bytes(data[pos + 4:pos + 8], "big"),
+            "size_le": int.from_bytes(data[pos + 4:pos + 8], "little"),
+            "sample_rate": int.from_bytes(data[pos + 8:pos + 12], "big"),
+            "channels": int.from_bytes(data[pos + 12:pos + 16], "big"),
+            "bit_depth": int.from_bytes(data[pos + 16:pos + 20], "big"),
+        })
+    return parsed
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     log_path, handle = _open_log(args.log)
     print(f"log: {log_path}")
@@ -240,6 +306,64 @@ def cmd_project_probe(args: argparse.Namespace) -> int:
             projects.append(name)
     print(f"\nprojects: {', '.join(projects) if projects else '(none parsed)'}")
     return 0 if projects else 1
+
+
+def cmd_read_path(args: argparse.Namespace) -> int:
+    """Read the first header chunk for one SP-404 remote sample path."""
+    try:
+        remote_path = args.path or _sp404_pad_path(args.project, args.bank, args.pad)
+        read_path = _build_file_read_path(remote_path)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    payloads = [
+        ("app_handshake", APP_HANDSHAKE),
+        ("project_init", PROJECT_INIT),
+        ("project_list", PROJECT_LIST),
+    ]
+    first_read_payload = read_path
+    if args.preamble:
+        first_read_payload = FILE_OPEN_PREAMBLE + read_path
+    payloads.extend([
+        ("read_path", first_read_payload),
+        ("read_meta_13", READ_META_13),
+        ("read_meta_07", READ_META_07),
+        ("read_header_04", READ_HEADER_04),
+        ("read_done_03", READ_DONE_03),
+    ])
+
+    try:
+        port, results = _transact_many(payloads, args.timeout)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"port: {port}")
+    print(f"path: {remote_path}")
+    combined = b""
+    for label, payload, response in results:
+        combined += response
+        print(f"\n{label}")
+        print(f"  tx {len(payload)}: {_hex(payload[:args.bytes])}")
+        if len(payload) > args.bytes:
+            print(f"  ... tx truncated {len(payload) - args.bytes} bytes")
+        print(f"  rx {len(response)}: {_hex(response[:args.bytes])}")
+        if len(response) > args.bytes:
+            print(f"  ... rx truncated {len(response) - args.bytes} bytes")
+        preview = _ascii_preview(response[:args.bytes])
+        if preview.strip("."):
+            print(f"  ascii: {preview}")
+
+    rfwv = _parse_rfwv_header(combined)
+    if not rfwv:
+        print("\nRFWV: not found")
+        return 1
+
+    print("\nRFWV:")
+    for key, value in rfwv.items():
+        print(f"  {key}: {value}")
+    return 0
 
 
 def cmd_send_hex(args: argparse.Namespace) -> int:
@@ -488,6 +612,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=1.5)
     p.add_argument("--bytes", type=int, default=256)
     p.set_defaults(func=cmd_project_probe)
+
+    p = sub.add_parser("read-path", help="read one observed SP remote .SMP header chunk")
+    p.add_argument("--project", default="PROJECT_05")
+    p.add_argument("--bank", type=int, default=1)
+    p.add_argument("--pad", type=int, default=1)
+    p.add_argument("--path", default="", help="override the generated remote path")
+    p.add_argument("--timeout", type=float, default=1.5)
+    p.add_argument("--bytes", type=int, default=160)
+    p.add_argument(
+        "--no-preamble",
+        dest="preamble",
+        action="store_false",
+        help="skip the observed file-open preamble before the first path read",
+    )
+    p.set_defaults(func=cmd_read_path, preamble=True)
 
     p = sub.add_parser("send-hex", help="send captured hex bytes to the SP")
     p.add_argument("hex_bytes", type=_parse_hex)

@@ -226,3 +226,29 @@ pad/file browsing without USB storage mode.
 Important safety note: a broad ad-hoc live sweep of 9e entry indexes caused the
 SP USB devices to reset/re-enumerate on the Pi. Keep broad scans inside the
 protocol lab until framing/state requirements are better understood.
+
+## Read-only path probe (2026-05-19)
+
+The protocol lab can now reproduce the official app's first read-only remote
+sample path request for one known pad:
+
+    tools/sp404_protocol_lab.py read-path --project PROJECT_05 --bank 1 --pad 1
+
+This command sends only the captured app init/list sequence and the captured
+read path sequence for:
+
+    /SP404REMOTE///ROLAND/SP-404MKII/PROJECT_05/SMPL/BANK1-01.SMP
+
+Live result on Jordan's SP-404MKII:
+
+- CDC port: /dev/ttyACM0
+- project list response: 905 bytes
+- file metadata response: 39 bytes
+- sample header/data response: 543 bytes
+- returned file magic: RFWV
+- parsed sample metadata: 48,000 Hz, stereo, 16-bit
+- reported payload size: 29,445,620 bytes
+
+This confirms the SP normal-mode librarian protocol can read internal sample
+files without USB mass-storage mode. Keep this as read-only lab functionality
+until chunk continuation, pad config parsing, and safe UI threading are decoded.
