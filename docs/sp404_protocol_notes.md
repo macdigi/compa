@@ -333,12 +333,26 @@ Key findings:
   A2 used handle 0x05.
 - The app then reads the new .SMP back with the same read-style op 0x00,
   0x13, 0x07, 0x04, and 0x03 sequence used by the read-only probe.
+- The follow-up read commands must copy the two-byte key returned by the
+  path-open response. In responses shaped like:
+
+      f0 41 7a 7a aa bb cc dd ee ...
+
+  the app copies bytes \`dd ee\` into the later 0x13/0x07/0x04/0x03 commands.
+  Hardcoded keys from one capture can make an otherwise valid pad read look
+  empty or unreadable.
 
 Safety status:
 
 - We have enough information to understand the broad write flow.
-- We do not yet have enough information to safely replay writes from Compa.
-- Before any live write attempt, decode the exact open/write/close state
-  machine, confirm the temporary-file promotion behavior, and validate pad
-  metadata on a sacrificial pad/project. A bad write here can corrupt a project
-  or pad assignment.
+- A synced replay of the A2 import flow against PROJECT_05 / Bank A / Pad 2
+  successfully persisted the 1-second 48 kHz mono probe sample. Dynamic
+  readback reports:
+
+      RFWV size=96504 sr=48000 ch=1 bits=16 duration=1.01s
+
+- The current implementation still keeps normal Compa write/import behavior
+  behind lab tooling. Before exposing this as a regular UI action, build a
+  first-class writer that generates packets from audio input instead of
+  replaying captured traffic, validates P-6/SP constraints, and limits writes
+  to explicit user-selected pads.

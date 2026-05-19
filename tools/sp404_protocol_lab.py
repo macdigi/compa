@@ -57,6 +57,8 @@ READ_DONE_03 = bytes.fromhex(
     "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
     "f0 41 7a 03 03 00 00 00 03 0d 00 00 00 00 00 00 f7"
 )
+PATH_OPEN_RESPONSE_MARKER = bytes.fromhex("f0 41 7a 7a")
+FOLLOWUP_REQUEST_MARKER = bytes.fromhex("f0 41 7a 03")
 
 
 def _now() -> str:
@@ -219,6 +221,94 @@ def _file_read_payloads(path: str, *, preamble: bool) -> list[tuple[str, bytes]]
     ]
 
 
+def _extract_file_key(open_response: bytes) -> bytes | None:
+    """Return the two-byte file key from an SP path-open response.
+
+    The official app copies these two bytes into later 0x13/0x07/0x04/0x03
+    readback commands. They vary per opened path, so captured constants are
+    only valid for the exact file handle seen in that capture.
+    """
+    pos = open_response.rfind(PATH_OPEN_RESPONSE_MARKER)
+    if pos < 0 or pos + 9 > len(open_response):
+        return None
+    status = open_response[pos + 4:pos + 9]
+    if status == b"\x7f" * 5:
+        return None
+    key = open_response[pos + 7:pos + 9]
+    if len(key) != 2 or key == b"\x7f\x7f":
+        return None
+    return key
+
+
+def _apply_file_key(payload: bytes, file_key: bytes) -> bytes:
+    if len(file_key) != 2:
+        raise ValueError("file key must contain exactly two bytes")
+    data = bytearray(payload)
+    pos = data.find(FOLLOWUP_REQUEST_MARKER)
+    if pos < 0 or pos + 10 > len(data):
+        raise ValueError("follow-up request marker not found")
+    data[pos + 8:pos + 10] = file_key
+    return bytes(data)
+
+
+def _file_read_followup_payloads(file_key: bytes | None) -> list[tuple[str, bytes]]:
+    payloads = [
+        ("read_meta_13", READ_META_13),
+        ("read_meta_07", READ_META_07),
+        ("read_header_04", READ_HEADER_04),
+        ("read_done_03", READ_DONE_03),
+    ]
+    if file_key is None:
+        return payloads
+    return [
+        (label, _apply_file_key(payload, file_key))
+        for label, payload in payloads
+    ]
+
+
+def _transact_read_path(
+    remote_path: str,
+    timeout: float,
+    *,
+    preamble: bool,
+    dynamic_key: bool,
+) -> tuple[str, list[tuple[str, bytes, bytes]], bytes | None]:
+    port = sp404_protocol.find_sp404_librarian_port()
+    if not port:
+        raise RuntimeError("SP-404 CDC port not found")
+
+    read_path = _build_file_read_path(remote_path)
+    if preamble:
+        read_path = FILE_OPEN_PREAMBLE + read_path
+
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    results: list[tuple[str, bytes, bytes]] = []
+    file_key: bytes | None = None
+    try:
+        sp404_protocol.configure_sp404_librarian_fd(fd)
+        time.sleep(0.2)
+        for label, payload in [
+            ("app_handshake", APP_HANDSHAKE),
+            ("project_init", PROJECT_INIT),
+            ("project_list", PROJECT_LIST),
+            ("read_path", read_path),
+        ]:
+            os.write(fd, payload)
+            response = _read_until_quiet(fd, timeout)
+            results.append((label, payload, response))
+            if label == "read_path":
+                file_key = _extract_file_key(response)
+
+        followups = _file_read_followup_payloads(file_key if dynamic_key else None)
+        for label, payload in followups:
+            os.write(fd, payload)
+            response = _read_until_quiet(fd, timeout)
+            results.append((label, payload, response))
+    finally:
+        os.close(fd)
+    return port, results, file_key if dynamic_key else None
+
+
 def _parse_rfwv_header(data: bytes) -> dict | None:
     pos = data.find(b"RFWV")
     if pos < 0:
@@ -342,21 +432,22 @@ def cmd_read_path(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    payloads = [
-        ("app_handshake", APP_HANDSHAKE),
-        ("project_init", PROJECT_INIT),
-        ("project_list", PROJECT_LIST),
-    ]
-    payloads.extend(_file_read_payloads(remote_path, preamble=args.preamble))
-
     try:
-        port, results = _transact_many(payloads, args.timeout)
+        port, results, file_key = _transact_read_path(
+            remote_path,
+            args.timeout,
+            preamble=args.preamble,
+            dynamic_key=args.dynamic_key,
+        )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"port: {port}")
     print(f"path: {remote_path}")
+    if args.dynamic_key:
+        key_text = file_key.hex(" ") if file_key else "(none)"
+        print(f"file_key: {key_text}")
     combined = b""
     for label, payload, response in results:
         combined += response
@@ -396,18 +487,45 @@ def cmd_read_bank(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    payloads: list[tuple[str, bytes]] = [
-        ("app_handshake", APP_HANDSHAKE),
-        ("project_init", PROJECT_INIT),
-        ("project_list", PROJECT_LIST),
-    ]
-    for pad in range(1, 17):
-        remote_path = _sp404_pad_path(args.project, args.bank, pad)
-        for label, payload in _file_read_payloads(remote_path, preamble=(pad == 1)):
-            payloads.append((f"pad_{pad:02d}_{label}", payload))
+    port = sp404_protocol.find_sp404_librarian_port()
+    if not port:
+        print("ERROR: SP-404 CDC port not found", file=sys.stderr)
+        return 1
 
+    responses_by_pad: dict[int, bytearray] = {
+        pad: bytearray() for pad in range(1, 17)
+    }
+    file_keys: dict[int, bytes | None] = {}
     try:
-        port, results = _transact_many(payloads, args.timeout)
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            sp404_protocol.configure_sp404_librarian_fd(fd)
+            time.sleep(0.2)
+            for _label, payload in [
+                ("app_handshake", APP_HANDSHAKE),
+                ("project_init", PROJECT_INIT),
+                ("project_list", PROJECT_LIST),
+            ]:
+                os.write(fd, payload)
+                _read_until_quiet(fd, args.timeout)
+
+            for pad in range(1, 17):
+                remote_path = _sp404_pad_path(args.project, args.bank, pad)
+                read_path = _build_file_read_path(remote_path)
+                if pad == 1:
+                    read_path = FILE_OPEN_PREAMBLE + read_path
+                os.write(fd, read_path)
+                response = _read_until_quiet(fd, args.timeout)
+                responses_by_pad[pad].extend(response)
+                file_key = _extract_file_key(response) if args.dynamic_key else None
+                file_keys[pad] = file_key
+                if args.dynamic_key and file_key is None:
+                    continue
+                for _label, payload in _file_read_followup_payloads(file_key):
+                    os.write(fd, payload)
+                    responses_by_pad[pad].extend(_read_until_quiet(fd, args.timeout))
+        finally:
+            os.close(fd)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -416,27 +534,23 @@ def cmd_read_bank(args: argparse.Namespace) -> int:
     print(f"project: {args.project}")
     print(f"bank: {args.bank}")
     loaded = 0
-    responses_by_pad: dict[int, bytearray] = {
-        pad: bytearray() for pad in range(1, 17)
-    }
-    for label, _payload, response in results:
-        match = re.match(r"pad_([0-9]{2})_", label)
-        if match:
-            responses_by_pad[int(match.group(1))].extend(response)
-
     for pad in range(1, 17):
         data = bytes(responses_by_pad[pad])
         header = _parse_rfwv_header(data)
         pad_id = f"{chr(ord('A') + args.bank - 1)}{pad:02d}"
         if not header:
-            print(f"{pad_id}: empty or unreadable ({len(data)} rx bytes)")
+            key = file_keys.get(pad)
+            key_text = " key=-" if not args.dynamic_key else f" key={key.hex(' ') if key else '-'}"
+            print(f"{pad_id}: empty or unreadable ({len(data)} rx bytes){key_text}")
             continue
         loaded += 1
+        key = file_keys.get(pad)
+        key_text = "" if not args.dynamic_key else f" key={key.hex(' ') if key else '-'}"
         duration = _duration_from_rfwv(header)
         print(
             f"{pad_id}: RFWV {header.get('sample_rate')} Hz "
             f"{header.get('channels')}ch {header.get('bit_depth')}bit "
-            f"{header.get('size_be')} bytes {duration:.2f}s"
+            f"{header.get('size_be')} bytes {duration:.2f}s{key_text}"
         )
     print(f"loaded: {loaded}/16")
     return 0
@@ -1015,13 +1129,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="skip the observed file-open preamble before the first path read",
     )
-    p.set_defaults(func=cmd_read_path, preamble=True)
+    p.add_argument(
+        "--static-key",
+        dest="dynamic_key",
+        action="store_false",
+        help="use the old captured follow-up key instead of the path-open response key",
+    )
+    p.set_defaults(func=cmd_read_path, preamble=True, dynamic_key=True)
 
     p = sub.add_parser("read-bank", help="read observed SP remote .SMP headers for one bank")
     p.add_argument("--project", default="PROJECT_05")
     p.add_argument("--bank", type=int, default=1)
     p.add_argument("--timeout", type=float, default=1.5)
-    p.set_defaults(func=cmd_read_bank)
+    p.add_argument(
+        "--static-key",
+        dest="dynamic_key",
+        action="store_false",
+        help="use the old captured follow-up key instead of per-path response keys",
+    )
+    p.set_defaults(func=cmd_read_bank, dynamic_key=True)
 
     p = sub.add_parser("send-hex", help="send captured hex bytes to the SP")
     p.add_argument("hex_bytes", type=_parse_hex)

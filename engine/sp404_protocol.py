@@ -47,6 +47,8 @@ READ_DONE_03 = bytes.fromhex(
     "13 60 e0 06 00 0c 00 00 80 00 a1 e2 11 00 00 00 "
     "f0 41 7a 03 03 00 00 00 03 0d 00 00 00 00 00 00 f7"
 )
+PATH_OPEN_RESPONSE_MARKER = bytes.fromhex("f0 41 7a 7a")
+FOLLOWUP_REQUEST_MARKER = bytes.fromhex("f0 41 7a 03")
 
 
 @dataclass(frozen=True)
@@ -241,6 +243,38 @@ def _file_read_payloads(path: str, *, preamble: bool) -> list[tuple[str, bytes]]
     ]
 
 
+def _extract_file_key(open_response: bytes) -> Optional[bytes]:
+    """Extract the two-byte per-path key required by follow-up read commands."""
+    pos = open_response.rfind(PATH_OPEN_RESPONSE_MARKER)
+    if pos < 0 or pos + 9 > len(open_response):
+        return None
+    status = open_response[pos + 4:pos + 9]
+    if status == b"\x7f" * 5:
+        return None
+    key = open_response[pos + 7:pos + 9]
+    if len(key) != 2 or key == b"\x7f\x7f":
+        return None
+    return key
+
+
+def _apply_file_key(payload: bytes, file_key: bytes) -> bytes:
+    data = bytearray(payload)
+    pos = data.find(FOLLOWUP_REQUEST_MARKER)
+    if pos < 0 or pos + 10 > len(data):
+        raise ValueError("follow-up request marker not found")
+    data[pos + 8:pos + 10] = file_key
+    return bytes(data)
+
+
+def _file_read_followup_payloads(file_key: bytes) -> list[tuple[str, bytes]]:
+    return [
+        ("read_meta_13", _apply_file_key(READ_META_13, file_key)),
+        ("read_meta_07", _apply_file_key(READ_META_07, file_key)),
+        ("read_header_04", _apply_file_key(READ_HEADER_04, file_key)),
+        ("read_done_03", _apply_file_key(READ_DONE_03, file_key)),
+    ]
+
+
 def _parse_project_names(data: bytes) -> list[str]:
     projects: list[str] = []
     for match in re.finditer(rb"PROJECT_[0-9]{2}", data):
@@ -287,26 +321,41 @@ def read_bank_headers(project: str, bank: int,
     if not 1 <= bank <= 10:
         raise ValueError("bank must be 1-10")
 
-    payloads: list[tuple[str, bytes]] = [
-        ("app_handshake", APP_HANDSHAKE),
-        ("project_init", PROJECT_INIT),
-        ("project_list", PROJECT_LIST),
-    ]
     paths: dict[int, str] = {}
-    for pad in range(1, 17):
-        path = _remote_smp_path(project, bank, pad)
-        paths[pad] = path
-        for label, payload in _file_read_payloads(path, preamble=(pad == 1)):
-            payloads.append((f"pad_{pad:02d}_{label}", payload))
-
-    _port, responses = _transact_many(payloads, timeout)
     responses_by_pad: dict[int, bytearray] = {
         pad: bytearray() for pad in range(1, 17)
     }
-    for label, response in responses:
-        match = re.match(r"pad_([0-9]{2})_", label)
-        if match:
-            responses_by_pad[int(match.group(1))].extend(response)
+
+    port = find_sp404_librarian_port()
+    if not port:
+        raise RuntimeError("SP-404 CDC port not found")
+
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        configure_sp404_librarian_fd(fd)
+        time.sleep(0.2)
+        for payload in (APP_HANDSHAKE, PROJECT_INIT, PROJECT_LIST):
+            os.write(fd, payload)
+            _read_until_quiet(fd, timeout)
+
+        for pad in range(1, 17):
+            path = _remote_smp_path(project, bank, pad)
+            paths[pad] = path
+            read_path = _build_file_read_path(path)
+            if pad == 1:
+                read_path = FILE_OPEN_PREAMBLE + read_path
+            os.write(fd, read_path)
+            response = _read_until_quiet(fd, timeout)
+            responses_by_pad[pad].extend(response)
+
+            file_key = _extract_file_key(response)
+            if not file_key:
+                continue
+            for _label, payload in _file_read_followup_payloads(file_key):
+                os.write(fd, payload)
+                responses_by_pad[pad].extend(_read_until_quiet(fd, timeout))
+    finally:
+        os.close(fd)
 
     headers: list[Optional[SP404SampleHeader]] = []
     for pad in range(1, 17):
