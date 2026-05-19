@@ -233,6 +233,7 @@ The protocol lab can now reproduce the official app's first read-only remote
 sample path request for one known pad:
 
     tools/sp404_protocol_lab.py read-path --project PROJECT_05 --bank 1 --pad 1
+    tools/sp404_protocol_lab.py read-bank --project PROJECT_05 --bank 1
 
 This command sends only the captured app init/list sequence and the captured
 read path sequence for:
@@ -248,6 +249,7 @@ Live result on Jordan's SP-404MKII:
 - returned file magic: RFWV
 - parsed sample metadata: 48,000 Hz, stereo, 16-bit
 - reported payload size: 29,445,620 bytes
+- full Bank A scan: 16/16 pads returned RFWV headers in one serial session
 
 This confirms the SP normal-mode librarian protocol can read internal sample
 files without USB mass-storage mode. Keep this as read-only lab functionality

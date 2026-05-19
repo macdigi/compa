@@ -205,6 +205,19 @@ def _build_file_read_path(path: str) -> bytes:
     ])
 
 
+def _file_read_payloads(path: str, *, preamble: bool) -> list[tuple[str, bytes]]:
+    read_path = _build_file_read_path(path)
+    if preamble:
+        read_path = FILE_OPEN_PREAMBLE + read_path
+    return [
+        ("read_path", read_path),
+        ("read_meta_13", READ_META_13),
+        ("read_meta_07", READ_META_07),
+        ("read_header_04", READ_HEADER_04),
+        ("read_done_03", READ_DONE_03),
+    ]
+
+
 def _parse_rfwv_header(data: bytes) -> dict | None:
     pos = data.find(b"RFWV")
     if pos < 0:
@@ -223,6 +236,17 @@ def _parse_rfwv_header(data: bytes) -> dict | None:
             "bit_depth": int.from_bytes(data[pos + 16:pos + 20], "big"),
         })
     return parsed
+
+
+def _duration_from_rfwv(header: dict) -> float:
+    data_size = int(header.get("size_be") or 0)
+    sample_rate = int(header.get("sample_rate") or 0)
+    channels = int(header.get("channels") or 0)
+    bit_depth = int(header.get("bit_depth") or 0)
+    bytes_per_frame = channels * max(1, bit_depth // 8)
+    if data_size <= 0 or sample_rate <= 0 or bytes_per_frame <= 0:
+        return 0.0
+    return data_size / bytes_per_frame / sample_rate
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -312,7 +336,7 @@ def cmd_read_path(args: argparse.Namespace) -> int:
     """Read the first header chunk for one SP-404 remote sample path."""
     try:
         remote_path = args.path or _sp404_pad_path(args.project, args.bank, args.pad)
-        read_path = _build_file_read_path(remote_path)
+        _build_file_read_path(remote_path)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -322,16 +346,7 @@ def cmd_read_path(args: argparse.Namespace) -> int:
         ("project_init", PROJECT_INIT),
         ("project_list", PROJECT_LIST),
     ]
-    first_read_payload = read_path
-    if args.preamble:
-        first_read_payload = FILE_OPEN_PREAMBLE + read_path
-    payloads.extend([
-        ("read_path", first_read_payload),
-        ("read_meta_13", READ_META_13),
-        ("read_meta_07", READ_META_07),
-        ("read_header_04", READ_HEADER_04),
-        ("read_done_03", READ_DONE_03),
-    ])
+    payloads.extend(_file_read_payloads(remote_path, preamble=args.preamble))
 
     try:
         port, results = _transact_many(payloads, args.timeout)
@@ -363,6 +378,66 @@ def cmd_read_path(args: argparse.Namespace) -> int:
     print("\nRFWV:")
     for key, value in rfwv.items():
         print(f"  {key}: {value}")
+    duration = _duration_from_rfwv(rfwv)
+    if duration:
+        print(f"  duration: {duration:.2f}s")
+    return 0
+
+
+def cmd_read_bank(args: argparse.Namespace) -> int:
+    """Read the first header chunk for every pad in one SP bank."""
+    try:
+        if not re.fullmatch(r"PROJECT_[0-9]{2}", args.project):
+            raise ValueError("project must look like PROJECT_05")
+        if not 1 <= args.bank <= 10:
+            raise ValueError("bank must be 1-10")
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    payloads: list[tuple[str, bytes]] = [
+        ("app_handshake", APP_HANDSHAKE),
+        ("project_init", PROJECT_INIT),
+        ("project_list", PROJECT_LIST),
+    ]
+    for pad in range(1, 17):
+        remote_path = _sp404_pad_path(args.project, args.bank, pad)
+        for label, payload in _file_read_payloads(remote_path, preamble=(pad == 1)):
+            payloads.append((f"pad_{pad:02d}_{label}", payload))
+
+    try:
+        port, results = _transact_many(payloads, args.timeout)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"port: {port}")
+    print(f"project: {args.project}")
+    print(f"bank: {args.bank}")
+    loaded = 0
+    responses_by_pad: dict[int, bytearray] = {
+        pad: bytearray() for pad in range(1, 17)
+    }
+    for label, _payload, response in results:
+        match = re.match(r"pad_([0-9]{2})_", label)
+        if match:
+            responses_by_pad[int(match.group(1))].extend(response)
+
+    for pad in range(1, 17):
+        data = bytes(responses_by_pad[pad])
+        header = _parse_rfwv_header(data)
+        pad_id = f"{chr(ord('A') + args.bank - 1)}{pad:02d}"
+        if not header:
+            print(f"{pad_id}: empty or unreadable ({len(data)} rx bytes)")
+            continue
+        loaded += 1
+        duration = _duration_from_rfwv(header)
+        print(
+            f"{pad_id}: RFWV {header.get('sample_rate')} Hz "
+            f"{header.get('channels')}ch {header.get('bit_depth')}bit "
+            f"{header.get('size_be')} bytes {duration:.2f}s"
+        )
+    print(f"loaded: {loaded}/16")
     return 0
 
 
@@ -627,6 +702,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the observed file-open preamble before the first path read",
     )
     p.set_defaults(func=cmd_read_path, preamble=True)
+
+    p = sub.add_parser("read-bank", help="read observed SP remote .SMP headers for one bank")
+    p.add_argument("--project", default="PROJECT_05")
+    p.add_argument("--bank", type=int, default=1)
+    p.add_argument("--timeout", type=float, default=1.5)
+    p.set_defaults(func=cmd_read_bank)
 
     p = sub.add_parser("send-hex", help="send captured hex bytes to the SP")
     p.add_argument("hex_bytes", type=_parse_hex)
