@@ -120,6 +120,14 @@ available internal/external/network destinations, and runtime status. Push 2
 gets a router mode with volume bar pads, encoder volume/pan control, selected
 track mute/solo/arm, and target cycling.
 
+The first capture path is the Recorder MVP. It pulls the existing P6Recorder,
+clip-engine audio-slot recording, MIDI Capture, and SP record-pass assist into
+one Studio module. The touchscreen has a capture deck for linear WAV recording,
+recall buffer save, recall+continue, selected audio-track clip recording, MIDI
+capture, recent takes, and a one-shot SP Performer record assist. Push 2 gets a
+Recorder mode with transport-style lower buttons, audio-track/scene pads, and
+encoders for track, scene, and clip length.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:

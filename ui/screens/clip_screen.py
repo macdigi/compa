@@ -83,6 +83,15 @@ from engine.studio_router import (
     session_route_summary,
     target_choices_for_track,
 )
+from engine.studio_recorder import (
+    active_clip_recordings,
+    audio_track_indices,
+    format_duration,
+    next_empty_scene_index,
+    recent_recordings,
+    recorder_status,
+    selected_audio_track_index,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -136,6 +145,10 @@ class ClipScreen:
         self._synth_base_note = 48
         self._synth_message = ""
         self._router_message = ""
+        self._recorder_track_choice_idx = 0
+        self._recorder_scene_idx = 0
+        self._recorder_length_idx = 1
+        self._recorder_message = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -162,6 +175,8 @@ class ClipScreen:
             desired = "studio_synth"
         elif self._tab == "mixer":
             desired = "studio_router"
+        elif self._tab == "recorder":
+            desired = "studio_recorder"
         elif self._tab == "clips":
             desired = "session"
         else:
@@ -655,6 +670,157 @@ class ClipScreen:
         if ctrl is not None:
             ctrl.request_redraw()
         self._router_message = "solos cleared"
+
+    # ── Recorder helpers ─────────────────────────────────────────
+    def _recorder(self):
+        return getattr(self.app, "recorder", None)
+
+    def _recorder_lengths(self) -> tuple[int, ...]:
+        return (1, 2, 4, 8)
+
+    def _recorder_length_bars(self) -> int:
+        lengths = self._recorder_lengths()
+        self._recorder_length_idx %= len(lengths)
+        return lengths[self._recorder_length_idx]
+
+    def _recorder_audio_tracks(self, sess) -> list[int]:
+        return audio_track_indices(sess)
+
+    def _selected_recorder_track_index(self, sess) -> int | None:
+        tracks = self._recorder_audio_tracks(sess)
+        if not tracks:
+            return None
+        self._recorder_track_choice_idx %= len(tracks)
+        return tracks[self._recorder_track_choice_idx]
+
+    def _selected_recorder_scene_index(self, sess, track_idx: int | None) -> int:
+        if track_idx is None or not (0 <= track_idx < len(sess.tracks)):
+            return 0
+        max_scene = max(0, len(sess.tracks[track_idx].clips) - 1)
+        return max(0, min(max_scene, self._recorder_scene_idx))
+
+    def _select_recorder_track_slot(self, sess, slot_idx: int) -> None:
+        tracks = self._recorder_audio_tracks(sess)
+        if not tracks:
+            self._recorder_message = "no audio tracks"
+            return
+        self._recorder_track_choice_idx = max(0, min(len(tracks) - 1, int(slot_idx)))
+        track_idx = tracks[self._recorder_track_choice_idx]
+        self._recorder_scene_idx = next_empty_scene_index(sess, track_idx)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.selected_track = track_idx
+            ctrl.selected_scene = self._recorder_scene_idx
+            ctrl.request_redraw()
+        self._recorder_message = f"target: {sess.tracks[track_idx].name}"
+
+    def _cycle_recorder_scene(self, sess, delta: int) -> None:
+        track_idx = self._selected_recorder_track_index(sess)
+        if track_idx is None:
+            self._recorder_message = "no audio tracks"
+            return
+        count = max(1, len(sess.tracks[track_idx].clips))
+        self._recorder_scene_idx = (self._recorder_scene_idx + int(delta)) % count
+        self._recorder_message = f"slot: Scene {self._recorder_scene_idx + 1}"
+
+    def _cycle_recorder_length(self, delta: int) -> None:
+        self._recorder_length_idx = (
+            self._recorder_length_idx + int(delta)) % len(self._recorder_lengths())
+        self._recorder_message = f"clip length: {self._recorder_length_bars()} bars"
+
+    def _recording_metadata(self, origin: str) -> dict:
+        meta = {"started_via": origin}
+        p6 = getattr(self.app, "p6", None)
+        if p6:
+            meta["bpm_at_record"] = p6.state.bpm
+            meta["pattern_at_record"] = p6.state.active_pattern
+        return meta
+
+    def _start_studio_recording(self) -> None:
+        rec = self._recorder()
+        if rec is None:
+            self._recorder_message = "recorder unavailable"
+            return
+        if rec.is_recording:
+            rec.stop_recording()
+            self._recorder_message = "recording stopped"
+            return
+        if not getattr(rec, "_monitoring", False):
+            rec.start_monitoring()
+        rec.start_recording(metadata=self._recording_metadata("studio_recorder"))
+        self._recorder_message = "recording started"
+
+    def _stop_studio_recording(self) -> None:
+        rec = self._recorder()
+        if rec is not None:
+            rec.stop_recording()
+        self._recorder_message = "recording stopped"
+
+    def _recall_studio_buffer(self) -> None:
+        rec = self._recorder()
+        if rec is None:
+            self._recorder_message = "recorder unavailable"
+            return
+        rec.recall_buffer("studio")
+        self._recorder_message = "recall save queued"
+
+    def _recall_and_continue_recording(self) -> None:
+        rec = self._recorder()
+        if rec is None:
+            self._recorder_message = "recorder unavailable"
+            return
+        if rec.is_recording:
+            self._recorder_message = "+REC waits until current take stops"
+            return
+        rec.recall_and_continue(
+            "studio", metadata=self._recording_metadata("studio_recall_continue"))
+        self._recorder_message = "recall + record queued"
+
+    def _arm_recorder_clip_slot(self, sess) -> None:
+        track_idx = self._selected_recorder_track_index(sess)
+        if track_idx is None:
+            self._recorder_message = "no audio tracks"
+            return
+        scene_idx = self._selected_recorder_scene_index(sess, track_idx)
+        rec = self._recorder()
+        if rec is not None and not getattr(rec, "_monitoring", False):
+            rec.start_monitoring()
+            self._recorder_message = "monitor starting; tap ARM CLIP again"
+            return
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is None:
+            self._recorder_message = "push control unavailable"
+            return
+        ctrl.arm_recording(track_idx, scene_idx,
+                           length_bars=self._recorder_length_bars())
+        ctrl.selected_track = track_idx
+        ctrl.selected_scene = scene_idx
+        self._recorder_message = (
+            f"armed {sess.tracks[track_idx].name} / Scene {scene_idx + 1}")
+
+    def _cancel_recorder_clip_slot(self, sess) -> None:
+        engine = getattr(self.app, "clip_engine", None)
+        track_idx = self._selected_recorder_track_index(sess)
+        scene_idx = self._selected_recorder_scene_index(sess, track_idx)
+        if engine is not None and track_idx is not None:
+            engine.cancel_recording(track_idx, scene_idx)
+        self._recorder_message = "clip record canceled"
+
+    def _capture_recorder_midi(self) -> None:
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is None:
+            self._recorder_message = "push control unavailable"
+            return
+        before = getattr(ctrl, "selected_scene", None)
+        ctrl.capture_midi_to_clip()
+        after = getattr(ctrl, "selected_scene", before)
+        self._recorder_message = (
+            f"captured MIDI to Scene {int(after or 0) + 1}"
+            if after != before else "no MIDI phrase to capture")
+
+    def _sp_pattern_record_assist(self, sess) -> None:
+        self._capture_sp_pattern_once(sess)
+        self._recorder_message = self._performer_message
 
     def _sp_beat_bass_target(self) -> TrackTarget:
         return TrackTarget(
@@ -1932,6 +2098,159 @@ class ClipScreen:
             self._info_pair(surface, status_rect.x + 14 + idx * (box_w + 6),
                             sy, label, value, box_w)
 
+    def _draw_recorder_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 24, bold=True)
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        rec = self._recorder()
+        status = recorder_status(rec)
+        engine = getattr(self.app, "clip_engine", None)
+        armed_slots = active_clip_recordings(engine)
+        track_idx = self._selected_recorder_track_index(sess)
+        scene_idx = self._selected_recorder_scene_index(sess, track_idx)
+        track_name = sess.tracks[track_idx].name if track_idx is not None else "No audio track"
+
+        surface.blit(font_big.render("Recorder", True, (232, 234, 242)),
+                     (20, top + 8))
+        surface.blit(font.render("capture deck, clip recorder, recall buffer",
+                                 True, (150, 162, 184)), (150, top + 16))
+        if self._recorder_message:
+            self._draw_text_fit(surface, font_sm, self._recorder_message,
+                                (174, 188, 222), (450, top + 19),
+                                surface.get_width() - 470)
+
+        margin = 20
+        gap = 12
+        y = top + 54
+        content_w = surface.get_width() - margin * 2
+        deck_w = int(content_w * 0.42)
+        clip_w = int(content_w * 0.30)
+        recent_w = content_w - deck_w - clip_w - gap * 2
+        deck = pygame.Rect(margin, y, deck_w, 286)
+        clip = pygame.Rect(deck.right + gap, y, clip_w, 286)
+        recent = pygame.Rect(clip.right + gap, y, recent_w, 286)
+        dy = self._panel(surface, deck, "Capture Deck")
+        cy = self._panel(surface, clip, "Clip Capture")
+        ry = self._panel(surface, recent, "Recent Takes")
+
+        rec_color = (168, 46, 56) if status["recording"] else (44, 72, 62)
+        rec_ring = pygame.Rect(deck.x + 20, dy + 6, 94, 94)
+        pygame.draw.ellipse(surface, rec_color, rec_ring)
+        pygame.draw.ellipse(surface, (236, 112, 120), rec_ring, 2)
+        center_label = "REC" if status["recording"] else "READY"
+        txt = font.render(center_label, True, (250, 246, 242))
+        surface.blit(txt, txt.get_rect(center=rec_ring.center))
+        self._info_pair(surface, deck.x + 130, dy + 4, "Input",
+                        status["device"] or "none", deck.width - 150)
+        self._info_pair(surface, deck.x + 130, dy + 56, "Time",
+                        format_duration(status["duration"]), 96)
+        self._info_pair(surface, deck.x + 238, dy + 56, "Recall",
+                        f"{status['recall_seconds']:.0f}/{status['recall_capacity']}s",
+                        max(82, deck.right - deck.x - 252))
+
+        meter_y = dy + 122
+        for idx, (label, value) in enumerate((
+            ("L", status["peak_l"]),
+            ("R", status["peak_r"]),
+        )):
+            yy = meter_y + idx * 24
+            surface.blit(font_sm.render(label, True, (174, 188, 222)),
+                         (deck.x + 20, yy + 3))
+            bar = pygame.Rect(deck.x + 42, yy, deck.width - 62, 14)
+            pygame.draw.rect(surface, (22, 25, 34), bar, border_radius=4)
+            fill = pygame.Rect(bar.x, bar.y, int(bar.width * min(1.0, value)),
+                               bar.height)
+            pygame.draw.rect(surface, (96, 224, 156), fill, border_radius=4)
+        self._draw_text_fit(
+            surface, font_sm,
+            f"monitor {'on' if status['monitoring'] else 'off'}  "
+            f"overruns {status['overruns']}  pre-roll {status['pre_roll']:.1f}s",
+            (150, 162, 184), (deck.x + 20, meter_y + 58), deck.width - 40)
+
+        by = deck.bottom - 44
+        bw = (deck.width - 52) // 4
+        self._button(surface, "recorder_record",
+                     pygame.Rect(deck.x + 20, by, bw, 34),
+                     "Stop" if status["recording"] else "Record",
+                     danger=status["recording"])
+        self._button(surface, "recorder_recall",
+                     pygame.Rect(deck.x + 28 + bw, by, bw, 34), "Recall")
+        self._button(surface, "recorder_recall_continue",
+                     pygame.Rect(deck.x + 36 + bw * 2, by, bw, 34), "+REC")
+        self._button(surface, "recorder_stop",
+                     pygame.Rect(deck.x + 44 + bw * 3, by, bw, 34), "Stop",
+                     danger=True)
+
+        self._info_pair(surface, clip.x + 14, cy, "Track", track_name,
+                        clip.width - 28)
+        self._info_pair(surface, clip.x + 14, cy + 52, "Slot",
+                        f"Scene {scene_idx + 1}", (clip.width - 36) // 2)
+        self._info_pair(surface, clip.x + 24 + (clip.width - 36) // 2,
+                        cy + 52, "Length",
+                        f"{self._recorder_length_bars()} bars",
+                        (clip.width - 36) // 2)
+        track_buttons_y = cy + 108
+        tracks = self._recorder_audio_tracks(sess)
+        tw = max(54, (clip.width - 28 - 18) // 4)
+        for slot, idx in enumerate(tracks[:4]):
+            self._button(surface, f"recorder_track_{slot}",
+                         pygame.Rect(clip.x + 14 + slot * (tw + 6),
+                                     track_buttons_y, tw, 30),
+                         sess.tracks[idx].name,
+                         active=idx == track_idx)
+        control_y = track_buttons_y + 42
+        cw = (clip.width - 28 - 12) // 3
+        self._button(surface, "recorder_scene_prev",
+                     pygame.Rect(clip.x + 14, control_y, cw, 30), "Scene-")
+        self._button(surface, "recorder_scene_next",
+                     pygame.Rect(clip.x + 20 + cw, control_y, cw, 30), "Scene+")
+        self._button(surface, "recorder_length",
+                     pygame.Rect(clip.x + 26 + cw * 2, control_y, cw, 30),
+                     "Length")
+        self._button(surface, "recorder_arm_clip",
+                     pygame.Rect(clip.x + 14, control_y + 42,
+                                 clip.width - 28, 34),
+                     "Arm Clip Slot", active=bool(armed_slots))
+        self._button(surface, "recorder_capture_midi",
+                     pygame.Rect(clip.x + 14, control_y + 84,
+                                 (clip.width - 36) // 2, 34),
+                     "Capture MIDI")
+        self._button(surface, "recorder_cancel_clip",
+                     pygame.Rect(clip.x + 22 + (clip.width - 36) // 2,
+                                 control_y + 84, (clip.width - 36) // 2, 34),
+                     "Cancel")
+
+        recents = recent_recordings(rec, limit=4)
+        if not recents:
+            self._draw_text_fit(surface, font_sm, "No recordings yet",
+                                (150, 162, 184), (recent.x + 14, ry),
+                                recent.width - 28)
+        for idx, item in enumerate(recents[:4]):
+            yy = ry + idx * 52
+            box = pygame.Rect(recent.x + 14, yy, recent.width - 28, 44)
+            pygame.draw.rect(surface, (24, 27, 38), box, border_radius=5)
+            pygame.draw.rect(surface, (52, 58, 78), box, 1, border_radius=5)
+            self._draw_text_fit(surface, font_sm,
+                                item.get("filename", "recording"),
+                                (232, 236, 244), (box.x + 8, box.y + 8),
+                                box.width - 16)
+            self._draw_text_fit(surface, font_sm,
+                                f"{format_duration(item.get('duration', 0))}  "
+                                f"{item.get('size_mb', 0):.1f} MB",
+                                (150, 162, 184), (box.x + 8, box.y + 25),
+                                box.width - 16)
+
+        assist_rect = pygame.Rect(margin, y + 300, content_w, 66)
+        ay = self._panel(surface, assist_rect, "SP Pattern Record Assist")
+        self._draw_text_fit(
+            surface, font_sm,
+            "Arm pattern record on the SP, then fire the current Performer pattern once.",
+            (150, 162, 184), (assist_rect.x + 14, ay + 8),
+            assist_rect.width - 190)
+        self._button(surface, "recorder_sp_record_once",
+                     pygame.Rect(assist_rect.right - 164, ay, 144, 34),
+                     "Record Once")
+
     def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
                                 top: int, sess) -> None:
         module = module_for_tab(tab)
@@ -2011,6 +2330,9 @@ class ClipScreen:
             return
         if tab == "mixer":
             self._draw_mixer_tab(surface, top, sess)
+            return
+        if tab == "recorder":
+            self._draw_recorder_tab(surface, top, sess)
             return
         if tab == "overview":
             self._draw_module_hub(surface, top, sess)
@@ -2487,6 +2809,43 @@ class ClipScreen:
             if key.startswith("router_arm_"):
                 self._select_router_track(sess, int(key.rsplit("_", 1)[1]))
                 self._adjust_router_mix(sess, "arm")
+                return True
+            if key.startswith("recorder_track_"):
+                self._select_recorder_track_slot(
+                    sess, int(key.rsplit("_", 1)[1]))
+                return True
+            if key == "recorder_record":
+                self._start_studio_recording()
+                return True
+            if key == "recorder_stop":
+                self._stop_studio_recording()
+                return True
+            if key == "recorder_recall":
+                self._recall_studio_buffer()
+                return True
+            if key == "recorder_recall_continue":
+                self._recall_and_continue_recording()
+                return True
+            if key == "recorder_scene_prev":
+                self._cycle_recorder_scene(sess, -1)
+                return True
+            if key == "recorder_scene_next":
+                self._cycle_recorder_scene(sess, 1)
+                return True
+            if key == "recorder_length":
+                self._cycle_recorder_length(1)
+                return True
+            if key == "recorder_arm_clip":
+                self._arm_recorder_clip_slot(sess)
+                return True
+            if key == "recorder_cancel_clip":
+                self._cancel_recorder_clip_slot(sess)
+                return True
+            if key == "recorder_capture_midi":
+                self._capture_recorder_midi()
+                return True
+            if key == "recorder_sp_record_once":
+                self._sp_pattern_record_assist(sess)
                 return True
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(
