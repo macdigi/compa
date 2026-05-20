@@ -1366,9 +1366,10 @@ class Push2Renderer:
         self._update_keys_history(held, now)
 
         # Three-row split: keyboard (top), rolling roll (middle),
-        # scale-info strip (bottom). Strip is small but lets the
-        # producer see what scale + root + layout they're in.
-        strip_h = 16
+        # info/encoder strip (bottom). P-6 KEYS gets a taller strip so
+        # the Push 2 encoders can show granular labels + live values.
+        granular_slots = self._p6_keys_granular_slots()
+        strip_h = 30 if granular_slots else 16
         avail = height - strip_h - 4
         kb_h = max(48, int(avail * 0.62))
         roll_h = avail - kb_h - 2
@@ -1385,7 +1386,8 @@ class Push2Renderer:
             surf, kb_rect, held, dev_color)
         self._draw_keys_piano_roll(
             surf, roll_rect, held, now, dev_color)
-        self._draw_keys_info_strip(surf, strip_rect, dev_color)
+        self._draw_keys_info_strip(
+            surf, strip_rect, dev_color, granular_slots)
 
     def _update_keys_history(self, held: set[int],
                                now: float) -> None:
@@ -1555,8 +1557,22 @@ class Push2Renderer:
                 max(2, int(x_end - x_start)), h)
             pygame.draw.rect(surf, color, bar, border_radius=1)
 
+    def _p6_keys_granular_slots(self) -> list[dict]:
+        try:
+            if getattr(self.app.device_manager, "focus_key", None) != "P-6":
+                return []
+            if getattr(self.app, "push2_keys_chord_mode", False):
+                # Chord mode keeps this strip for arp state. The app still
+                # lets SHIFT+encoders reach arp controls while P-6 granular
+                # stays the default in non-chord playing layouts.
+                return []
+            return self.app.push2_p6_keys_granular_slots() or []
+        except Exception:
+            return []
+
     def _draw_keys_info_strip(
-        self, surf, rect: pygame.Rect, dev_color
+        self, surf, rect: pygame.Rect, dev_color,
+        granular_slots: list[dict] | None = None,
     ) -> None:
         """Bottom-of-body strip: current root + scale + layout mode.
 
@@ -1595,6 +1611,40 @@ class Push2Renderer:
         pygame.draw.rect(surf, BG_SCOPE, rect, border_radius=3)
 
         if not chord_mode:
+            if granular_slots:
+                col_w = rect.width // 8
+                for i, slot in enumerate(granular_slots[:8]):
+                    x = rect.x + i * col_w
+                    box = pygame.Rect(
+                        x + 3, rect.y + 2, col_w - 6, rect.height - 4)
+                    pygame.draw.rect(
+                        surf, (14, 14, 20), box, border_radius=4)
+                    pygame.draw.rect(
+                        surf, dev_color, (box.x, box.y, 2, box.height),
+                        border_radius=1)
+                    value = int(slot.get("value", 0) or 0)
+                    fill_w = int((box.width - 4)
+                                 * (max(0, min(127, value)) / 127.0))
+                    if fill_w > 0:
+                        fill_col = (
+                            dev_color[0] // 3,
+                            dev_color[1] // 3,
+                            dev_color[2] // 3,
+                        )
+                        pygame.draw.rect(
+                            surf, fill_col,
+                            (box.x + 2, box.y + 2,
+                             fill_w, box.height - 4),
+                            border_radius=3)
+                    label = str(slot.get("name", "—"))[:7]
+                    ls = self._font_tiny.render(label, True, TEXT)
+                    surf.blit(ls, (box.x + 5, box.y + 2))
+                    vs = self._font_tiny.render(str(value), True, dev_color)
+                    surf.blit(
+                        vs, (box.right - vs.get_width() - 4,
+                             box.bottom - vs.get_height() - 2))
+                return
+
             # ── Simple strip (chromatic / in-key): scale + octave ──
             kb = getattr(self.app, "chromatic_kb", None)
             oct_shift = (

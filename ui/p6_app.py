@@ -1818,8 +1818,100 @@ class P6App:
             return path
         return None
 
+    _P6_KEYS_GRANULAR_LABELS = {
+        3: "REV",
+        13: "DET",
+        15: "SHAPE",
+        16: "TIME",
+        18: "FINE",
+        19: "POS",
+        20: "SPEED",
+        21: "GRAINS",
+    }
+
+    def _p6_keys_granular_context(self):
+        if getattr(self.device_manager, "focus_key", None) != "P-6":
+            return None
+        profile = None
+        try:
+            profile = self.device_manager.connected.get("P-6")
+        except Exception:
+            profile = None
+        if profile is None:
+            try:
+                profile = self.device_manager.get_profile("P-6")
+            except Exception:
+                profile = None
+        if profile is None:
+            return None
+        params = list(getattr(profile, "cc_map", {}).get("granular", []))[:8]
+        if not params:
+            return None
+        midi = self._midi_connections.get("P-6")
+        channel = getattr(midi, "ch_granular", None)
+        if channel is None:
+            try:
+                channel = int(profile.midi_channels.get("granular", 3))
+            except Exception:
+                channel = 3
+        return profile, midi, channel, params
+
+    def push2_p6_keys_granular_slots(self) -> list[dict]:
+        """Eight P-6 granular params shown on Push 2 while in KEYS."""
+        ctx = self._p6_keys_granular_context()
+        if ctx is None:
+            return []
+        _profile, _midi, channel, params = ctx
+        live = self.live_cc.get(channel, {}) or {}
+        slots = []
+        for param in params:
+            value = int(live.get(param.cc, param.default))
+            label = self._P6_KEYS_GRANULAR_LABELS.get(
+                param.cc, str(param.name).upper()[:7])
+            slots.append({
+                "cc": param.cc,
+                "name": label,
+                "full_name": param.name,
+                "value": value,
+                "default": param.default,
+                "channel": channel,
+            })
+        return slots
+
+    def _on_push2_p6_keys_encoder(self, idx: int, delta: int) -> bool:
+        """Route P-6 KEYS encoders to granular sound-design params."""
+        ctx = self._p6_keys_granular_context()
+        if ctx is None:
+            return False
+        _profile, midi, channel, params = ctx
+        if midi is None or not (0 <= idx < len(params)):
+            return True
+        param = params[idx]
+        current = int(self.live_cc.get(channel, {}).get(
+            param.cc, param.default))
+        new_val = max(param.min_val, min(param.max_val,
+                      current + int(delta) * 2))
+        if new_val == current:
+            return True
+        try:
+            midi.send_cc(param.cc, new_val, channel=channel)
+            self.live_cc.setdefault(channel, {})[param.cc] = new_val
+            self.record_performance_cc(
+                "push2", "P-6", param.cc, new_val, channel=channel,
+                payload={"encoder": idx + 1, "mode": "keys-granular"})
+            label = self._P6_KEYS_GRANULAR_LABELS.get(
+                param.cc, param.name)
+            self.push_hud(f"P-6 {label}: {new_val}", theme.ACCENT)
+        except Exception:
+            pass
+        return True
+
     def _on_push2_keys_encoder(self, idx: int, delta: int) -> None:
-        """Map Push 2 encoders 1-8 to arpeggiator parameters.
+        """Map Push 2 keys-mode encoders.
+
+        P-6 chromatic / in-key layouts default to granular performance
+        controls so the sound can be shaped while playing. Chord mode
+        and SHIFT+encoder use the arpeggiator controls below.
 
           1 RATE       1/4 → 1/32 (cycles through RATE_ORDER)
           2 OCTAVES    1..4
@@ -1833,6 +1925,11 @@ class P6App:
         delta is +1/-1 ticks per detent; we accumulate inside the
         ArpParams cycle helpers so multi-step turns work naturally.
         """
+        if (not getattr(self, "_push2_shift_held", False)
+                and not getattr(self, "push2_keys_chord_mode", False)):
+            if self._on_push2_p6_keys_encoder(idx, delta):
+                return
+
         p = self.arp_params
         sign = 1 if delta > 0 else -1 if delta < 0 else 0
         if sign == 0:
@@ -2297,6 +2394,12 @@ class P6App:
         ws = self.screens.get("device_workspace")
         if ws is None:
             return
+        if hasattr(ws, "select_tab"):
+            try:
+                ws.select_tab(tab_key)
+                return
+            except Exception:
+                pass
         tabs = getattr(ws, "_tabs", [])
         for i, entry in enumerate(tabs):
             if entry and entry[0] == tab_key:
@@ -2397,7 +2500,20 @@ class P6App:
                         kb._forward_note_off(note)
                 except Exception:
                     pass
+            for _idx, chord_notes in list(
+                    getattr(self, "_push2_chord_active", {}).items()):
+                for note in chord_notes:
+                    try:
+                        if kb:
+                            kb._forward_note_off(note)
+                    except Exception:
+                        pass
             self._push2_keys_active.clear()
+            self._push2_chord_active.clear()
+            try:
+                self.arp_scheduler.shutdown_all()
+            except Exception:
+                pass
 
     def push2_max_patterns(self) -> int:
         """Pattern count for the focused device — used by Launch 1-8

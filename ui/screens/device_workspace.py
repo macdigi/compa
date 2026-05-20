@@ -315,6 +315,45 @@ class DeviceWorkspaceScreen:
 
     # ── Event Handling ───────────────────────────────────────────────
 
+    def _activate_tab(self, idx: int) -> None:
+        """Switch workspace tab and run the mode side effects once."""
+        if not (0 <= idx < len(self._tabs)):
+            return
+        old_tab = self._tabs[self._current_tab][0] if self._tabs else ""
+        same_tab = idx == self._current_tab
+        self._scope_fullscreen = False
+        if same_tab:
+            return
+
+        self._current_tab = idx
+        new_tab = self._tabs[self._current_tab][0]
+        if hasattr(self.app, 'chromatic_kb'):
+            if new_tab == "keys":
+                self.app.chromatic_kb.enabled = True
+                # Retarget to THIS workspace's device, then sync the
+                # selected pad silently. Entering KEYS should never fire
+                # an audible preview or schedule a note-off that can cut
+                # off the first held SP chromatic note.
+                self._retarget_keys_for_device()
+                self._select_chromatic_pad(
+                    self._keys_bank, self._keys_pad, preview=False)
+            elif old_tab == "keys" and not self._keys_persistent:
+                # Only disable if the user hasn't marked it persistent.
+                self.app.chromatic_kb.enabled = False
+                self.app.chromatic_kb._all_notes_off()
+                self._latched_notes.clear()
+                self._keys_latch = False
+        if new_tab == "control":
+            self._build_knobs()
+
+    def select_tab(self, tab_key: str) -> bool:
+        """Public tab switch used by hardware shortcuts."""
+        for i, (key, _label) in enumerate(self._tabs):
+            if key == tab_key:
+                self._activate_tab(i)
+                return True
+        return False
+
     def handle_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
@@ -325,12 +364,6 @@ class DeviceWorkspaceScreen:
                 if session:
                     session._auto_expanded = False
                 self.app.switch_screen("session")
-                return
-
-            # Oscilloscope tap → toggle fullscreen
-            scope_rect = pygame.Rect(6, self._content_top, theme.SCREEN_WIDTH - 12, self._scope_h)
-            if scope_rect.collidepoint(mx, my):
-                self._scope_fullscreen = not self._scope_fullscreen
                 return
 
             # REC button (top-right, next to device name)
@@ -353,38 +386,22 @@ class DeviceWorkspaceScreen:
                     self.app.push_hud("Recall saved", theme.ACCENT)
                 return
 
-            # Tab buttons (skip if fullscreen scope)
-            if self._scope_fullscreen:
-                return
+            # Tab buttons stay live even while the scope is fullscreen.
+            # Tapping a tab exits fullscreen and switches there in one hit.
             for i, (key, label) in enumerate(self._tabs):
                 if self._tab_rect(i).collidepoint(mx, my):
-                    old_tab = self._tabs[self._current_tab][0] if self._tabs else ""
-                    self._current_tab = i
-                    new_tab = key
-                    # Enable/disable chromatic keyboard based on tab
-                    if hasattr(self.app, 'chromatic_kb'):
-                        if new_tab == "keys":
-                            self.app.chromatic_kb.enabled = True
-                            # Retarget to THIS workspace's device
-                            self._retarget_keys_for_device()
-                            # Sync the Push 2 keys-mode layout to the
-                            # currently-selected SP/P-6 pad so the
-                            # bottom-left of the grid lines up with
-                            # what's playable. Without this, the
-                            # default base_note (36) leaves the SP's
-                            # bend window 2 octaves off the grid's
-                            # zero point.
-                            self._select_chromatic_pad(
-                                self._keys_bank, self._keys_pad)
-                        elif old_tab == "keys" and not self._keys_persistent:
-                            # Only disable if the user hasn't marked it persistent
-                            self.app.chromatic_kb.enabled = False
-                            self.app.chromatic_kb._all_notes_off()
-                            self._latched_notes.clear()
-                            self._keys_latch = False
-                    if new_tab == "control":
-                        self._build_knobs()
+                    self._activate_tab(i)
                     return
+
+            # Oscilloscope tap → toggle fullscreen
+            scope_rect = pygame.Rect(6, self._content_top, theme.SCREEN_WIDTH - 12, self._scope_h)
+            if scope_rect.collidepoint(mx, my):
+                self._scope_fullscreen = not self._scope_fullscreen
+                return
+
+            if self._scope_fullscreen:
+                # Header controls were handled above; content is hidden.
+                return
 
             # Tab-specific controls
             tab_key = self._tabs[self._current_tab][0] if self._tabs else ""
@@ -2243,21 +2260,23 @@ class DeviceWorkspaceScreen:
             channel = getattr(midi, 'ch_sampler', 10)
             kb.set_target(midi, channel, pitchbend_mode=False)
 
-    def _select_chromatic_pad(self, bank_idx: int, pad_idx: int):
+    def _select_chromatic_pad(
+        self, bank_idx: int, pad_idx: int, *, preview: bool = True
+    ):
         """Select a pad as the active sound for chromatic play.
 
         SP-404: Sets the pitch-bend-mode pad (bank channel + note).
-                Sends a brief trigger so the user hears a preview.
-                Subsequent piano keys use pitch bend on that channel.
+                Optionally sends a brief trigger so the user hears a
+                preview. Subsequent piano keys use the chromatic channel.
         P-6:    Triggers the pad on the sampler channel so the granular
-                engine picks it up. Ch4 chromatic play continues.
+                engine picks it up when preview=True. Ch4 chromatic play
+                continues.
         """
         kb = getattr(self.app, 'chromatic_kb', None)
         if kb is None or kb._target_midi is None:
             return
 
         midi = kb._target_midi
-        import threading
 
         if self._device_key == "SP-404MKII":
             # SP-404 pad numbering: pads 1-4 are the TOP row, 13-16 the
@@ -2269,14 +2288,17 @@ class DeviceWorkspaceScreen:
             midi_row = 3 - sp_row
             note = 36 + midi_row * 4 + col
 
-            # Preview trigger — brief note so user hears the pad.
-            # Chromatic target is set on the SP-404 via SHIFT + CHROMATIC.
-            midi.send_note_on(note, 80, channel=channel)
-            def _off():
-                import time
-                time.sleep(0.15)
-                midi.send_note_off(note, channel=channel)
-            threading.Thread(target=_off, daemon=True).start()
+            if preview:
+                # Preview trigger — brief note so user hears the pad.
+                # Chromatic target is set on the SP-404 via SHIFT + CHROMATIC.
+                import threading
+                midi.send_note_on(note, 80, channel=channel)
+
+                def _off():
+                    import time
+                    time.sleep(0.15)
+                    midi.send_note_off(note, channel=channel)
+                threading.Thread(target=_off, daemon=True).start()
 
             # ── Sync the Push 2 keys layout to the SP pad ──────────
             # The chromatic_kb's _pad_note is used to compute the
@@ -2302,13 +2324,16 @@ class DeviceWorkspaceScreen:
             except Exception:
                 pass
 
-            # Reset chromatic-ready flag — user needs to SHIFT+CHROMATIC
-            # on the SP-404 after selecting a new pad
-            self._sp404_chromatic_ready = False
+            # Reset chromatic-ready only on explicit pad selection.
+            # Entering the KEYS tab silently syncs the already-selected pad
+            # and should not imply the user must re-arm chromatic mode.
+            if preview:
+                self._sp404_chromatic_ready = False
 
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            print(f"KEYS: SP-404 preview {bank_letter}-{pad_idx + 1} "
+            action = "preview" if preview else "selected"
+            print(f"KEYS: SP-404 {action} {bank_letter}-{pad_idx + 1} "
                   f"(Ch{channel + 1} note {note}); push2_keys_base_note="
                   f"{self.app.push2_keys_base_note}", flush=True)
 
@@ -2316,24 +2341,31 @@ class DeviceWorkspaceScreen:
             # P-6: trigger the pad on the sampler channel
             channel = midi.ch_sampler
             note = 48 + bank_idx * 6 + pad_idx
-            midi.send_note_on(note, 80, channel=channel)
-            def _off():
-                import time
-                time.sleep(0.12)
-                midi.send_note_off(note, channel=channel)
-            threading.Thread(target=_off, daemon=True).start()
+            if preview:
+                import threading
+                midi.send_note_on(note, 80, channel=channel)
+
+                def _off():
+                    import time
+                    time.sleep(0.12)
+                    midi.send_note_off(note, channel=channel)
+                threading.Thread(target=_off, daemon=True).start()
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            print(f"KEYS: P-6 pad → {bank_letter}-{pad_idx + 1} "
+            action = "preview" if preview else "selected"
+            print(f"KEYS: P-6 {action} → {bank_letter}-{pad_idx + 1} "
                   f"(Ch{channel + 1} note {note})", flush=True)
 
         else:
             channel = getattr(midi, 'ch_sampler', 10)
             note = 36 + pad_idx
-            midi.send_note_on(note, 80, channel=channel)
-            def _off():
-                import time
-                time.sleep(0.12)
-                midi.send_note_off(note, channel=channel)
-            threading.Thread(target=_off, daemon=True).start()
+            if preview:
+                import threading
+                midi.send_note_on(note, 80, channel=channel)
+
+                def _off():
+                    import time
+                    time.sleep(0.12)
+                    midi.send_note_off(note, channel=channel)
+                threading.Thread(target=_off, daemon=True).start()
             self._keys_selected_name = f"Pad {pad_idx + 1}"
