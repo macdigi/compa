@@ -1326,6 +1326,77 @@ class ClipScreen:
         txt = font.render(label, True, (238, 238, 244))
         surface.blit(txt, txt.get_rect(center=rect.center))
 
+    def _studio_chip(self, surface: pygame.Surface, rect: pygame.Rect,
+                     label: str, *, active: bool = False,
+                     danger: bool = False, accent: bool = False) -> None:
+        from ui import theme
+
+        if danger:
+            bg = (92, 34, 42)
+            edge = theme.RED
+            fg = (255, 228, 232)
+        elif active:
+            bg = (28, 78, 62)
+            edge = theme.GREEN
+            fg = (232, 255, 242)
+        elif accent:
+            bg = (66, 44, 24)
+            edge = theme.ACCENT
+            fg = theme.TEXT_BRIGHT
+        else:
+            bg = (22, 24, 34)
+            edge = (50, 56, 74)
+            fg = theme.TEXT
+        pygame.draw.rect(surface, bg, rect, border_radius=6)
+        pygame.draw.rect(surface, edge, rect, 1, border_radius=6)
+        font = theme.font("small")
+        text = str(label)
+        while len(text) > 3 and font.size(text)[0] > rect.width - 12:
+            text = text[:-4].rstrip() + "..."
+        rendered = font.render(text, True, fg)
+        surface.blit(rendered, rendered.get_rect(center=rect.center))
+
+    def _draw_studio_shell(self, surface: pygame.Surface, sess, ctrl) -> int:
+        from ui import theme
+
+        width = surface.get_width()
+        header_h = 58
+        pygame.draw.rect(surface, (9, 10, 16), (0, 0, width, header_h))
+        pygame.draw.line(surface, (38, 42, 58), (0, header_h), (width, header_h))
+        pygame.draw.rect(surface, theme.ACCENT, (16, 10, 4, 34),
+                         border_radius=2)
+        title_font = theme.font("title")
+        small = theme.font("small")
+        label = self._tab_label(self._tab)
+        surface.blit(title_font.render("COMPA STUDIO", True, theme.TEXT_BRIGHT),
+                     (28, 4))
+        self._draw_text_fit(
+            surface, small, f"{label} / {sess.name}",
+            (150, 162, 184), (30, 34), max(180, width - 440))
+
+        chip_y = 10
+        chip_h = 26
+        right = width - 16
+        chips = [
+            (f"{sess.bpm:.1f} BPM", 94, False, False, True),
+            (f"PUSH {getattr(ctrl, 'mode_name', 'off')}" if ctrl else "PUSH OFF",
+             126, ctrl is not None, False, False),
+            ("AUDIO ON" if self._clip_audio_running() else "AUDIO OFF",
+             104, self._clip_audio_running(), False, False),
+        ]
+        for text, chip_w, active, danger, accent in reversed(chips):
+            rect = pygame.Rect(right - chip_w, chip_y, chip_w, chip_h)
+            self._studio_chip(surface, rect, text, active=active,
+                              danger=danger, accent=accent)
+            right = rect.x - 8
+        return header_h + 2
+
+    def _tab_label(self, tab: str) -> str:
+        for key, label in self.TABS:
+            if key == tab:
+                return label
+        return "HOME"
+
     def _panel(self, surface: pygame.Surface, rect: pygame.Rect,
                title: str) -> int:
         pygame.draw.rect(surface, (18, 20, 30), rect, border_radius=6)
@@ -1348,44 +1419,55 @@ class ClipScreen:
 
     def _draw_tabs(self, surface: pygame.Surface, y: int,
                    width: int) -> int:
+        from ui import theme
+
         self._tab_rects.clear()
-        font = pygame.font.SysFont("Arial", 12, bold=True)
+        font = theme.font("small")
         x = 16
-        gap = 4
-        tab_w = max(76, min(120, (width - 32 - gap * (len(self.TABS) - 1)) // len(self.TABS)))
+        gap = 6
+        tab_w = max(72, min(112, (width - 32 - gap * (len(self.TABS) - 1)) // len(self.TABS)))
         for key, label in self.TABS:
             rect = pygame.Rect(x, y, tab_w, 28)
             self._tab_rects[key] = rect
             active = key == self._tab
-            bg = (72, 86, 116) if active else (26, 28, 38)
-            edge = (130, 160, 220) if active else (56, 60, 76)
-            pygame.draw.rect(surface, bg, rect, border_radius=4)
-            pygame.draw.rect(surface, edge, rect, 1, border_radius=4)
-            txt = font.render(label, True, (235, 238, 245))
+            bg = (58, 38, 22) if active else (20, 22, 32)
+            edge = theme.ACCENT if active else (46, 50, 66)
+            pygame.draw.rect(surface, bg, rect, border_radius=8)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=8)
+            txt = font.render(label, True, theme.TEXT_BRIGHT if active else theme.TEXT)
             surface.blit(txt, txt.get_rect(center=rect.center))
             x += tab_w + gap
-        return y + 36
+        return y + 34
 
     def _draw_status_strip(self, surface: pygame.Surface, y: int) -> int:
+        from ui import theme
+
+        strip = pygame.Rect(16, y, surface.get_width() - 32, 38)
+        pygame.draw.rect(surface, (14, 16, 24), strip, border_radius=8)
+        pygame.draw.rect(surface, (42, 48, 66), strip, 1, border_radius=8)
+        label_font = theme.font("tiny")
+        surface.blit(label_font.render("TRANSPORT", True, (118, 132, 160)),
+                     (strip.x + 14, strip.y + 6))
         self._button(
-            surface, "toggle_audio", pygame.Rect(16, y, 96, 30),
-            "AUDIO ON" if self._clip_audio_running() else "AUDIO OFF",
+            surface, "toggle_audio", pygame.Rect(strip.x + 98, strip.y + 5, 102, 28),
+            "Audio" if self._clip_audio_running() else "Audio Off",
             active=self._clip_audio_running(),
         )
         self._button(
-            surface, "stop_all", pygame.Rect(120, y, 88, 30),
-            "STOP ALL", danger=True,
+            surface, "stop_all", pygame.Rect(strip.x + 208, strip.y + 5, 86, 28),
+            "Stop", danger=True,
         )
         ctrl = getattr(self.app, "push2_control", None)
         engine = getattr(self.app, "clip_engine", None)
         sess = ctrl.session if ctrl else (engine.session if engine else None)
-        font = pygame.font.SysFont("Arial", 13)
         status = "Pi 3 gate" if not self._studio_audio_supported() else (
             "stream running" if self._clip_audio_running() else "stream stopped")
         if sess is not None:
-            status = f"{len(sess.tracks)} tracks  {len(sess.scenes)} scenes  {sess.bpm:.1f} BPM  {status}"
-        surface.blit(font.render(status, True, (176, 184, 198)), (220, y + 8))
-        return y + 42
+            status = f"{len(sess.tracks)} tracks / {len(sess.scenes)} scenes / {status}"
+        self._draw_text_fit(surface, theme.font("small"), status,
+                            (176, 184, 198), (strip.x + 314, strip.y + 11),
+                            strip.width - 330)
+        return y + 46
 
     # ── Drawing ───────────────────────────────────────────────────
     def draw(self, surface: pygame.Surface) -> None:
@@ -1406,19 +1488,11 @@ class ClipScreen:
         self._sync_push2_mode()
 
         # Top bar
-        f_big = pygame.font.SysFont("Arial", 24, bold=True)
-        f_med = pygame.font.SysFont("Arial", 18)
         f_sm = pygame.font.SysFont("Arial", 13)
 
-        surface.blit(f_big.render("STUDIO", True, (230, 230, 240)), (16, 12))
-        subtitle = f"{sess.name}   {sess.bpm:.1f} BPM"
-        surface.blit(f_sm.render(subtitle[:72], True, (156, 166, 184)),
-                     (116, 20))
-        if ctrl is not None:
-            mode_str = f"Push 2 mode: {ctrl.mode_name}"
-            surface.blit(f_med.render(mode_str, True, (160, 200, 255)),
-                         (16, 44))
-        content_top = self._draw_tabs(surface, 72, surface.get_width())
+        content_top = self._draw_studio_shell(surface, sess, ctrl)
+        content_top = self._draw_tabs(surface, content_top + 4,
+                                      surface.get_width())
         content_top = self._draw_status_strip(surface, content_top)
 
         if self._tab != "clips":
@@ -1515,50 +1589,62 @@ class ClipScreen:
 
     def _draw_module_card(self, surface: pygame.Surface, module, rect: pygame.Rect,
                           *, active: bool = False) -> None:
+        from ui import theme
+
         self._buttons[f"studio_module_{module.key}"] = rect
-        font = pygame.font.SysFont("Arial", 15, bold=True)
-        font_sm = pygame.font.SysFont("Arial", 12)
+        font = theme.font("medium")
+        font_sm = theme.font("small")
         status = self._module_availability(module)
         blocked = status.lower() in ("audio gated", f"pi {module.min_pi_generation}+")
-        bg = (30, 42, 54) if active else (20, 23, 34)
-        edge = (92, 210, 170) if active else (
-            (158, 74, 82) if blocked else (52, 60, 82))
-        pygame.draw.rect(surface, bg, rect, border_radius=6)
-        pygame.draw.rect(surface, edge, rect, 1, border_radius=6)
+        bg = (34, 48, 44) if active else (18, 20, 30)
+        edge = theme.GREEN if active else (
+            (158, 74, 82) if blocked else (48, 56, 76))
+        pygame.draw.rect(surface, bg, rect, border_radius=8)
+        pygame.draw.rect(surface, edge, rect, 1, border_radius=8)
+        pygame.draw.rect(surface, theme.ACCENT if active else (42, 48, 66),
+                         (rect.x, rect.y, 5, rect.height), border_radius=3)
         self._draw_text_fit(surface, font, module.label, (236, 240, 248),
-                            (rect.x + 12, rect.y + 9), rect.width - 118)
+                            (rect.x + 16, rect.y + 10), rect.width - 124)
         chip_w = 88
         chip = pygame.Rect(rect.right - chip_w - 10, rect.y + 8, chip_w, 22)
-        chip_bg = (52, 92, 76) if not blocked else (86, 42, 48)
-        pygame.draw.rect(surface, chip_bg, chip, border_radius=4)
+        chip_bg = (36, 76, 62) if not blocked else (86, 42, 48)
+        pygame.draw.rect(surface, chip_bg, chip, border_radius=6)
         self._draw_text_fit(surface, font_sm, status.upper(), (236, 240, 248),
                             (chip.x + 8, chip.y + 4), chip.width - 12)
         self._draw_text_fit(surface, font_sm, module.summary,
-                            (158, 170, 192), (rect.x + 12, rect.y + 32),
+                            (158, 170, 192), (rect.x + 16, rect.y + 36),
                             rect.width - 24)
         features = " / ".join(module.features[:3])
         self._draw_text_fit(surface, font_sm, features,
-                            (118, 132, 160), (rect.x + 12, rect.y + 48),
+                            (118, 132, 160), (rect.x + 16, rect.y + 56),
                             rect.width - 24)
 
     def _draw_module_hub(self, surface: pygame.Surface, top: int, sess) -> None:
-        font_big = pygame.font.SysFont("Arial", 24, bold=True)
-        font = pygame.font.SysFont("Arial", 13)
+        from ui import theme
+
+        font_big = theme.font("title")
+        font = theme.font("small")
+        hero = pygame.Rect(20, top + 4, surface.get_width() - 40, 58)
+        pygame.draw.rect(surface, (16, 18, 28), hero, border_radius=8)
+        pygame.draw.rect(surface, (50, 58, 78), hero, 1, border_radius=8)
+        pygame.draw.rect(surface, theme.ACCENT, (hero.x, hero.y, 6, hero.height),
+                         border_radius=3)
         surface.blit(font_big.render("Studio Home", True, (232, 234, 242)),
-                     (20, top + 8))
+                     (hero.x + 18, hero.y + 12))
         pi = self._pi_generation()
         status = "Pi generation: " + (str(pi) if pi is not None else "unknown")
         if not self._studio_audio_supported():
-            status += "  |  internal audio gated"
-        surface.blit(font.render(status, True, (150, 162, 184)),
-                     (172, top + 16))
+            status += " / internal audio gated"
+        self._draw_text_fit(surface, font, status, (150, 162, 184),
+                            (hero.x + 210, hero.y + 22),
+                            hero.width - 230)
 
         modules = known_modules()
         gap = 8
         x0 = 20
-        y0 = top + 44
+        y0 = hero.bottom + 12
         col_w = (surface.get_width() - 40 - gap) // 2
-        row_h = 62
+        row_h = 78
         for idx, module in enumerate(modules):
             col = idx % 2
             row = idx // 2
@@ -2099,9 +2185,12 @@ class ClipScreen:
                             sy, label, value, box_w)
 
     def _draw_recorder_tab(self, surface: pygame.Surface, top: int, sess) -> None:
-        font_big = pygame.font.SysFont("Arial", 24, bold=True)
-        font = pygame.font.SysFont("Arial", 14)
-        font_sm = pygame.font.SysFont("Arial", 12)
+        from ui import theme
+
+        font_big = theme.font("title")
+        font = theme.font("medium")
+        font_sm = theme.font("small")
+        font_tiny = theme.font("tiny")
         rec = self._recorder()
         status = recorder_status(rec)
         engine = getattr(self.app, "clip_engine", None)
@@ -2109,147 +2198,189 @@ class ClipScreen:
         track_idx = self._selected_recorder_track_index(sess)
         scene_idx = self._selected_recorder_scene_index(sess, track_idx)
         track_name = sess.tracks[track_idx].name if track_idx is not None else "No audio track"
-
-        surface.blit(font_big.render("Recorder", True, (232, 234, 242)),
-                     (20, top + 8))
-        surface.blit(font.render("capture deck, clip recorder, recall buffer",
-                                 True, (150, 162, 184)), (150, top + 16))
-        if self._recorder_message:
-            self._draw_text_fit(surface, font_sm, self._recorder_message,
-                                (174, 188, 222), (450, top + 19),
-                                surface.get_width() - 470)
-
         margin = 20
         gap = 12
-        y = top + 54
-        content_w = surface.get_width() - margin * 2
-        deck_w = int(content_w * 0.42)
-        clip_w = int(content_w * 0.30)
-        recent_w = content_w - deck_w - clip_w - gap * 2
-        deck = pygame.Rect(margin, y, deck_w, 286)
-        clip = pygame.Rect(deck.right + gap, y, clip_w, 286)
-        recent = pygame.Rect(clip.right + gap, y, recent_w, 286)
-        dy = self._panel(surface, deck, "Capture Deck")
-        cy = self._panel(surface, clip, "Clip Capture")
-        ry = self._panel(surface, recent, "Recent Takes")
+        width = surface.get_width()
+        bottom = surface.get_height() - theme.NAV_HEIGHT - 8
+        content_w = width - margin * 2
 
-        rec_color = (168, 46, 56) if status["recording"] else (44, 72, 62)
-        rec_ring = pygame.Rect(deck.x + 20, dy + 6, 94, 94)
-        pygame.draw.ellipse(surface, rec_color, rec_ring)
-        pygame.draw.ellipse(surface, (236, 112, 120), rec_ring, 2)
-        center_label = "REC" if status["recording"] else "READY"
-        txt = font.render(center_label, True, (250, 246, 242))
+        head = pygame.Rect(margin, top + 2, content_w, 48)
+        pygame.draw.rect(surface, (16, 18, 28), head, border_radius=8)
+        pygame.draw.rect(surface, (50, 58, 78), head, 1, border_radius=8)
+        pygame.draw.rect(surface, theme.RED if status["recording"] else theme.GREEN,
+                         (head.x, head.y, 6, head.height), border_radius=3)
+        surface.blit(font_big.render("Recorder", True, theme.TEXT_BRIGHT),
+                     (head.x + 18, head.y + 9))
+        state = "RECORDING" if status["recording"] else "READY"
+        self._studio_chip(
+            surface, pygame.Rect(head.x + 158, head.y + 10, 108, 28),
+            state, active=not status["recording"], danger=status["recording"])
+        self._studio_chip(
+            surface, pygame.Rect(head.x + 274, head.y + 10, 126, 28),
+            format_duration(status["duration"]), accent=True)
+        self._draw_text_fit(surface, font_sm, self._recorder_message or
+                            (status["device"] or "no input selected"),
+                            (156, 170, 196), (head.x + 416, head.y + 17),
+                            head.width - 432)
+
+        main_top = head.bottom + 10
+        lower_h = 74
+        main_h = max(132, min(206, bottom - main_top - lower_h - 10))
+        deck_w = int(content_w * 0.46)
+        clip_w = int(content_w * 0.28)
+        map_w = content_w - deck_w - clip_w - gap * 2
+        deck = pygame.Rect(margin, main_top, deck_w, main_h)
+        clip = pygame.Rect(deck.right + gap, main_top, clip_w, main_h)
+        push = pygame.Rect(clip.right + gap, main_top, map_w, main_h)
+
+        def zone(rect: pygame.Rect, title: str, edge=(48, 56, 76)) -> int:
+            pygame.draw.rect(surface, (13, 15, 23), rect, border_radius=9)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=9)
+            surface.blit(font_tiny.render(title.upper(), True, (118, 132, 160)),
+                         (rect.x + 12, rect.y + 8))
+            return rect.y + 28
+
+        dy = zone(deck, "live capture",
+                  theme.RED if status["recording"] else (48, 56, 76))
+        rec_size = max(68, min(96, main_h - 72))
+        rec_ring = pygame.Rect(deck.x + 16, dy + 4, rec_size, rec_size)
+        rec_fill = (156, 36, 46) if status["recording"] else (30, 74, 56)
+        pygame.draw.ellipse(surface, rec_fill, rec_ring)
+        pygame.draw.ellipse(surface,
+                            theme.RED if status["recording"] else theme.GREEN,
+                            rec_ring, 3)
+        center_label = "REC" if status["recording"] else "ARM"
+        txt = font.render(center_label, True, theme.TEXT_BRIGHT)
         surface.blit(txt, txt.get_rect(center=rec_ring.center))
-        self._info_pair(surface, deck.x + 130, dy + 4, "Input",
-                        status["device"] or "none", deck.width - 150)
-        self._info_pair(surface, deck.x + 130, dy + 56, "Time",
-                        format_duration(status["duration"]), 96)
-        self._info_pair(surface, deck.x + 238, dy + 56, "Recall",
-                        f"{status['recall_seconds']:.0f}/{status['recall_capacity']}s",
-                        max(82, deck.right - deck.x - 252))
+        info_x = rec_ring.right + 16
+        surface.blit(font_tiny.render("INPUT", True, (118, 132, 160)),
+                     (info_x, dy + 4))
+        self._draw_text_fit(surface, font_sm, status["device"] or "none",
+                            theme.TEXT_BRIGHT, (info_x, dy + 20),
+                            deck.right - info_x - 12)
+        surface.blit(font_tiny.render("RECALL BUFFER", True, (118, 132, 160)),
+                     (info_x, dy + 48))
+        recall_text = (
+            f"{status['recall_seconds']:.0f}/{status['recall_capacity']}s"
+            f"  pre {status['pre_roll']:.1f}s")
+        self._draw_text_fit(surface, font_sm, recall_text, (176, 184, 198),
+                            (info_x, dy + 64), deck.right - info_x - 12)
 
-        meter_y = dy + 122
-        for idx, (label, value) in enumerate((
-            ("L", status["peak_l"]),
-            ("R", status["peak_r"]),
-        )):
+        meter_y = deck.bottom - 68
+        for idx, (label, value) in enumerate((("L", status["peak_l"]),
+                                              ("R", status["peak_r"]))):
             yy = meter_y + idx * 24
             surface.blit(font_sm.render(label, True, (174, 188, 222)),
-                         (deck.x + 20, yy + 3))
+                         (deck.x + 18, yy + 1))
             bar = pygame.Rect(deck.x + 42, yy, deck.width - 62, 14)
-            pygame.draw.rect(surface, (22, 25, 34), bar, border_radius=4)
+            pygame.draw.rect(surface, (22, 25, 34), bar, border_radius=5)
             fill = pygame.Rect(bar.x, bar.y, int(bar.width * min(1.0, value)),
                                bar.height)
-            pygame.draw.rect(surface, (96, 224, 156), fill, border_radius=4)
-        self._draw_text_fit(
-            surface, font_sm,
-            f"monitor {'on' if status['monitoring'] else 'off'}  "
-            f"overruns {status['overruns']}  pre-roll {status['pre_roll']:.1f}s",
-            (150, 162, 184), (deck.x + 20, meter_y + 58), deck.width - 40)
-
-        by = deck.bottom - 44
-        bw = (deck.width - 52) // 4
+            pygame.draw.rect(surface, theme.GREEN, fill, border_radius=5)
+        by = deck.bottom - 34
+        bw = max(58, (deck.width - 44) // 4)
         self._button(surface, "recorder_record",
-                     pygame.Rect(deck.x + 20, by, bw, 34),
+                     pygame.Rect(deck.x + 12, by, bw, 28),
                      "Stop" if status["recording"] else "Record",
                      danger=status["recording"])
         self._button(surface, "recorder_recall",
-                     pygame.Rect(deck.x + 28 + bw, by, bw, 34), "Recall")
+                     pygame.Rect(deck.x + 18 + bw, by, bw, 28), "Recall")
         self._button(surface, "recorder_recall_continue",
-                     pygame.Rect(deck.x + 36 + bw * 2, by, bw, 34), "+REC")
+                     pygame.Rect(deck.x + 24 + bw * 2, by, bw, 28), "+REC")
         self._button(surface, "recorder_stop",
-                     pygame.Rect(deck.x + 44 + bw * 3, by, bw, 34), "Stop",
+                     pygame.Rect(deck.x + 30 + bw * 3, by, bw, 28), "Stop",
                      danger=True)
 
-        self._info_pair(surface, clip.x + 14, cy, "Track", track_name,
-                        clip.width - 28)
-        self._info_pair(surface, clip.x + 14, cy + 52, "Slot",
-                        f"Scene {scene_idx + 1}", (clip.width - 36) // 2)
-        self._info_pair(surface, clip.x + 24 + (clip.width - 36) // 2,
-                        cy + 52, "Length",
-                        f"{self._recorder_length_bars()} bars",
-                        (clip.width - 36) // 2)
-        track_buttons_y = cy + 108
+        cy = zone(clip, "clip slot")
+        self._draw_text_fit(surface, font_tiny, "TRACK", (118, 132, 160),
+                            (clip.x + 14, cy), clip.width - 28)
+        self._draw_text_fit(surface, font, track_name, theme.TEXT_BRIGHT,
+                            (clip.x + 14, cy + 17), clip.width - 28)
+        slot_label = f"Scene {scene_idx + 1} / {self._recorder_length_bars()} bars"
+        self._draw_text_fit(surface, font_sm, slot_label, (176, 184, 198),
+                            (clip.x + 14, cy + 44), clip.width - 28)
         tracks = self._recorder_audio_tracks(sess)
-        tw = max(54, (clip.width - 28 - 18) // 4)
+        track_y = cy + 70
+        tw = max(44, (clip.width - 28 - 18) // 4)
         for slot, idx in enumerate(tracks[:4]):
             self._button(surface, f"recorder_track_{slot}",
                          pygame.Rect(clip.x + 14 + slot * (tw + 6),
-                                     track_buttons_y, tw, 30),
-                         sess.tracks[idx].name,
-                         active=idx == track_idx)
-        control_y = track_buttons_y + 42
+                                     track_y, tw, 28),
+                         sess.tracks[idx].name, active=idx == track_idx)
+        control_y = track_y + 36
         cw = (clip.width - 28 - 12) // 3
         self._button(surface, "recorder_scene_prev",
-                     pygame.Rect(clip.x + 14, control_y, cw, 30), "Scene-")
+                     pygame.Rect(clip.x + 14, control_y, cw, 28), "Scene-")
         self._button(surface, "recorder_scene_next",
-                     pygame.Rect(clip.x + 20 + cw, control_y, cw, 30), "Scene+")
+                     pygame.Rect(clip.x + 20 + cw, control_y, cw, 28), "Scene+")
         self._button(surface, "recorder_length",
-                     pygame.Rect(clip.x + 26 + cw * 2, control_y, cw, 30),
-                     "Length")
+                     pygame.Rect(clip.x + 26 + cw * 2, control_y, cw, 28),
+                     "Bars")
         self._button(surface, "recorder_arm_clip",
-                     pygame.Rect(clip.x + 14, control_y + 42,
-                                 clip.width - 28, 34),
-                     "Arm Clip Slot", active=bool(armed_slots))
+                     pygame.Rect(clip.x + 14, clip.bottom - 64,
+                                 clip.width - 28, 28),
+                     "Arm Clip", active=bool(armed_slots))
+        half = (clip.width - 36) // 2
         self._button(surface, "recorder_capture_midi",
-                     pygame.Rect(clip.x + 14, control_y + 84,
-                                 (clip.width - 36) // 2, 34),
-                     "Capture MIDI")
+                     pygame.Rect(clip.x + 14, clip.bottom - 32, half, 26),
+                     "MIDI Cap")
         self._button(surface, "recorder_cancel_clip",
-                     pygame.Rect(clip.x + 22 + (clip.width - 36) // 2,
-                                 control_y + 84, (clip.width - 36) // 2, 34),
+                     pygame.Rect(clip.x + 22 + half, clip.bottom - 32, half, 26),
                      "Cancel")
 
+        py = zone(push, "push 2 map")
+        enc = ("Enc 1 Track", "Enc 2 Scene", "Enc 3 Bars")
+        enc_step = max(1, (push.width - 28) // 3)
+        enc_w = max(38, enc_step - 6)
+        for idx, label in enumerate(enc):
+            knob = pygame.Rect(push.x + 14 + idx * enc_step,
+                               py + 2, enc_w, 38)
+            pygame.draw.rect(surface, (22, 25, 36), knob, border_radius=7)
+            pygame.draw.rect(surface, (52, 60, 82), knob, 1, border_radius=7)
+            self._draw_text_fit(surface, font_tiny, label, (176, 184, 198),
+                                (knob.x + 8, knob.y + 12), knob.width - 16)
+        lower = ("REC", "STOP", "RECALL", "+REC", "ARM", "MIDI", "1X", "HOME")
+        cell_step = max(1, (push.width - 28) // 4)
+        cell_w = max(28, cell_step - 6)
+        for idx, label in enumerate(lower):
+            col = idx % 4
+            row = idx // 4
+            cell = pygame.Rect(push.x + 14 + col * cell_step,
+                               py + 54 + row * 34, cell_w, 26)
+            pygame.draw.rect(surface, (26, 30, 44), cell, border_radius=6)
+            self._draw_text_fit(surface, font_tiny, label, theme.TEXT,
+                                (cell.x + 7, cell.y + 7), cell.width - 12)
+
+        lower = pygame.Rect(margin, main_top + main_h + 10, content_w, lower_h)
+        pygame.draw.rect(surface, (13, 15, 23), lower, border_radius=9)
+        pygame.draw.rect(surface, (48, 56, 76), lower, 1, border_radius=9)
+        surface.blit(font_tiny.render("TAKES", True, (118, 132, 160)),
+                     (lower.x + 12, lower.y + 8))
         recents = recent_recordings(rec, limit=4)
+        take_x = lower.x + 68
+        take_w = max(106, (lower.width - 260) // 4)
         if not recents:
             self._draw_text_fit(surface, font_sm, "No recordings yet",
-                                (150, 162, 184), (recent.x + 14, ry),
-                                recent.width - 28)
+                                (150, 162, 184), (take_x, lower.y + 31),
+                                lower.width - 250)
         for idx, item in enumerate(recents[:4]):
-            yy = ry + idx * 52
-            box = pygame.Rect(recent.x + 14, yy, recent.width - 28, 44)
-            pygame.draw.rect(surface, (24, 27, 38), box, border_radius=5)
-            pygame.draw.rect(surface, (52, 58, 78), box, 1, border_radius=5)
-            self._draw_text_fit(surface, font_sm,
+            box = pygame.Rect(take_x + idx * (take_w + 8), lower.y + 22,
+                              take_w, 40)
+            pygame.draw.rect(surface, (22, 25, 36), box, border_radius=7)
+            pygame.draw.rect(surface, (52, 58, 78), box, 1, border_radius=7)
+            self._draw_text_fit(surface, font_tiny,
                                 item.get("filename", "recording"),
-                                (232, 236, 244), (box.x + 8, box.y + 8),
+                                theme.TEXT_BRIGHT, (box.x + 8, box.y + 7),
                                 box.width - 16)
-            self._draw_text_fit(surface, font_sm,
+            self._draw_text_fit(surface, font_tiny,
                                 f"{format_duration(item.get('duration', 0))}  "
                                 f"{item.get('size_mb', 0):.1f} MB",
-                                (150, 162, 184), (box.x + 8, box.y + 25),
+                                (150, 162, 184), (box.x + 8, box.y + 23),
                                 box.width - 16)
-
-        assist_rect = pygame.Rect(margin, y + 300, content_w, 66)
-        ay = self._panel(surface, assist_rect, "SP Pattern Record Assist")
-        self._draw_text_fit(
-            surface, font_sm,
-            "Arm pattern record on the SP, then fire the current Performer pattern once.",
-            (150, 162, 184), (assist_rect.x + 14, ay + 8),
-            assist_rect.width - 190)
+        assist_x = lower.right - 166
         self._button(surface, "recorder_sp_record_once",
-                     pygame.Rect(assist_rect.right - 164, ay, 144, 34),
-                     "Record Once")
+                     pygame.Rect(assist_x, lower.y + 22, 146, 34),
+                     "SP Record 1x")
 
     def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
                                 top: int, sess) -> None:
