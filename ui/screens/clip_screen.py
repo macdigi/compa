@@ -76,6 +76,13 @@ from engine.studio_synth import (
     synth_track_indices,
     synth_track_role,
 )
+from engine.studio_router import (
+    adjust_track_mix,
+    clear_solos,
+    route_track_to_target,
+    session_route_summary,
+    target_choices_for_track,
+)
 from engine.push2driver import constants as C
 from engine.push2driver.palette import track_color_index, build_palette
 
@@ -128,6 +135,7 @@ class ClipScreen:
         self._synth_track_choice_idx = 0
         self._synth_base_note = 48
         self._synth_message = ""
+        self._router_message = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -152,6 +160,8 @@ class ClipScreen:
             desired = "drum_synth"
         elif self._tab == "synth":
             desired = "studio_synth"
+        elif self._tab == "mixer":
+            desired = "studio_router"
         elif self._tab == "clips":
             desired = "session"
         else:
@@ -588,6 +598,63 @@ class ClipScreen:
         else:
             value_text = str(value)
         self._synth_message = f"{field.replace('_', ' ')}: {value_text}"
+
+    # ── Mixer / Router helpers ───────────────────────────────────
+    def _router_summaries(self, sess) -> list[dict]:
+        return session_route_summary(
+            sess,
+            pi_generation=self._pi_generation(),
+            studio_audio_enabled=self._studio_audio_supported(),
+        )
+
+    def _select_router_track(self, sess, track_idx: int) -> None:
+        if not sess.tracks:
+            return
+        idx = max(0, min(len(sess.tracks) - 1, int(track_idx)))
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.selected_track = idx
+            ctrl.request_redraw()
+        self._router_message = f"selected {sess.tracks[idx].name}"
+
+    def _route_selected_track(self, sess, target_key: str) -> None:
+        track_idx = self._selected_track_index(sess)
+        target = route_track_to_target(sess, track_idx, target_key)
+        self._persist_session(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+        self._router_message = (
+            f"{sess.tracks[track_idx].name} -> {target.label or target.key}")
+
+    def _adjust_router_mix(self, sess, field: str, delta: float = 0.0) -> None:
+        track_idx = self._selected_track_index(sess)
+        track = adjust_track_mix(sess, track_idx, field, delta)
+        self._persist_session(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+        if field == "volume":
+            detail = f"{int(track.volume * 100)}%"
+        elif field == "pan":
+            detail = f"{track.pan:+.2f}"
+        elif field == "mute":
+            detail = "muted" if track.mute else "unmuted"
+        elif field == "solo":
+            detail = "solo" if track.solo else "solo off"
+        elif field == "arm":
+            detail = "armed" if track.arm else "disarmed"
+        else:
+            detail = field
+        self._router_message = f"{track.name}: {detail}"
+
+    def _clear_router_solos(self, sess) -> None:
+        clear_solos(sess)
+        self._persist_session(sess)
+        ctrl = getattr(self.app, "push2_control", None)
+        if ctrl is not None:
+            ctrl.request_redraw()
+        self._router_message = "solos cleared"
 
     def _sp_beat_bass_target(self) -> TrackTarget:
         return TrackTarget(
@@ -1712,6 +1779,159 @@ class ClipScreen:
                                 (232, 236, 244), (rect.x + 6, rect.y + 21),
                                 rect.width - 12)
 
+    def _draw_mixer_tab(self, surface: pygame.Surface, top: int, sess) -> None:
+        font_big = pygame.font.SysFont("Arial", 24, bold=True)
+        font = pygame.font.SysFont("Arial", 14)
+        font_sm = pygame.font.SysFont("Arial", 12)
+        summaries = self._router_summaries(sess)
+        selected_idx = self._selected_track_index(sess)
+        selected = sess.tracks[selected_idx] if sess.tracks else None
+        selected_summary = (
+            summaries[selected_idx]
+            if 0 <= selected_idx < len(summaries) else None
+        )
+
+        surface.blit(font_big.render("Mixer / Router", True, (232, 234, 242)),
+                     (20, top + 8))
+        header = "track targets, levels, mute/solo, record arm"
+        surface.blit(font.render(header, True, (150, 162, 184)),
+                     (208, top + 16))
+        if self._router_message:
+            self._draw_text_fit(surface, font_sm, self._router_message,
+                                (174, 188, 222), (470, top + 19),
+                                surface.get_width() - 490)
+
+        margin = 20
+        gap = 12
+        y = top + 54
+        content_w = surface.get_width() - margin * 2
+        left_w = min(470, int(content_w * 0.62))
+        right_w = content_w - left_w - gap
+        left = pygame.Rect(margin, y, left_w, 286)
+        right = pygame.Rect(margin + left_w + gap, y, right_w, 286)
+        ly = self._panel(surface, left, "Track Routes")
+        ry = self._panel(surface, right, "Selected Track")
+
+        row_h = 28
+        row_gap = 6
+        for row, summary in enumerate(summaries[:8]):
+            yy = ly + row * (row_h + row_gap)
+            if yy + row_h > left.bottom - 10:
+                break
+            active = summary["index"] == selected_idx
+            bg = (36, 68, 60) if active else (18, 20, 30)
+            edge = (104, 218, 166) if active else (42, 48, 66)
+            row_rect = pygame.Rect(left.x + 12, yy, left.width - 24, row_h)
+            pygame.draw.rect(surface, bg, row_rect, border_radius=4)
+            pygame.draw.rect(surface, edge, row_rect, 1, border_radius=4)
+            select_rect = pygame.Rect(row_rect.x, row_rect.y,
+                                      row_rect.width - 96, row_rect.height)
+            self._buttons[f"router_track_{summary['index']}"] = select_rect
+            name_w = max(70, int(select_rect.width * 0.35))
+            self._draw_text_fit(
+                surface, font_sm,
+                f"{summary['index'] + 1}. {summary['name']}",
+                (232, 236, 244), (row_rect.x + 8, row_rect.y + 8), name_w)
+            self._draw_text_fit(
+                surface, font_sm,
+                summary["target_label"],
+                (166, 178, 198),
+                (row_rect.x + 18 + name_w, row_rect.y + 8),
+                select_rect.width - name_w - 24)
+            for idx, (field, label) in enumerate((
+                ("mute", "M"),
+                ("solo", "S"),
+                ("arm", "A"),
+            )):
+                bx = row_rect.right - 90 + idx * 30
+                brect = pygame.Rect(bx, row_rect.y + 4, 24, row_rect.height - 8)
+                on = bool(summary[field])
+                color = (
+                    (160, 68, 74) if field == "mute" and on
+                    else ((72, 176, 130) if on else (26, 30, 42))
+                )
+                pygame.draw.rect(surface, color, brect, border_radius=3)
+                pygame.draw.rect(surface, (64, 72, 94), brect, 1,
+                                 border_radius=3)
+                self._buttons[f"router_{field}_{summary['index']}"] = brect
+                text_surf = font_sm.render(label, True, (232, 236, 244))
+                surface.blit(text_surf, text_surf.get_rect(center=brect.center))
+
+        if selected is not None and selected_summary is not None:
+            info_w = right.width - 28
+            col_w = max(86, (info_w - 12) // 2)
+            self._info_pair(surface, right.x + 14, ry, "Target",
+                            selected_summary["target_label"], col_w)
+            self._info_pair(surface, right.x + 26 + col_w, ry, "Status",
+                            selected_summary["available"], col_w)
+            self._info_pair(surface, right.x + 14, ry + 52, "Volume",
+                            f"{int(selected.volume * 100)}%", col_w)
+            self._info_pair(surface, right.x + 26 + col_w, ry + 52, "Pan",
+                            f"{selected.pan:+.2f}", col_w)
+
+            by = ry + 108
+            small_gap = 6
+            small_w = max(46, (info_w - small_gap * 7) // 8)
+            controls = [
+                ("router_vol_down", "Vol-"),
+                ("router_vol_up", "Vol+"),
+                ("router_pan_left", "PanL"),
+                ("router_pan_right", "PanR"),
+                ("router_mute_selected", "Mute"),
+                ("router_solo_selected", "Solo"),
+                ("router_arm_selected", "Arm"),
+                ("router_clear_solos", "Clear"),
+            ]
+            for idx, (key, label) in enumerate(controls):
+                self._button(
+                    surface,
+                    key,
+                    pygame.Rect(right.x + 14 + idx * (small_w + small_gap),
+                                by, small_w, 30),
+                    label,
+                    active=(
+                        key == "router_mute_selected" and selected.mute
+                        or key == "router_solo_selected" and selected.solo
+                        or key == "router_arm_selected" and selected.arm
+                    ),
+                    danger=key == "router_mute_selected" and selected.mute,
+                )
+
+            target_y = by + 45
+            surface.blit(font.render("Targets", True, (226, 230, 242)),
+                         (right.x + 14, target_y))
+            target_y += 24
+            choices = target_choices_for_track(selected)
+            target_w = (info_w - 8) // 2
+            current_key = target_for_track(selected).key
+            for idx, capability in enumerate(choices[:8]):
+                col = idx % 2
+                row = idx // 2
+                rect = pygame.Rect(
+                    right.x + 14 + col * (target_w + 8),
+                    target_y + row * 34,
+                    target_w,
+                    28,
+                )
+                label = capability.label
+                active = capability.key == current_key
+                self._button(surface, f"router_target_{capability.key}",
+                             rect, label, active=active)
+
+        status_rect = pygame.Rect(margin, y + 300, content_w, 66)
+        sy = self._panel(surface, status_rect, "Runtime")
+        runtime = [
+            ("Audio", "running" if self._clip_audio_running() else "stopped"),
+            ("Studio audio", "available" if self._studio_audio_supported()
+             else "gated"),
+            ("Pi", str(self._pi_generation() or "unknown")),
+            ("Tracks", str(len(sess.tracks))),
+        ]
+        box_w = (content_w - 28 - 18) // 4
+        for idx, (label, value) in enumerate(runtime):
+            self._info_pair(surface, status_rect.x + 14 + idx * (box_w + 6),
+                            sy, label, value, box_w)
+
     def _draw_module_detail_tab(self, surface: pygame.Surface, tab: str,
                                 top: int, sess) -> None:
         module = module_for_tab(tab)
@@ -1788,6 +2008,9 @@ class ClipScreen:
             return
         if tab == "synth":
             self._draw_synth_tab(surface, top, sess)
+            return
+        if tab == "mixer":
+            self._draw_mixer_tab(surface, top, sess)
             return
         if tab == "overview":
             self._draw_module_hub(surface, top, sess)
@@ -2221,6 +2444,49 @@ class ClipScreen:
                 return True
             if key == "synth_gain_up":
                 self._adjust_synth_param(sess, "gain", 0.05)
+                return True
+            if key.startswith("router_track_"):
+                self._select_router_track(sess, int(key.rsplit("_", 1)[1]))
+                return True
+            if key.startswith("router_target_"):
+                self._route_selected_track(
+                    sess, key.replace("router_target_", "", 1))
+                return True
+            if key == "router_vol_down":
+                self._adjust_router_mix(sess, "volume", -0.05)
+                return True
+            if key == "router_vol_up":
+                self._adjust_router_mix(sess, "volume", 0.05)
+                return True
+            if key == "router_pan_left":
+                self._adjust_router_mix(sess, "pan", -0.1)
+                return True
+            if key == "router_pan_right":
+                self._adjust_router_mix(sess, "pan", 0.1)
+                return True
+            if key == "router_mute_selected":
+                self._adjust_router_mix(sess, "mute")
+                return True
+            if key == "router_solo_selected":
+                self._adjust_router_mix(sess, "solo")
+                return True
+            if key == "router_arm_selected":
+                self._adjust_router_mix(sess, "arm")
+                return True
+            if key == "router_clear_solos":
+                self._clear_router_solos(sess)
+                return True
+            if key.startswith("router_mute_"):
+                self._select_router_track(sess, int(key.rsplit("_", 1)[1]))
+                self._adjust_router_mix(sess, "mute")
+                return True
+            if key.startswith("router_solo_"):
+                self._select_router_track(sess, int(key.rsplit("_", 1)[1]))
+                self._adjust_router_mix(sess, "solo")
+                return True
+            if key.startswith("router_arm_"):
+                self._select_router_track(sess, int(key.rsplit("_", 1)[1]))
+                self._adjust_router_mix(sess, "arm")
                 return True
             if key.startswith("performer_take_select_"):
                 self._select_performer_take(

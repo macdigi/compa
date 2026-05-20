@@ -112,6 +112,14 @@ switch bass/lead/pad presets, cycle waveforms, and adjust cutoff, attack,
 release, and gain. Push 2 gets a Synths mode with a playable 4ths-layout pad
 grid plus encoder macros for the same sound controls.
 
+The first routing path is the Mixer / Router MVP. It treats Session tracks as
+the source of truth for level, pan, mute, solo, arm, and TrackTarget state, then
+adds a Studio Router layer for summaries and safe target choices. The
+touchscreen now shows track-to-target rows, selected-track mix controls,
+available internal/external/network destinations, and runtime status. Push 2
+gets a router mode with volume bar pads, encoder volume/pan control, selected
+track mute/solo/arm, and target cycling.
+
 ### Device Workspaces
 
 Device workspaces stay focused on device-specific behavior:
