@@ -2234,8 +2234,8 @@ class ClipScreen:
         push = pygame.Rect(clip.right + gap, main_top, map_w, main_h)
 
         def zone(rect: pygame.Rect, title: str, edge=(48, 56, 76)) -> int:
-            pygame.draw.rect(surface, (13, 15, 23), rect, border_radius=9)
-            pygame.draw.rect(surface, edge, rect, 1, border_radius=9)
+            pygame.draw.rect(surface, (13, 15, 23), rect, border_radius=8)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=8)
             surface.blit(font_tiny.render(title.upper(), True, (118, 132, 160)),
                          (rect.x + 12, rect.y + 8))
             return rect.y + 28
@@ -2352,8 +2352,8 @@ class ClipScreen:
                                 (cell.x + 7, cell.y + 7), cell.width - 12)
 
         lower = pygame.Rect(margin, main_top + main_h + 10, content_w, lower_h)
-        pygame.draw.rect(surface, (13, 15, 23), lower, border_radius=9)
-        pygame.draw.rect(surface, (48, 56, 76), lower, 1, border_radius=9)
+        pygame.draw.rect(surface, (13, 15, 23), lower, border_radius=8)
+        pygame.draw.rect(surface, (48, 56, 76), lower, 1, border_radius=8)
         surface.blit(font_tiny.render("TAKES", True, (118, 132, 160)),
                      (lower.x + 12, lower.y + 8))
         recents = recent_recordings(rec, limit=4)
@@ -2471,9 +2471,12 @@ class ClipScreen:
         self._draw_module_detail_tab(surface, tab, top, sess)
 
     def _draw_performer_tab(self, surface: pygame.Surface, top: int, sess) -> None:
-        font_big = pygame.font.SysFont("Arial", 22, bold=True)
-        font = pygame.font.SysFont("Arial", 14)
-        font_sm = pygame.font.SysFont("Arial", 12)
+        from ui import theme
+
+        font_big = theme.font("title")
+        font = theme.font("medium")
+        font_sm = theme.font("small")
+        font_tiny = theme.font("tiny")
         track_idx = self._selected_track_index(sess)
         track = sess.tracks[track_idx] if sess.tracks else None
         target = target_for_track(track) if track is not None else self._sp_beat_bass_target()
@@ -2520,230 +2523,293 @@ class ClipScreen:
             playing_slot, status.get("pattern_label") or spec.name)
         if not status.get("running"):
             playing_label = "-"
+        margin = 20
+        gap = 12
+        width = surface.get_width()
+        bottom = surface.get_height() - theme.NAV_HEIGHT - 8
+        content_w = width - margin * 2
+        head = pygame.Rect(margin, top + 2, content_w, 50)
+        pygame.draw.rect(surface, (16, 18, 28), head, border_radius=8)
+        pygame.draw.rect(surface, (50, 58, 78), head, 1, border_radius=8)
+        pygame.draw.rect(surface,
+                         theme.GREEN if status["running"] else theme.ACCENT,
+                         (head.x, head.y, 6, head.height), border_radius=3)
+        surface.blit(font_big.render("Performer", True, theme.TEXT_BRIGHT),
+                     (head.x + 18, head.y + 9))
+        self._studio_chip(surface,
+                          pygame.Rect(head.x + 158, head.y + 10, 110, 28),
+                          state, active=bool(status["running"]),
+                          danger=bool(status["last_error"]))
+        self._studio_chip(surface,
+                          pygame.Rect(head.x + 276, head.y + 10, 104, 28),
+                          f"{self._performer_bpm(sess):.1f} BPM",
+                          accent=True)
+        self._studio_chip(surface,
+                          pygame.Rect(head.x + 388, head.y + 10, 148, 28),
+                          self._style_label(self._performer_style()))
+        self._draw_text_fit(surface, font_sm,
+                            self._performer_message or spec.name,
+                            (156, 170, 196), (head.x + 552, head.y + 17),
+                            head.width - 568)
 
-        surface.blit(font_big.render("Performer", True, (236, 240, 248)),
-                     (left_x, top + 6))
-        surface.blit(font.render(
-            f"Pattern: {spec.name[:62]}",
-            True, (150, 162, 184)), (left_x, top + 36))
-        bpm_text = f"{self._performer_bpm(sess):.1f} BPM"
-        bpm_surf = font.render(bpm_text, True, (150, 162, 184))
-        surface.blit(bpm_surf, (left_x + left_w - bpm_surf.get_width(),
-                                top + 12))
+        main_top = head.bottom + 10
+        available_h = max(160, bottom - main_top)
+        top_h = max(104, min(214, int(available_h * 0.43)))
+        lower_h = max(80, available_h - top_h - 10)
+        deck_w = int(content_w * 0.58)
+        map_w = content_w - deck_w - gap
+        deck = pygame.Rect(margin, main_top, deck_w, top_h)
+        push = pygame.Rect(deck.right + gap, main_top, map_w, top_h)
+        takes = pygame.Rect(margin, deck.bottom + 10, deck_w, lower_h)
+        macros = pygame.Rect(push.x, push.bottom + 10, map_w, lower_h)
 
-        current_rect = pygame.Rect(left_x, y, left_w, 146)
-        cy = self._panel(surface, current_rect, "Current Pattern")
-        pair_w = (left_w - 58) // 4
-        self._info_pair(surface, left_x + 14, cy, "Target",
-                        target.label or capability.label, pair_w)
-        self._info_pair(surface, left_x + 24 + pair_w, cy, "State",
-                        state, pair_w)
-        self._info_pair(surface, left_x + 34 + pair_w * 2, cy, "Playing",
-                        playing_label, pair_w)
-        self._info_pair(surface, left_x + 44 + pair_w * 3, cy, "Next",
-                        next_label, pair_w)
-        bar_y = cy + 56
-        bar_rect = pygame.Rect(left_x + 14, bar_y, left_w - 28, 12)
-        pygame.draw.rect(surface, (28, 31, 44), bar_rect, border_radius=4)
-        progress = max(0.0, min(1.0, float(status.get("loop_progress") or 0.0)))
-        fill_w = int(bar_rect.width * progress)
-        if fill_w > 0:
-            pygame.draw.rect(
-                surface, (88, 190, 150),
-                pygame.Rect(bar_rect.x, bar_rect.y, fill_w, bar_rect.height),
-                border_radius=4)
-        pygame.draw.rect(surface, (62, 70, 94), bar_rect, 1, border_radius=4)
+        def zone(rect: pygame.Rect, title: str, edge=(48, 56, 76)) -> int:
+            pygame.draw.rect(surface, (13, 15, 23), rect, border_radius=8)
+            pygame.draw.rect(surface, edge, rect, 1, border_radius=8)
+            surface.blit(font_tiny.render(title.upper(), True,
+                                          (118, 132, 160)),
+                         (rect.x + 12, rect.y + 8))
+            return rect.y + 28
+
+        def draw_progress(rect: pygame.Rect) -> None:
+            progress = max(
+                0.0, min(1.0, float(status.get("loop_progress") or 0.0)))
+            pygame.draw.rect(surface, (28, 31, 44), rect, border_radius=5)
+            if progress > 0.0:
+                pygame.draw.rect(
+                    surface, theme.GREEN,
+                    pygame.Rect(rect.x, rect.y,
+                                int(rect.width * progress), rect.height),
+                    border_radius=5)
+            pygame.draw.rect(surface, (62, 70, 94), rect, 1,
+                             border_radius=5)
+
+        dy = zone(deck, "live pattern",
+                  theme.GREEN if status["running"] else (48, 56, 76))
+        meter_size = max(64, min(104, top_h - 64))
+        meter = pygame.Rect(deck.x + 16, dy + 4, meter_size, meter_size)
+        pygame.draw.ellipse(surface, (30, 74, 56) if status["running"] else
+                            (66, 44, 24), meter)
+        pygame.draw.ellipse(surface, theme.GREEN if status["running"] else
+                            theme.ACCENT, meter, 3)
+        center = "LIVE" if status["running"] else "READY"
+        label = font.render(center, True, theme.TEXT_BRIGHT)
+        surface.blit(label, label.get_rect(center=meter.center))
+        info_x = meter.right + 16
+        surface.blit(font_tiny.render("TARGET", True, (118, 132, 160)),
+                     (info_x, dy + 4))
+        self._draw_text_fit(surface, font_sm, target.label or capability.label,
+                            theme.TEXT_BRIGHT, (info_x, dy + 21),
+                            deck.right - info_x - 12)
+        surface.blit(font_tiny.render("PATTERN", True, (118, 132, 160)),
+                     (info_x, dy + 49))
+        self._draw_text_fit(surface, font_sm, spec.name, (176, 184, 198),
+                            (info_x, dy + 66), deck.right - info_x - 12)
+        progress_rect = pygame.Rect(deck.x + 16, deck.bottom - 66,
+                                    deck.width - 32, 12)
+        draw_progress(progress_rect)
         loop_text = "Loop stopped"
         if status.get("running"):
             loop_text = (
-                f"Loop {status.get('loop_count', 0)}  "
-                f"{float(status.get('loop_remaining') or 0.0):.1f}s to next loop")
-        surface.blit(font_sm.render(loop_text, True, (150, 162, 184)),
-                     (left_x + 14, bar_y + 18))
-        if self._performer_message:
-            surface.blit(font_sm.render(self._performer_message[:70], True,
-                                        (174, 188, 222)),
-                         (left_x + 220, bar_y + 18))
-        cy += 84
-        row_x = left_x + 14
-        row_w = left_w - 28
-        row_gap = 8
-        midi_w = max(86, min(126, row_w // 4))
-        action_w = (row_w - midi_w - row_gap * 3) // 3
-        self._info_pair(surface, row_x, cy, "MIDI", midi_status, midi_w)
-        self._button(surface, "performer_assign_sp",
-                     pygame.Rect(row_x + midi_w + row_gap, cy, action_w, 34),
-                     "Use SP A1-A6",
-                     active=target.key == SP404_BEAT_BASS_TARGET)
-        self._button(surface, "performer_genre",
-                     pygame.Rect(row_x + midi_w + row_gap * 2 + action_w,
-                                 cy, action_w, 34),
-                     f"Genre: {self._style_label(self._performer_style())}")
-        self._button(surface, "performer_generate",
-                     pygame.Rect(row_x + midi_w + row_gap * 3 + action_w * 2,
-                                 cy, action_w, 34), "Generate")
-
-        transport_rect = pygame.Rect(left_x, y + 158, left_w, 86)
-        ty = self._panel(surface, transport_rect, "Transport")
-        row_x = left_x + 14
-        row_w = left_w - 28
-        transport_gap = 8
-        transport_w = (row_w - transport_gap * 3) // 4
+                f"Loop {status.get('loop_count', 0)} / "
+                f"{float(status.get('loop_remaining') or 0.0):.1f}s to next")
+        self._draw_text_fit(surface, font_tiny, loop_text, (150, 162, 184),
+                            (progress_rect.x, progress_rect.y + 18),
+                            progress_rect.width)
+        btn_y = deck.bottom - 36
+        btn_gap = 8
+        btn_w = (deck.width - 32 - btn_gap * 3) // 4
         self._button(surface, "performer_play_v3",
-                     pygame.Rect(row_x, ty, transport_w, 38), "Play Loop",
-                     active=bool(status["running"]))
+                     pygame.Rect(deck.x + 16, btn_y, btn_w, 28),
+                     "Play", active=bool(status["running"]))
         self._button(surface, "performer_stop",
-                     pygame.Rect(row_x + transport_w + transport_gap, ty,
-                                 transport_w, 38), "Stop",
-                     danger=True)
+                     pygame.Rect(deck.x + 16 + (btn_w + btn_gap), btn_y,
+                                 btn_w, 28), "Stop", danger=True)
         self._button(surface, "performer_mute",
-                     pygame.Rect(row_x + (transport_w + transport_gap) * 2,
-                                 ty, transport_w, 38),
+                     pygame.Rect(deck.x + 16 + (btn_w + btn_gap) * 2, btn_y,
+                                 btn_w, 28),
                      "Unmute" if status["muted"] else "Mute",
                      active=bool(status["muted"]))
         self._button(surface, "performer_record_once",
-                     pygame.Rect(row_x + (transport_w + transport_gap) * 3,
-                                 ty, transport_w, 38), "Record Once")
+                     pygame.Rect(deck.x + 16 + (btn_w + btn_gap) * 3, btn_y,
+                                 btn_w, 28), "Rec 1x")
 
-        takes_rect = pygame.Rect(left_x, y + 256, left_w, 226)
-        ky = self._panel(surface, takes_rect, "Take Bank")
-        takes = self._performer_takes(sess)
+        py = zone(push, "push 2 map")
+        page_labels = ("FEEL", "GEN", "LANES", "TAKES")
+        page_step = max(1, (push.width - 28) // 4)
+        for idx, label in enumerate(page_labels):
+            cell = pygame.Rect(push.x + 14 + idx * page_step, py + 2,
+                               max(32, page_step - 6), 28)
+            pygame.draw.rect(surface, (26, 30, 44), cell, border_radius=6)
+            self._draw_text_fit(surface, font_tiny, label, theme.TEXT,
+                                (cell.x + 7, cell.y + 8), cell.width - 12)
+        map_y = py + 42
+        self._draw_text_fit(surface, font_tiny,
+                            "Pads: takes / queue / gestures",
+                            (150, 162, 184), (push.x + 14, map_y),
+                            push.width - 28)
+        lower_labels = (
+            "PLAY", "STOP", "GEN", "SAVE",
+            "QUEUE", "CHAIN", "REC 1X", "STEP")
+        lower_step = max(1, (push.width - 28) // 4)
+        for idx, label in enumerate(lower_labels):
+            col = idx % 4
+            row = idx // 4
+            cell = pygame.Rect(push.x + 14 + col * lower_step,
+                               map_y + 22 + row * 32,
+                               max(30, lower_step - 6), 25)
+            pygame.draw.rect(surface, (22, 25, 36), cell, border_radius=6)
+            self._draw_text_fit(surface, font_tiny, label, (176, 184, 198),
+                                (cell.x + 7, cell.y + 7), cell.width - 12)
+        self._draw_text_fit(surface, font_tiny, f"MIDI: {midi_status}",
+                            (150, 162, 184), (push.x + 14, push.bottom - 24),
+                            push.width - 28)
+
+        ky = zone(takes, "take bank")
+        takes_list = self._performer_takes(sess)
         slot_gap = 8
-        slot_w = (left_w - 28 - slot_gap * 3) // 4
+        slot_h = max(28, min(46, (takes.height - 92) // 2))
+        slot_w = (takes.width - 28 - slot_gap * 3) // 4
         for idx in range(MAX_PERFORMER_TAKES):
             row = idx // 4
             col = idx % 4
-            sx = left_x + 14 + col * (slot_w + slot_gap)
-            sy = ky + row * 44
-            take = takes[idx]
-            label = f"Take {idx + 1}"
-            tone = ""
+            sx = takes.x + 14 + col * (slot_w + slot_gap)
+            sy = ky + row * (slot_h + 8)
+            take = takes_list[idx]
+            label = f"T{idx + 1}"
             if take:
                 label += " Saved"
+            tone = ""
             if idx == playing_slot:
-                label = f"Take {idx + 1} Playing"
+                label = f"T{idx + 1} Live"
                 tone = "playing"
             elif idx == queued_slot:
-                label = f"Take {idx + 1} Queued"
+                label = f"T{idx + 1} Next"
                 tone = "queued"
             elif idx in chain_slots:
-                label = f"Take {idx + 1} Chain"
+                label = f"T{idx + 1} Chain"
                 tone = "chain"
-            self._button(
-                surface,
-                f"performer_take_select_{idx}",
-                pygame.Rect(sx, sy, slot_w, 36),
-                label,
-                active=idx == self._performer_take_idx,
-                tone=tone,
-            )
-        ay = ky + 94
+            self._button(surface, f"performer_take_select_{idx}",
+                         pygame.Rect(sx, sy, slot_w, slot_h),
+                         label, active=idx == self._performer_take_idx,
+                         tone=tone)
+        action_y = takes.bottom - 40
+        action_w = (takes.width - 28 - slot_gap * 3) // 4
         recall_label = "Queue Take" if status["running"] else "Play Take"
-        action_x = left_x + 14
-        action_w = (left_w - 28 - slot_gap * 3) // 4
         self._button(surface, "performer_take_save",
-                     pygame.Rect(action_x, ay, action_w, 36), "Save Take")
+                     pygame.Rect(takes.x + 14, action_y, action_w, 30),
+                     "Save")
         self._button(surface, "performer_take_load",
-                     pygame.Rect(action_x + action_w + slot_gap, ay,
-                                 action_w, 36), recall_label,
+                     pygame.Rect(takes.x + 14 + action_w + slot_gap, action_y,
+                                 action_w, 30), recall_label,
                      active=bool(self._current_take(sess)))
         self._button(surface, "performer_take_chain",
-                     pygame.Rect(action_x + (action_w + slot_gap) * 2, ay,
-                                 action_w, 36), "Chain Takes",
+                     pygame.Rect(takes.x + 14 + (action_w + slot_gap) * 2,
+                                 action_y, action_w, 30), "Chain",
                      active=bool(status.get("sequence_enabled")))
         self._button(surface, "performer_step_export",
-                     pygame.Rect(action_x + (action_w + slot_gap) * 3, ay,
-                                 action_w, 36), "Send To Steps")
+                     pygame.Rect(takes.x + 14 + (action_w + slot_gap) * 3,
+                                 action_y, action_w, 30), "Steps")
 
-        feel_rect = pygame.Rect(right_x, y, right_w, 158)
-        fy = self._panel(surface, feel_rect, "Feel Controls")
+        my = zone(macros, "macros and lanes")
+        self._button(surface, "performer_assign_sp",
+                     pygame.Rect(macros.x + 14, my, max(92, macros.width // 3),
+                                 28), "Use SP A1-A6",
+                     active=target.key == SP404_BEAT_BASS_TARGET)
+        self._button(surface, "performer_genre",
+                     pygame.Rect(macros.x + 22 + max(92, macros.width // 3),
+                                 my, max(74, macros.width // 4), 28),
+                     "Genre")
+        self._button(surface, "performer_generate",
+                     pygame.Rect(macros.right - max(82, macros.width // 4) - 14,
+                                 my, max(82, macros.width // 4), 28),
+                     "Generate")
+
+        compact_macros = macros.height < 190
+
+        def macro_tile(idx: int, title: str, value: str,
+                       down_key: str, up_key: str) -> None:
+            cols = 4
+            gap_x = 6
+            tile_w = (macros.width - 28 - gap_x * (cols - 1)) // cols
+            tile_h = 34 if compact_macros else 50
+            row = idx // cols
+            col = idx % cols
+            x = macros.x + 14 + col * (tile_w + gap_x)
+            y0 = my + 36 + row * (tile_h + (4 if compact_macros else 8))
+            box = pygame.Rect(x, y0, tile_w, tile_h)
+            pygame.draw.rect(surface, (22, 25, 36), box, border_radius=7)
+            pygame.draw.rect(surface, (52, 58, 78), box, 1, border_radius=7)
+            self._draw_text_fit(surface, font_tiny, title, (118, 132, 160),
+                                (box.x + 7, box.y + 6), box.width - 14)
+            self._draw_text_fit(surface, font_sm, value, theme.TEXT_BRIGHT,
+                                (box.x + 7, box.y + 19), box.width - 54)
+            btn_w = 20
+            self._button(surface, down_key,
+                         pygame.Rect(box.right - 46, box.y + 18, btn_w, 20),
+                         "-")
+            self._button(surface, up_key,
+                         pygame.Rect(box.right - 23, box.y + 18, btn_w, 20),
+                         "+")
+
         feel = self._performer_feel()
-
-        def param_row(row_y: int, title: str, value: str,
-                      down_key: str, up_key: str) -> None:
-            surface.blit(font.render(title, True, (226, 230, 242)),
-                         (right_x + 16, row_y + 7))
-            surface.blit(font_big.render(value, True, (236, 240, 248)),
-                         (right_x + 128, row_y + 1))
-            self._button(surface, down_key,
-                         pygame.Rect(right_x + right_w - 104, row_y, 42, 34),
-                         "-")
-            self._button(surface, up_key,
-                         pygame.Rect(right_x + right_w - 54, row_y, 42, 34),
-                         "+")
-
-        def compact_param_row(row_y: int, title: str, value: str,
-                              down_key: str, up_key: str) -> None:
-            surface.blit(font_sm.render(title, True, (226, 230, 242)),
-                         (right_x + 16, row_y + 5))
-            surface.blit(font.render(value, True, (236, 240, 248)),
-                         (right_x + 126, row_y + 4))
-            self._button(surface, down_key,
-                         pygame.Rect(right_x + right_w - 92, row_y, 36, 24),
-                         "-")
-            self._button(surface, up_key,
-                         pygame.Rect(right_x + right_w - 48, row_y, 36, 24),
-                         "+")
-
-        param_row(fy, "Swing", f"{feel['swing']:.0f}",
-                  "performer_swing_down", "performer_swing_up")
-        param_row(fy + 38, "Humanize", f"{feel['humanize']:.0f}",
-                  "performer_human_down", "performer_human_up")
-        param_row(fy + 76, "Gate Length", f"{feel['gate'] * 100:.0f}%",
-                  "performer_gate_down", "performer_gate_up")
-        surface.blit(font_sm.render(
-            "Running changes land on the next loop.",
-            True, (126, 138, 162)), (right_x + 16, fy + 116))
-
-        gen_rect = pygame.Rect(right_x, y + 170, right_w, 184)
-        gy = self._panel(surface, gen_rect, "Generator")
         gen = self._performer_generator_controls()
+        macro_tile(0, "Swing", f"{feel['swing']:.0f}",
+                   "performer_swing_down", "performer_swing_up")
+        macro_tile(1, "Human", f"{feel['humanize']:.0f}",
+                   "performer_human_down", "performer_human_up")
+        macro_tile(2, "Gate", f"{feel['gate'] * 100:.0f}%",
+                   "performer_gate_down", "performer_gate_up")
+        macro_tile(3, "Density", f"{gen['density']:.0f}",
+                   "performer_density_down", "performer_density_up")
+        if not compact_macros:
+            macro_tile(4, "Complex", f"{gen['complexity']:.0f}",
+                       "performer_complexity_down", "performer_complexity_up")
+            macro_tile(5, "Fill", f"{gen['fill']:.0f}",
+                       "performer_fill_down", "performer_fill_up")
+            macro_tile(6, "Bass", f"{gen['bass_activity']:.0f}",
+                       "performer_bass_activity_down",
+                       "performer_bass_activity_up")
+            macro_tile(7, "Var", f"{gen['variation']:.0f}",
+                       "performer_variation_down", "performer_variation_up")
 
-        def gen_row(row_y: int, title: str, field: str) -> None:
-            compact_param_row(
-                row_y, title, f"{gen[field]:.0f}",
-                f"performer_{field}_down", f"performer_{field}_up")
-
-        gen_row(gy, "Density", "density")
-        gen_row(gy + 28, "Complexity", "complexity")
-        gen_row(gy + 56, "Fill", "fill")
-        gen_row(gy + 84, "Bass Activity", "bass_activity")
-        gen_row(gy + 112, "Variation", "variation")
-        surface.blit(font_sm.render(
-            "Encoder pages: Feel / Gen / Lanes / Takes",
-            True, (126, 138, 162)), (right_x + 16, gy + 146))
-
-        lanes_rect = pygame.Rect(right_x, y + 366, right_w, 154)
-        ly = self._panel(surface, lanes_rect, "Lanes")
         lane_controls = self._performer_lane_controls()
+        lane_y = macros.bottom - 30 if compact_macros else min(
+            macros.bottom - 66, my + 160)
         lane_gap = 6
-        lane_w = (right_w - 32 - lane_gap * 3) // 4
+        lane_w = (macros.width - 28 - lane_gap * 3) // 4
         for idx, lane in enumerate(PERFORMER_LANES):
-            lx = right_x + 16 + idx * (lane_w + lane_gap)
+            lx = macros.x + 14 + idx * (lane_w + lane_gap)
             label = self._lane_label(lane)
             if lane_controls[lane]["mute"]:
                 label += " M"
-            self._button(
-                surface,
-                f"performer_lane_select_{idx}",
-                pygame.Rect(lx, ly, lane_w, 26),
-                label,
-                active=idx == self._performer_lane_idx,
-                danger=bool(lane_controls[lane]["mute"]),
-            )
+            self._button(surface, f"performer_lane_select_{idx}",
+                         pygame.Rect(lx, lane_y, lane_w, 26), label,
+                         active=idx == self._performer_lane_idx,
+                         danger=bool(lane_controls[lane]["mute"]))
         lane = self._performer_lane()
         lane_ctrl = lane_controls[lane]
-        compact_param_row(ly + 34, "Lane Gate",
-                          f"{lane_ctrl['gate'] * 100:.0f}%",
-                          "performer_lane_gate_down",
-                          "performer_lane_gate_up")
-        compact_param_row(ly + 62, "Lane Level",
-                          f"{lane_ctrl['level'] * 100:.0f}%",
-                          "performer_lane_level_down",
-                          "performer_lane_level_up")
-        gesture_gap = 5
-        gesture_x = right_x + 16
-        gesture_w = (right_w - 32 - gesture_gap * 5) // 6
+        if compact_macros:
+            return
+        row_y = lane_y + 34
+        half = (macros.width - 28 - 8) // 2
+        self._draw_text_fit(surface, font_tiny,
+                            f"{self._lane_label(lane)} gate {lane_ctrl['gate'] * 100:.0f}%",
+                            (150, 162, 184), (macros.x + 14, row_y + 7),
+                            half - 54)
+        self._button(surface, "performer_lane_gate_down",
+                     pygame.Rect(macros.x + half - 36, row_y, 26, 24), "-")
+        self._button(surface, "performer_lane_gate_up",
+                     pygame.Rect(macros.x + half - 6, row_y, 26, 24), "+")
+        self._draw_text_fit(surface, font_tiny,
+                            f"level {lane_ctrl['level'] * 100:.0f}%",
+                            (150, 162, 184), (macros.x + 22 + half,
+                                              row_y + 7), half - 54)
+        self._button(surface, "performer_lane_level_down",
+                     pygame.Rect(macros.right - 66, row_y, 26, 24), "-")
+        self._button(surface, "performer_lane_level_up",
+                     pygame.Rect(macros.right - 36, row_y, 26, 24), "+")
+        gesture_y = row_y + 32
         gestures = [
             ("performer_lane_mute", "Mute" if not lane_ctrl["mute"] else "On",
              bool(lane_ctrl["mute"])),
@@ -2753,20 +2819,15 @@ class ClipScreen:
             ("performer_gesture_drop_drums", "Drop", False),
             ("performer_gesture_fill", "Fill", False),
         ]
+        gesture_gap = 5
+        gesture_w = (macros.width - 28 - gesture_gap * 5) // 6
         for idx, (key, label, danger) in enumerate(gestures):
             self._button(
-                surface,
-                key,
-                pygame.Rect(
-                    gesture_x + idx * (gesture_w + gesture_gap),
-                    ly + 92,
-                    gesture_w,
-                    24,
-                ),
-                label,
-                danger=danger,
-                tone="queued" if key == "performer_gesture_fill" else "",
-            )
+                surface, key,
+                pygame.Rect(macros.x + 14 + idx * (gesture_w + gesture_gap),
+                            gesture_y, gesture_w, 24),
+                label, danger=danger,
+                tone="queued" if key == "performer_gesture_fill" else "")
 
     # ── Touch ────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event) -> bool:
