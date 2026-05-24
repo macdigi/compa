@@ -197,6 +197,12 @@ def _sp404_pad_path(project: str, bank: int, pad: int) -> str:
     )
 
 
+def _sp404_padconf_path(project: str) -> str:
+    if not re.fullmatch(r"PROJECT_[0-9]{2}", project):
+        raise ValueError("project must look like PROJECT_05")
+    return f"/SP404REMOTE///ROLAND/SP-404MKII/{project}/PADCONF.BIN"
+
+
 def _build_file_read_path(path: str) -> bytes:
     path_bytes = path.encode("ascii")
     if len(path_bytes) > 220:
@@ -334,6 +340,124 @@ def _parse_rfwv_header(data: bytes) -> dict | None:
     return parsed
 
 
+def _parse_rfpd_header(data: bytes) -> dict | None:
+    pos = data.find(b"RFPD")
+    if pos < 0:
+        return None
+    header = data[pos:pos + 192]
+    parsed = {
+        "offset": pos,
+        "header_hex": _hex(header[:64]),
+    }
+    if len(data) >= pos + 16:
+        header_bytes = int.from_bytes(data[pos + 4:pos + 8], "big")
+        version = int.from_bytes(data[pos + 8:pos + 12], "little")
+        pad_table_bytes = int.from_bytes(data[pos + 12:pos + 16], "big")
+        parsed.update({
+            "header_bytes": header_bytes,
+            "version_le": version,
+            "pad_table_bytes": pad_table_bytes,
+            "known_pad_count": 160,
+        })
+        if pad_table_bytes > 0:
+            parsed["pad_record_bytes"] = pad_table_bytes // 160
+            parsed["pad_table_offset"] = header_bytes
+    project_pos = header.find(b"PROJECT_")
+    if project_pos >= 0:
+        raw = header[project_pos:project_pos + 32].split(b"\x00", 1)[0]
+        parsed["project_name"] = raw.decode("ascii", "replace").strip()
+        parsed["project_name_offset"] = project_pos
+    return parsed
+
+
+def _pad_label_to_index(label: str) -> int:
+    text = label.strip().upper().replace("-", "").replace(" ", "")
+    match = re.fullmatch(r"([A-J])0*([1-9]|1[0-6])", text)
+    if not match:
+        raise ValueError("pad must look like A1, A01, B16, ... J16")
+    bank = ord(match.group(1)) - ord("A")
+    pad = int(match.group(2)) - 1
+    return bank * 16 + pad
+
+
+def _pad_index_label(index: int) -> str:
+    if not 0 <= index < 160:
+        return f"#{index}"
+    return f"{chr(ord('A') + index // 16)}{index % 16 + 1:02d}"
+
+
+def _extract_rfpd_payload(data: bytes) -> bytes:
+    pos = data.find(b"RFPD")
+    if pos < 0:
+        return b""
+    return data[pos:]
+
+
+def _load_rfpd_dump(path: Path) -> tuple[bytes, dict]:
+    data = path.read_bytes()
+    payload = _extract_rfpd_payload(data)
+    if not payload:
+        raise ValueError(f"{path} does not contain RFPD")
+    header = _parse_rfpd_header(payload)
+    if not header:
+        raise ValueError(f"{path} has an incomplete RFPD header")
+    return payload, header
+
+
+def _padconf_record(payload: bytes, header: dict, index: int) -> bytes:
+    table_offset = int(header.get("pad_table_offset") or 0)
+    record_bytes = int(header.get("pad_record_bytes") or 0)
+    if record_bytes <= 0:
+        return b""
+    start = table_offset + index * record_bytes
+    end = start + record_bytes
+    if start >= len(payload):
+        return b""
+    return payload[start:min(end, len(payload))]
+
+
+def _record_words(record: bytes, limit: int = 16) -> list[str]:
+    out: list[str] = []
+    usable = min(len(record), limit * 4)
+    for offset in range(0, usable, 4):
+        chunk = record[offset:offset + 4]
+        if len(chunk) < 4:
+            break
+        out.append(f"{offset:02x}:{int.from_bytes(chunk, 'big'):08x}")
+    return out
+
+
+def _padconf_summary(payload: bytes, header: dict, records: int) -> dict:
+    record_bytes = int(header.get("pad_record_bytes") or 0)
+    table_offset = int(header.get("pad_table_offset") or 0)
+    available = max(0, len(payload) - table_offset)
+    full_records = available // record_bytes if record_bytes > 0 else 0
+    summary = {
+        "bytes": len(payload),
+        "header": header,
+        "full_records_available": full_records,
+        "records": [],
+    }
+    for index in range(min(records, full_records)):
+        record = _padconf_record(payload, header, index)
+        summary["records"].append({
+            "pad": _pad_index_label(index),
+            "offset": table_offset + index * record_bytes,
+            "bytes": len(record),
+            "words": _record_words(record),
+        })
+    return summary
+
+
+def _default_padconf_dump_path(project: str, label: str, ext: str) -> Path:
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label.strip()) if label else ""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    name = f"padconf_{project}"
+    if safe_label:
+        name += f"_{safe_label}"
+    return CAPTURE_DIR / f"{name}_{stamp}.{ext}"
+
+
 def _duration_from_rfwv(header: dict) -> float:
     data_size = int(header.get("size_be") or 0)
     sample_rate = int(header.get("sample_rate") or 0)
@@ -469,8 +593,14 @@ def cmd_read_path(args: argparse.Namespace) -> int:
 
     rfwv = _parse_rfwv_header(combined)
     if not rfwv:
-        print("\nRFWV: not found")
-        return 1
+        rfpd = _parse_rfpd_header(combined)
+        if not rfpd:
+            print("\nRFWV/RFPD: not found")
+            return 1
+        print("\nRFPD:")
+        for key, value in rfpd.items():
+            print(f"  {key}: {value}")
+        return 0
 
     print("\nRFWV:")
     for key, value in rfwv.items():
@@ -478,6 +608,138 @@ def cmd_read_path(args: argparse.Namespace) -> int:
     duration = _duration_from_rfwv(rfwv)
     if duration:
         print(f"  duration: {duration:.2f}s")
+    return 0
+
+
+def cmd_padconf_dump(args: argparse.Namespace) -> int:
+    """Read the first available PADCONF.BIN chunk and save it for diffing."""
+    try:
+        remote_path = _sp404_padconf_path(args.project)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    last_error: Exception | None = None
+    for attempt in range(max(1, args.retries + 1)):
+        try:
+            _port, results, file_key = _transact_read_path(
+                remote_path,
+                args.timeout,
+                preamble=False,
+                dynamic_key=True,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt >= args.retries:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 1
+            time.sleep(args.retry_delay)
+    else:
+        print(f"ERROR: {last_error}", file=sys.stderr)
+        return 1
+
+    combined = b"".join(response for _label, _payload, response in results)
+    payload = _extract_rfpd_payload(combined)
+    if not payload:
+        print("ERROR: RFPD not found in PADCONF response", file=sys.stderr)
+        return 1
+    header = _parse_rfpd_header(payload)
+    if not header:
+        print("ERROR: incomplete RFPD header", file=sys.stderr)
+        return 1
+
+    CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.out).expanduser() if args.out else (
+        _default_padconf_dump_path(args.project, args.label, "bin"))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(payload)
+    summary = _padconf_summary(payload, header, args.records)
+    summary.update({
+        "project": args.project,
+        "remote_path": remote_path,
+        "file_key": file_key.hex(" ") if file_key else "",
+        "dump": str(out_path),
+    })
+    json_path = out_path.with_suffix(out_path.suffix + ".json")
+    json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    print(f"dump: {out_path}")
+    print(f"summary: {json_path}")
+    print(f"remote_path: {remote_path}")
+    print(f"file_key: {summary['file_key'] or '(none)'}")
+    print("RFPD:")
+    for key, value in header.items():
+        print(f"  {key}: {value}")
+    print(f"saved_bytes: {len(payload)}")
+    print(f"full_records_available: {summary['full_records_available']}")
+    for rec in summary["records"]:
+        print(
+            f"{rec['pad']} @ 0x{rec['offset']:04x} "
+            f"{rec['bytes']} bytes  {' '.join(rec['words'])}"
+        )
+    return 0
+
+
+def cmd_padconf_diff(args: argparse.Namespace) -> int:
+    """Compare two PADCONF dumps by absolute and per-pad byte offsets."""
+    try:
+        before, before_header = _load_rfpd_dump(Path(args.before).expanduser())
+        after, after_header = _load_rfpd_dump(Path(args.after).expanduser())
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if args.pad:
+        try:
+            indexes = [_pad_label_to_index(args.pad)]
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+    else:
+        indexes = list(range(160))
+
+    record_bytes = int(before_header.get("pad_record_bytes") or 0)
+    table_offset = int(before_header.get("pad_table_offset") or 0)
+    if record_bytes <= 0 or table_offset <= 0:
+        print("ERROR: missing pad table metadata", file=sys.stderr)
+        return 1
+
+    total_changes = 0
+    changed_pads = 0
+    for index in indexes:
+        b_rec = _padconf_record(before, before_header, index)
+        a_rec = _padconf_record(after, after_header, index)
+        if not b_rec and not a_rec:
+            continue
+        max_len = max(len(b_rec), len(a_rec))
+        changes = []
+        for offset in range(max_len):
+            b = b_rec[offset] if offset < len(b_rec) else None
+            a = a_rec[offset] if offset < len(a_rec) else None
+            if b != a:
+                changes.append((offset, b, a))
+        if not changes:
+            continue
+        changed_pads += 1
+        total_changes += len(changes)
+        pad_label = _pad_index_label(index)
+        print(f"{pad_label}: {len(changes)} changed byte(s)")
+        for offset, b, a in changes[:args.limit]:
+            abs_offset = table_offset + index * record_bytes + offset
+            b_txt = "--" if b is None else f"{b:02x}"
+            a_txt = "--" if a is None else f"{a:02x}"
+            print(
+                f"  record+0x{offset:02x} abs=0x{abs_offset:04x} "
+                f"{b_txt} -> {a_txt}"
+            )
+        if len(changes) > args.limit:
+            print(f"  ... {len(changes) - args.limit} more")
+    if changed_pads == 0:
+        print("no pad-record byte changes found")
+    else:
+        print(f"changed_pads: {changed_pads}")
+        print(f"changed_bytes: {total_changes}")
     return 0
 
 
@@ -1443,7 +1705,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bytes", type=int, default=256)
     p.set_defaults(func=cmd_project_probe)
 
-    p = sub.add_parser("read-path", help="read one observed SP remote .SMP header chunk")
+    p = sub.add_parser("read-path", help="read one observed SP remote file header chunk")
     p.add_argument("--project", default="PROJECT_05")
     p.add_argument("--bank", type=int, default=1)
     p.add_argument("--pad", type=int, default=1)
@@ -1463,6 +1725,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="use the old captured follow-up key instead of the path-open response key",
     )
     p.set_defaults(func=cmd_read_path, preamble=True, dynamic_key=True)
+
+    p = sub.add_parser(
+        "padconf-dump",
+        help="read PADCONF.BIN header/first pad records and save a diffable dump",
+    )
+    p.add_argument("--project", default="PROJECT_05")
+    p.add_argument("--label", default="", help="optional label in output filename")
+    p.add_argument("--out", default="", help="output .bin path")
+    p.add_argument("--records", type=int, default=2, help="pad records to summarize")
+    p.add_argument("--timeout", type=float, default=2.5)
+    p.add_argument("--retries", type=int, default=1)
+    p.add_argument("--retry-delay", type=float, default=1.0)
+    p.set_defaults(func=cmd_padconf_dump)
+
+    p = sub.add_parser(
+        "padconf-diff",
+        help="diff two PADCONF dumps by pad-record byte offsets",
+    )
+    p.add_argument("before")
+    p.add_argument("after")
+    p.add_argument("--pad", default="", help="optional pad label, e.g. A01")
+    p.add_argument("--limit", type=int, default=64)
+    p.set_defaults(func=cmd_padconf_diff)
 
     p = sub.add_parser("read-bank", help="read observed SP remote .SMP headers for one bank")
     p.add_argument("--project", default="PROJECT_05")

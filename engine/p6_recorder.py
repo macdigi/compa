@@ -84,6 +84,36 @@ WAVEFORM_POINTS = 800  # Match screen width for display
 RECALL_BUFFER_SECONDS = 60  # Default rolling buffer length — runtime configurable
 RECALL_BUFFER_SECONDS_MIN = 15
 RECALL_BUFFER_SECONDS_MAX = 1800  # 30 min absolute hard cap (RAM safety)
+MONITOR_GAIN_DEFAULT = 1.5
+MONITOR_GAIN_MIN = 0.25
+MONITOR_GAIN_MAX = 3.0
+
+
+def _clamp_monitor_gain(gain: float) -> float:
+    return max(MONITOR_GAIN_MIN, min(MONITOR_GAIN_MAX, float(gain)))
+
+
+def _apply_monitor_gain(indata: np.ndarray, gain: float) -> np.ndarray:
+    """Return monitor-route audio with gain and a ceiling-safe soft limiter.
+
+    The MON path is for sampling into another box, so keep it strictly
+    linear until the boosted signal nears full-scale. Only peaks above the
+    knee get shaped, avoiding the brittle sound of hard digital clipping.
+    """
+    gain = _clamp_monitor_gain(gain)
+    if indata.size == 0 or abs(gain - 1.0) < 0.0001:
+        return indata
+    boosted = indata.astype(np.float32, copy=True)
+    boosted *= gain
+    knee = 0.95
+    abs_boosted = np.abs(boosted)
+    over = abs_boosted > knee
+    if np.any(over):
+        sign = np.sign(boosted[over])
+        excess = (abs_boosted[over] - knee) / (1.0 - knee)
+        limited = knee + (1.0 - knee) * np.tanh(excess)
+        boosted[over] = sign * limited
+    return boosted
 
 
 class P6Recorder:
@@ -96,7 +126,8 @@ class P6Recorder:
 
     def __init__(self, recording_dir: str, device_hint: str = "P-6",
                  recall_buffer_seconds: int = RECALL_BUFFER_SECONDS,
-                 record_pre_roll_seconds: float = 0.0):
+                 record_pre_roll_seconds: float = 0.0,
+                 monitor_gain: float = MONITOR_GAIN_DEFAULT):
         self._recording_dir = recording_dir
         self._device_hint = device_hint
         self._device_index: Optional[int] = None
@@ -162,6 +193,8 @@ class P6Recorder:
         self._monitor_out_buf_lock = threading.Lock()
         self._monitor_out_write: int = 0  # cumulative frames written
         self._monitor_out_read: int = 0   # cumulative frames read
+        self._monitor_out_tail = np.zeros(P6_CHANNELS, dtype=np.float32)
+        self._monitor_gain = _clamp_monitor_gain(monitor_gain)
         # Resampler (only used when input/output rates can't be matched —
         # e.g. P-6 is 44100-only and SP-404 is 48000-only)
         self._monitor_resampler: Optional["_LinearResampler"] = None
@@ -353,6 +386,41 @@ class P6Recorder:
         self._enqueue(self._switch_device_impl, hint, preferred_rate, user_initiated)
         return True
 
+    def switch_device_then_monitor_output(
+        self, hint: str, output_device_idx: int, output_sample_rate: int = 0,
+        preferred_rate: int = 0, user_initiated: bool = False
+    ) -> bool:
+        """Serially bind input, then open the monitor output.
+
+        MON routing must not open the destination OutputStream while the
+        recorder still has the old input stream. During SP↔P-6 handoffs that
+        brief overlap can route a device into itself and create crackly
+        feedback. This keeps the close/probe/open/output sequence on the
+        recorder worker thread.
+        """
+        self._enqueue(
+            self._switch_device_then_monitor_output_impl,
+            hint, output_device_idx, output_sample_rate,
+            preferred_rate, user_initiated,
+        )
+        return True
+
+    def _switch_device_then_monitor_output_impl(
+        self, hint: str, output_device_idx: int, output_sample_rate: int = 0,
+        preferred_rate: int = 0, user_initiated: bool = False
+    ) -> bool:
+        ok = self._switch_device_impl(
+            hint, preferred_rate=preferred_rate,
+            user_initiated=user_initiated,
+        )
+        if not ok:
+            return False
+        if self._stream is None:
+            self._start_monitoring_impl()
+            if self._stream is None:
+                return False
+        return self.start_monitor_output(output_device_idx, output_sample_rate)
+
     def _switch_device_impl(self, hint: str, preferred_rate: int = 0,
                             user_initiated: bool = False) -> bool:
         """Worker-thread body of switch_device. Stops monitoring,
@@ -461,6 +529,20 @@ class P6Recorder:
         """ALSA input underflow events since recorder started."""
         return self._input_underruns
 
+    @property
+    def monitor_gain(self) -> float:
+        """Gain applied only to live MON output routing, not recorded WAVs."""
+        return self._monitor_gain
+
+    def set_monitor_gain(self, gain: float) -> float:
+        """Set live MON output gain. Safe to call while a route is active."""
+        self._monitor_gain = _clamp_monitor_gain(gain)
+        return self._monitor_gain
+
+    def adjust_monitor_gain(self, delta: float) -> float:
+        """Bump live MON output gain by delta and return the clamped value."""
+        return self.set_monitor_gain(self._monitor_gain + float(delta))
+
     # ── Stream management ───────────────────────────────────────────────
 
     def start_monitoring(self) -> None:
@@ -506,6 +588,13 @@ class P6Recorder:
                 return
             n = self._monitor_out_buf_frames
             avail = self._monitor_out_write - self._monitor_out_read
+            if self._monitor_out_rate > 0:
+                target = max(frames * 4, int(0.25 * self._monitor_out_rate))
+                target = min(target, max(0, n - frames))
+                if avail > target + frames:
+                    drop = avail - target
+                    self._monitor_out_read += drop
+                    avail -= drop
             take = min(frames, max(0, avail))
             if take > 0:
                 r = self._monitor_out_read % n
@@ -517,7 +606,20 @@ class P6Recorder:
                     outdata[first:take] = buf[:take - first]
                 self._monitor_out_read += take
             if take < frames:
-                outdata[take:].fill(0)
+                missing = frames - take
+                tail = (
+                    outdata[take - 1].copy()
+                    if take > 0 else self._monitor_out_tail.copy()
+                )
+                if float(np.max(np.abs(tail))) > 0.00001:
+                    fade = np.linspace(1.0, 0.0, missing,
+                                       dtype=np.float32)[:, None]
+                    outdata[take:] = tail[None, :] * fade
+                else:
+                    outdata[take:].fill(0)
+                self._monitor_out_tail.fill(0)
+            elif frames > 0:
+                self._monitor_out_tail = outdata[frames - 1].copy()
 
     def start_monitor_output(self, device_idx: int, sample_rate: int = 0) -> bool:
         """Start forwarding audio to a second output device (headphones).
@@ -539,20 +641,23 @@ class P6Recorder:
 
         for rate in rates:
             try:
-                # 500ms ring buffer absorbs clock drift between two USB
-                # devices (their crystals don't tick at the same Hz).
-                buf_frames = max(int(0.5 * rate), 8192)
-                # Prefill ~150ms with silence — input pushes ~93ms at a
+                # 1.5s ring buffer absorbs USB scheduling jitter and clock
+                # drift between devices (their crystals don't tick at the
+                # same Hz).
+                buf_frames = max(int(1.5 * rate), 16384)
+                # Prefill ~250ms with silence — input pushes ~93ms at a
                 # time on Pi audio, so this guarantees the output never
                 # sees an empty buffer between input arrivals (which is
                 # what produced the residual crackle/dropouts).
-                prefill_frames = int(0.15 * rate)
+                prefill_frames = int(0.25 * rate)
                 with self._monitor_out_buf_lock:
                     self._monitor_out_buf = np.zeros(
                         (buf_frames, P6_CHANNELS), dtype=np.float32)
                     self._monitor_out_buf_frames = buf_frames
                     self._monitor_out_write = prefill_frames
                     self._monitor_out_read = 0
+                    self._monitor_out_tail = np.zeros(
+                        P6_CHANNELS, dtype=np.float32)
                 self._monitor_out_rate = rate
                 self._monitor_out_device = device_idx
 
@@ -561,7 +666,7 @@ class P6Recorder:
                     samplerate=rate,
                     channels=P6_CHANNELS,
                     dtype="float32",
-                    blocksize=512,
+                    blocksize=2048,
                     latency="high",
                     callback=self._monitor_output_callback,
                 )
@@ -604,6 +709,7 @@ class P6Recorder:
             self._monitor_out_buf_frames = 0
             self._monitor_out_write = 0
             self._monitor_out_read = 0
+            self._monitor_out_tail = np.zeros(P6_CHANNELS, dtype=np.float32)
         self._monitor_resampler = None
 
     def stop_monitoring(self, force: bool = False) -> None:
@@ -941,6 +1047,7 @@ class P6Recorder:
             rs = self._monitor_resampler
             if rs is not None:
                 mon_data = rs.process(indata)
+            mon_data = _apply_monitor_gain(mon_data, self._monitor_gain)
             n_mon = mon_data.shape[0]
             if n_mon > 0:
                 with self._monitor_out_buf_lock:

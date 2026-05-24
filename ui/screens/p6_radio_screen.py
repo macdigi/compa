@@ -658,7 +658,7 @@ class P6RadioScreen:
         buf = radio._play_buf
         buf_size = radio._play_buf_size
         wpos = radio._play_write
-        display_frames = min(4096, buf_size)
+        display_frames = min(self.app.scope_window_frames(), buf_size)
 
         # Read most recent chunk from the ring buffer using modular indexing
         end = wpos % buf_size
@@ -670,16 +670,19 @@ class P6RadioScreen:
 
         if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
             mono = recent.mean(axis=1) if recent.ndim > 1 else recent
-            step = max(1, len(mono) // wave_w)
+            point_count = self.app.scope_point_count(wave_w)
+            step = max(1, len(mono) // point_count)
             points = []
             dc = theme.ACCENT
 
-            for px in range(wave_w):
+            for px in range(point_count):
                 si = px * step
                 if si < len(mono):
                     val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
                     py = center_y - int(val * half_h)
-                    points.append((scope_rect.x + 4 + px, py))
+                    x = scope_rect.x + 4 + int(
+                        px * max(1, wave_w - 1) / max(1, point_count - 1))
+                    points.append((x, py))
 
             if len(points) > 1:
                 # Filled waveform via single polygon (was a per-pixel

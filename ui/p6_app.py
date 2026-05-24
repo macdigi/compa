@@ -61,6 +61,7 @@ from engine.usb_storage import AkaiStorageManager
 from engine.network_manager import WifiManager, BluetoothManager
 from engine.chromatic_keyboard import ChromaticKeyboard
 from engine.controller_mapper import ControllerMapper
+from engine.system_monitor import SystemMonitor
 from ui.video_recorder import VideoRecorder, DemoScheduler, build_demo_sequence
 from engine.p6_librarian import P6Librarian
 from engine.sp404_librarian import SP404Librarian
@@ -100,6 +101,32 @@ def load_config() -> dict:
         # start at REC). Anything > 0 silently includes the prior N seconds
         # from the recall buffer. Capped at RECALL_BUFFER_SECONDS.
         "RECORD_PRE_ROLL_SECONDS": "0",
+        # Live MON route gain. This affects device-to-device sampling
+        # pass-through only; local WAV recordings remain raw input level.
+        "MONITOR_GAIN": "1.5",
+        # SP-404MKII Push 2 integration. The hardware does not transmit
+        # pad note-off when a one-shot/gated sample naturally finishes, so
+        # Compa uses audio silence as a conservative fallback to avoid
+        # stuck white play-state pads.
+        "SP404_PAD_LED_SILENCE_THRESHOLD": "0.008",
+        "SP404_PAD_LED_SILENCE_SECONDS": "1.2",
+        "SP404_PAD_LED_MIN_SECONDS": "0.5",
+        # Direct FX 1-5 are user-assignable on the SP. These are Roland's
+        # factory defaults; Settings can override them when a unit has a
+        # custom Direct FX layout.
+        "SP404_DIRECT_FX_1": "Filter+Drive",
+        "SP404_DIRECT_FX_2": "Resonator",
+        "SP404_DIRECT_FX_3": "TimeCtrlDly",
+        "SP404_DIRECT_FX_4": "Isolator",
+        "SP404_DIRECT_FX_5": "DJFX Looper",
+        # Pi 5 defaults: a little smoother than the old Pi 3-era 30 fps
+        # without jumping straight to a 60 fps render loop.
+        "UI_FPS": "45",
+        "SYSTEM_METER_ENABLED": "1",
+        # Live scope quality. Points are capped by the rendered waveform
+        # width; the settings screen can trade detail against CPU.
+        "SCOPE_POINTS": "640",
+        "SCOPE_WINDOW_FRAMES": "4096",
     }
     config_path = os.path.join(PROJECT_ROOT, "setup", "config.env")
     if os.path.exists(config_path):
@@ -160,6 +187,14 @@ class P6App:
         if text in ("0", "false", "no", "off", "disabled"):
             return False
         return None
+
+    def _config_int(self, key: str, default: int,
+                    min_value: int, max_value: int) -> int:
+        try:
+            value = int(float(self.config.get(key, default)))
+        except Exception:
+            value = int(default)
+        return max(min_value, min(max_value, value))
 
     @staticmethod
     def _raspberry_pi_generation() -> int | None:
@@ -290,8 +325,9 @@ class P6App:
         self._touch_scroll_threshold = 15  # pixels before drag becomes scroll
 
         self.clock = pygame.time.Clock()
-        self.fps = 30
+        self.fps = self._config_int("UI_FPS", 45, 15, 60)
         self.running = True
+        self.system_monitor = SystemMonitor(interval=1.0)
 
         # ── Auto-record setting ─────────────────────────────────────
         self.auto_record = self.config.get("P6_AUTO_RECORD", "1") == "1"
@@ -338,11 +374,12 @@ class P6App:
         self.push2_page: int = 0
         # Pad-bank page. 0 = A-D, 1 = E-H, 2 = I-J (SP-404 MK2 has 10 banks).
         self.push2_pad_page: int = 0
-        # Control-mode pad layout. 0 = SP-style 2-row strips (default),
-        # 1 = 4×4 quadrants. Cycled by the Push 2 Layout button. P-6
-        # has its own variants (row-per-bank vs. quadrant); index meaning
-        # is per-device — see _push2_control_layout_count().
-        self.push2_control_layout: int = 0
+        # Control-mode pad layout. 0 = row/strip layout, 1 = 4×4
+        # quadrants. Cycled by the Push 2 Layout button. SP defaults
+        # to quadrants; P-6 defaults to rows so all banks are visible.
+        # Index meaning is per-device — see _push2_control_layout_count().
+        self.push2_control_layout: int = self._push2_default_control_layout_for(
+            getattr(self.device_manager, "focus_key", None))
         # Push 2 surface mode — tracks the focused device-workspace tab
         # so the Push 2 surface re-roles (control / keys / sequence /
         # pattern / etc.) in lockstep with the Compa touchscreen.
@@ -354,6 +391,17 @@ class P6App:
         # arrived from the focused device. Cleared on the matching
         # note-off (mirrors the device's own pad-held lighting).
         self._push2_active_device_pads: set[int] = set()
+        # Device/pad identities currently playing and shown as white
+        # on the Push 2 control grid. Stored by identity so layout/page
+        # repaints can reapply the highlight at the correct pad index.
+        self._push2_active_control_pads: set[tuple[str, int, int]] = set()
+        self._push2_control_pad_started_at: dict[
+            tuple[str, int, int], float] = {}
+        self._push2_control_pad_release_notes: dict[
+            tuple[str, int, int], tuple[int, int]] = {}
+        self._push2_current_control_pad: tuple[str, int, int] | None = None
+        self._push2_last_control_pad: tuple[str, int, int] | None = None
+        self._push2_sp_silence_started_at: float = 0.0
         # Pending screenshot schedule — None when nothing pending.
         # Fires from `_maybe_fire_screenshot` during _update once the
         # countdown elapses. See `schedule_screenshot`.
@@ -404,6 +452,10 @@ class P6App:
         # Per-bus pre-mute volumes so Mute toggles restore the prior
         # level instead of jumping back to a fixed 100.
         self._sp_pre_mute_vol: dict[int, int] = {}
+        # Push 2 encoder 8 is a browse control for the SP-404 FX list.
+        # Accumulate encoder ticks so one small twist does not race
+        # through the full 40-ish effect menu.
+        self._sp404_fx_select_accum: dict[int, int] = {}
         # Pattern-launch page (Push 2's 8 launch buttons → patterns
         # page*8..page*8+7). D-pad left/right cycles in non-keys modes.
         self.push2_launch_page: int = 0
@@ -492,6 +544,10 @@ class P6App:
 
         # ── Twister Genius (auto-detect + connect) ───────────────────
         self.twister = TwisterGenius()
+        # App-owned SP FX bus selection. Push 2, touchscreen workspace,
+        # and Twister all sync through this so CC#19/83/16-18/80-82 land
+        # on the same bus the UI says is selected.
+        self._sp404_active_fx_bus: int = 0
 
         # ── Spectra Mapper (auto-detect + connect) ───────────────────
         self.spectra = SpectraMapper()
@@ -599,6 +655,8 @@ class P6App:
             print(f"Librarian init failed: {e}", flush=True)
             self.p6_lib = None
             self.sp404_lib = None
+        self._sp404_padconf_refreshing = False
+        self._sp404_padconf_last_refresh = 0.0
 
         # ── Recorder ─────────────────────────────────────────────────
         try:
@@ -609,11 +667,16 @@ class P6App:
             _pre_roll_secs = float(self.config.get("RECORD_PRE_ROLL_SECONDS", "0"))
         except (TypeError, ValueError):
             _pre_roll_secs = 0.0
+        try:
+            _monitor_gain = float(self.config.get("MONITOR_GAIN", "1.5"))
+        except (TypeError, ValueError):
+            _monitor_gain = 1.5
         self.recorder = P6Recorder(
             recording_dir=self.config["P6_RECORDING_DIR"],
             device_hint=self.config["AUDIO_DEVICE_HINT"],
             recall_buffer_seconds=_recall_secs,
             record_pre_roll_seconds=_pre_roll_secs,
+            monitor_gain=_monitor_gain,
         )
 
         # ── Link Audio broadcaster ────────────────────────────────────
@@ -1378,6 +1441,10 @@ class P6App:
     def _on_twister_state(self):
         """Called when Twister loads/kills an effect."""
         tw = self.twister
+        try:
+            self._sp404_set_active_bus(int(tw.active_bus), announce=False)
+        except Exception:
+            pass
         bus = tw.active_bus + 1
         active_knob = tw._bus_fx_state.get(tw.active_bus)
         if active_knob is not None:
@@ -1404,7 +1471,7 @@ class P6App:
         if knob >= len(self.twister.slots):
             return
         slot = self.twister.slots[knob]
-        bus = self.twister.active_bus
+        bus = self._sp404_active_bus_index()
         live = self.live_cc.get(bus, {})
         cc_names = {16: "Ctrl1", 17: "Ctrl2", 18: "Ctrl3",
                     80: "Ctrl4", 81: "Ctrl5", 82: "Ctrl6"}
@@ -1448,6 +1515,29 @@ class P6App:
 
     # ── Push 2 callbacks ─────────────────────────────────────────────
 
+    def _push2_control_pad_to_bank_pad(self, dev_key: str,
+                                       idx: int) -> tuple[int, int]:
+        """Map a Push 2 control-grid pad to (bank, pad_in_bank)."""
+        from engine.push2 import Push2
+        if dev_key == "SP-404MKII":
+            if self.push2_control_layout == 1:
+                bank_in_page, pad_in_bank = Push2.quad_pad_to_bank_pad(idx)
+            else:
+                bank_in_page, pad_in_bank = Push2.two_row_pad_to_bank_pad(idx)
+            if pad_in_bank < 0:
+                return (-1, -1)
+            return (self.push2_pad_page * 4 + bank_in_page, pad_in_bank)
+        if dev_key == "P-6":
+            if self.push2_control_layout == 1:
+                bank_in_page, pad_in_bank = Push2.p6_quad_pad_to_bank_pad(idx)
+                effective_bank = self.push2_pad_page * 4 + bank_in_page
+            else:
+                effective_bank, pad_in_bank = Push2.p6_row_pad_to_bank_pad(idx)
+            if pad_in_bank < 0:
+                return (-1, -1)
+            return (effective_bank, pad_in_bank)
+        return (-1, -1)
+
     def _on_push2_pad(self, idx: int, velocity: int):
         """Push 2 pad hit. Dispatch depends on the current push2_mode,
         which mirrors the focused device-workspace tab on Compa
@@ -1471,20 +1561,44 @@ class P6App:
             self._on_push2_looper_pad(idx, velocity)
             return
 
+        dev_key = getattr(self.device_manager, "focus_key", None)
         if velocity == 0:
+            if dev_key == "SP-404MKII":
+                bank, pad_in_bank = self._push2_control_pad_to_bank_pad(
+                    dev_key, idx)
+                key = (dev_key, bank, pad_in_bank)
+                release_note = getattr(
+                    self, "_push2_control_pad_release_notes", {}
+                ).pop(key, None)
+                if release_note is not None:
+                    note, channel = release_note
+                    midi = self._midi_connections.get("SP-404MKII")
+                    try:
+                        if midi is not None:
+                            midi.send_note_off(note, channel=channel)
+                    except Exception:
+                        pass
+                    self.record_performance_note(
+                        "push2", "SP-404MKII", note, 0, channel=channel,
+                        payload={"bank": bank, "pad": pad_in_bank})
+                    self._push2_clear_control_pad(key)
+                    return
+                # One-shot pads stay lit after Push pad release; SP pad
+                # note-off or the silence fallback clears them later.
+                if key in getattr(
+                        self, "_push2_active_control_pads", set()):
+                    try:
+                        if self.push2 is not None:
+                            self.push2.flash_pad(idx, 122)
+                    except Exception:
+                        pass
             return  # control mode acts only on press
 
-        dev_key = getattr(self.device_manager, "focus_key", None)
-        from engine.push2 import Push2
-
         if dev_key == "SP-404MKII":
-            if self.push2_control_layout == 1:
-                bank_in_page, pad_in_bank = Push2.quad_pad_to_bank_pad(idx)
-            else:
-                bank_in_page, pad_in_bank = Push2.two_row_pad_to_bank_pad(idx)
-            if pad_in_bank < 0:
+            effective_bank, pad_in_bank = self._push2_control_pad_to_bank_pad(
+                dev_key, idx)
+            if effective_bank < 0 or pad_in_bank < 0:
                 return
-            effective_bank = self.push2_pad_page * 4 + bank_in_page
             if effective_bank >= self._push2_sp_bank_count():
                 return
             midi = self._midi_connections.get("SP-404MKII")
@@ -1497,10 +1611,16 @@ class P6App:
             if note < 0:
                 return
             try:
-                if velocity > 0:
-                    midi.send_note_on(note, velocity, channel=channel)
+                midi.send_note_on(note, velocity, channel=channel)
+                key = (dev_key, effective_bank, pad_in_bank)
+                self._push2_mark_control_pad_active(key)
+                if self._sp404_push2_should_note_off_on_release(key):
+                    self._push2_control_pad_release_notes[key] = (
+                        note, channel)
                 else:
-                    midi.send_note_off(note, channel=channel)
+                    self._push2_control_pad_release_notes.pop(key, None)
+                if self.push2 is not None:
+                    self.push2.flash_pad(idx, 122)
             except Exception:
                 pass
             self.record_performance_note(
@@ -1509,16 +1629,11 @@ class P6App:
             return
 
         if dev_key == "P-6":
-            if self.push2_control_layout == 1:
-                bank_in_page, pad_in_bank = Push2.p6_quad_pad_to_bank_pad(idx)
-                effective_bank = self.push2_pad_page * 4 + bank_in_page
-            else:
-                # Layout 0 (default): row-per-bank, all 8 banks visible.
-                bank, pad_in_bank = Push2.p6_row_pad_to_bank_pad(idx)
-                effective_bank = bank
-            if pad_in_bank < 0:
+            effective_bank, pad_in_bank = self._push2_control_pad_to_bank_pad(
+                dev_key, idx)
+            if effective_bank < 0 or pad_in_bank < 0:
                 return
-            if effective_bank < 0 or effective_bank >= 8:
+            if effective_bank >= 8:
                 return
             midi = self._midi_connections.get("P-6")
             if midi is None:
@@ -1640,6 +1755,7 @@ class P6App:
             dev_key, bank, pad_in_bank)
         if idx < 0:
             return
+        key = (dev_key, bank, pad_in_bank)
         try:
             if velocity > 0:
                 # Bright white pops against every bank color (red,
@@ -1648,11 +1764,129 @@ class P6App:
                 # earlier flash had on Bank G.
                 push2.flash_pad(idx, 122)
                 self._push2_active_device_pads.add(idx)
+                self._push2_mark_control_pad_active(key)
             else:
-                push2.restore_pad(idx)
-                self._push2_active_device_pads.discard(idx)
+                self._push2_clear_control_pad(key)
         except Exception:
             pass
+
+    def _push2_mark_control_pad_active(
+            self, key: tuple[str, int, int]) -> None:
+        active = getattr(self, "_push2_active_control_pads", None)
+        if active is None:
+            active = set()
+            self._push2_active_control_pads = active
+        active.add(key)
+        started = getattr(self, "_push2_control_pad_started_at", None)
+        if started is None:
+            started = {}
+            self._push2_control_pad_started_at = started
+        started.setdefault(key, time.monotonic())
+        self._push2_current_control_pad = key
+        self._push2_last_control_pad = key
+        if key[0] == "SP-404MKII":
+            self._push2_sp_silence_started_at = 0.0
+
+    def _push2_clear_control_pad(self, key: tuple[str, int, int]) -> None:
+        """Restore one Push 2 control pad if it is visible."""
+        push2 = getattr(self, "push2", None)
+        idx = self._push2_pad_idx_for_device_pad(key[0], key[1], key[2])
+        if push2 is not None and idx >= 0:
+            try:
+                push2.restore_pad(idx)
+            except Exception:
+                pass
+        try:
+            self._push2_active_device_pads.discard(idx)
+        except Exception:
+            pass
+        try:
+            self._push2_active_control_pads.discard(key)
+        except Exception:
+            pass
+        try:
+            self._push2_control_pad_started_at.pop(key, None)
+        except Exception:
+            pass
+        if getattr(self, "_push2_current_control_pad", None) == key:
+            active = [
+                k for k in getattr(self, "_push2_active_control_pads", set())
+                if k[0] == key[0]
+            ]
+            self._push2_current_control_pad = active[-1] if active else None
+
+    def _push2_config_float(self, key: str, default: float) -> float:
+        try:
+            return float(self.config.get(key, default))
+        except Exception:
+            return float(default)
+
+    def _push2_expire_control_pad_lights(self) -> None:
+        """Best-effort SP pad LED cleanup when MIDI cannot report sample end."""
+        if getattr(self, "push2_mode", "") != "control":
+            return
+        if getattr(getattr(self, "device_manager", None), "focus_key", None) != "SP-404MKII":
+            return
+        active = [
+            key for key in getattr(self, "_push2_active_control_pads", set())
+            if key[0] == "SP-404MKII"
+        ]
+        if not active:
+            self._push2_sp_silence_started_at = 0.0
+            return
+        now = time.monotonic()
+        min_secs = max(0.0, self._push2_config_float(
+            "SP404_PAD_LED_MIN_SECONDS", 0.5))
+        started = getattr(self, "_push2_control_pad_started_at", {})
+        if any(now - float(started.get(key, now)) < min_secs
+               for key in active):
+            self._push2_sp_silence_started_at = 0.0
+            return
+
+        rec = getattr(self, "recorder", None)
+        try:
+            peak = max(abs(float(v)) for v in rec.peak_levels)
+        except Exception:
+            return
+        threshold = max(0.0, self._push2_config_float(
+            "SP404_PAD_LED_SILENCE_THRESHOLD", 0.008))
+        if peak > threshold:
+            self._push2_sp_silence_started_at = 0.0
+            return
+
+        silence_started = float(getattr(
+            self, "_push2_sp_silence_started_at", 0.0) or 0.0)
+        if silence_started <= 0.0:
+            self._push2_sp_silence_started_at = now
+            return
+        silence_secs = max(0.1, self._push2_config_float(
+            "SP404_PAD_LED_SILENCE_SECONDS", 1.2))
+        if now - silence_started < silence_secs:
+            return
+        for key in list(active):
+            self._push2_clear_control_pad(key)
+        self._push2_sp_silence_started_at = 0.0
+
+    def _push2_reflash_active_control_pads(self) -> None:
+        """Reapply white play-state flashes after a pad-frame repaint."""
+        if self.push2_mode != "control":
+            return
+        dev_key = getattr(self.device_manager, "focus_key", None)
+        push2 = getattr(self, "push2", None)
+        if push2 is None:
+            return
+        active = list(getattr(self, "_push2_active_control_pads", set()))
+        for key_dev, bank, pad_in_bank in active:
+            if key_dev != dev_key:
+                continue
+            idx = self._push2_pad_idx_for_device_pad(
+                key_dev, bank, pad_in_bank)
+            if idx < 0:
+                continue
+            try:
+                push2.flash_pad(idx, 122)
+            except Exception:
+                pass
 
     # ── Screenshot scheduling (Compa touchscreen + Push 2) ────────────
 
@@ -1820,16 +2054,53 @@ class P6App:
 
     _P6_KEYS_GRANULAR_LABELS = {
         3: "REV",
+        7: "LEVEL",
+        9: "AUTOPAN",
+        10: "PAN",
+        12: "FILTER",
         13: "DET",
+        14: "LVL JIT",
         15: "SHAPE",
         16: "TIME",
+        17: "LOFI",
         18: "FINE",
         19: "POS",
         20: "SPEED",
         21: "GRAINS",
+        23: "SIZE",
+        24: "ENV",
+        25: "SPREAD",
+        26: "CUT KF",
+        28: "AMP",
+        29: "ENV MD",
+        30: "SUSTAIN",
+        68: "JITTER",
+        71: "RES",
+        72: "REL",
+        73: "ATTACK",
+        74: "CUTOFF",
+        75: "DECAY",
+        76: "COARSE",
+        77: "ENV KF",
+        78: "VEL",
+        79: "START",
+        84: "BUS",
+        85: "DLY",
+        86: "RVB",
+        87: "LOFI SW",
+        88: "SAMPLE",
+        89: "RVB TM",
+        90: "DLY TM",
+        91: "RVB LVL",
+        92: "DLY LVL",
     }
 
-    def _p6_keys_granular_context(self):
+    _P6_KEYS_PAGE_SECTIONS = (
+        "GRANULAR", "GRANULAR EXT", "FILTER + ENV",
+        "ENV EXT + MIXER", "FX SENDS",
+    )
+
+    def _p6_profile_for_keys(self):
         if getattr(self.device_manager, "focus_key", None) != "P-6":
             return None
         profile = None
@@ -1842,65 +2113,134 @@ class P6App:
                 profile = self.device_manager.get_profile("P-6")
             except Exception:
                 profile = None
-        if profile is None:
-            return None
-        params = list(getattr(profile, "cc_map", {}).get("granular", []))[:8]
-        if not params:
-            return None
+        return profile
+
+    def _ensure_p6_control_pages(self):
+        """Ensure Twister's 5-page P-6 map exists even without hardware."""
+        if getattr(self.device_manager, "focus_key", None) != "P-6":
+            return []
+        tw = getattr(self, "twister", None)
+        if tw is None:
+            return []
         midi = self._midi_connections.get("P-6")
-        channel = getattr(midi, "ch_granular", None)
-        if channel is None:
+        needs_rebuild = False
+        if midi is not None and getattr(tw, "_target_midi", None) is not midi:
             try:
-                channel = int(profile.midi_channels.get("granular", 3))
+                tw.set_target(midi)
+                needs_rebuild = True
             except Exception:
-                channel = 3
-        return profile, midi, channel, params
+                pass
+        pages = getattr(tw, "_pages", None) or []
+        has_p6_ccs = any(
+            getattr(slot, "_p6_cc", None) is not None
+            for page in pages for slot in page
+        )
+        if needs_rebuild or not has_p6_ccs:
+            try:
+                tw._rebuild_pages()
+            except Exception:
+                pass
+        pages = getattr(tw, "_pages", None) or []
+        has_p6_ccs = any(
+            getattr(slot, "_p6_cc", None) is not None
+            for page in pages for slot in page
+        )
+        if not has_p6_ccs:
+            try:
+                from engine.twister_genius import _build_p6_pages
+                pages = _build_p6_pages()
+                tw._pages = pages
+            except Exception:
+                pages = []
+        return pages
+
+    def _p6_cc_spec(self, cc: int) -> tuple[int, int, int, str]:
+        profile = self._p6_profile_for_keys()
+        if profile is not None:
+            for params in getattr(profile, "cc_map", {}).values():
+                for param in params:
+                    if int(getattr(param, "cc", -1)) == int(cc):
+                        return (
+                            int(getattr(param, "min_val", 0)),
+                            int(getattr(param, "max_val", 127)),
+                            int(getattr(param, "default", 64)),
+                            str(getattr(param, "name", "")),
+                        )
+        return (0, 127, 64, "")
+
+    def _p6_keys_page_label(self) -> str:
+        idx = int(getattr(self, "push2_page", 0))
+        if 0 <= idx < len(self._P6_KEYS_PAGE_SECTIONS):
+            return self._P6_KEYS_PAGE_SECTIONS[idx]
+        return "P-6 CTRL"
 
     def push2_p6_keys_granular_slots(self) -> list[dict]:
-        """Eight P-6 granular params shown on Push 2 while in KEYS."""
-        ctx = self._p6_keys_granular_context()
-        if ctx is None:
+        """Eight P-6 control params shown on Push 2 while in KEYS."""
+        self._ensure_p6_control_pages()
+        params = self.push2_slot_window()
+        if not params:
             return []
-        _profile, _midi, channel, params = ctx
+        channel = 14  # P-6 Auto channel, matching Twister direct-CC mode
         live = self.live_cc.get(channel, {}) or {}
+        page_count = self.push2_page_count()
+        page = int(getattr(self, "push2_page", 0)) + 1
+        section = self._p6_keys_page_label()
         slots = []
-        for param in params:
-            value = int(live.get(param.cc, param.default))
+        for param in params[:8]:
+            cc = getattr(param, "_p6_cc", None)
+            if cc is None:
+                continue
+            lo, hi, default, spec_name = self._p6_cc_spec(int(cc))
+            full_name = str(getattr(param, "name", spec_name or f"CC {cc}"))
+            value = int(live.get(cc, default))
             label = self._P6_KEYS_GRANULAR_LABELS.get(
-                param.cc, str(param.name).upper()[:7])
+                cc, full_name.upper()[:7])
             slots.append({
-                "cc": param.cc,
+                "cc": cc,
                 "name": label,
-                "full_name": param.name,
+                "full_name": full_name,
                 "value": value,
-                "default": param.default,
+                "default": default,
+                "min": lo,
+                "max": hi,
                 "channel": channel,
+                "page": page,
+                "page_count": page_count,
+                "section": section,
             })
         return slots
 
     def _on_push2_p6_keys_encoder(self, idx: int, delta: int) -> bool:
-        """Route P-6 KEYS encoders to granular sound-design params."""
-        ctx = self._p6_keys_granular_context()
-        if ctx is None:
+        """Route P-6 KEYS encoders to the current 5-page control window."""
+        self._ensure_p6_control_pages()
+        midi = self._midi_connections.get("P-6")
+        params = self.push2_slot_window()
+        if not params:
             return False
-        _profile, midi, channel, params = ctx
         if midi is None or not (0 <= idx < len(params)):
             return True
         param = params[idx]
-        current = int(self.live_cc.get(channel, {}).get(
-            param.cc, param.default))
-        new_val = max(param.min_val, min(param.max_val,
-                      current + int(delta) * 2))
+        cc = getattr(param, "_p6_cc", None)
+        if cc is None:
+            return True
+        channel = 14
+        lo, hi, default, spec_name = self._p6_cc_spec(int(cc))
+        current = int(self.live_cc.get(channel, {}).get(cc, default))
+        new_val = max(lo, min(hi, current + int(delta) * 2))
         if new_val == current:
             return True
         try:
-            midi.send_cc(param.cc, new_val, channel=channel)
-            self.live_cc.setdefault(channel, {})[param.cc] = new_val
+            midi.send_cc(cc, new_val, channel=channel)
+            self.live_cc.setdefault(channel, {})[cc] = new_val
             self.record_performance_cc(
-                "push2", "P-6", param.cc, new_val, channel=channel,
-                payload={"encoder": idx + 1, "mode": "keys-granular"})
+                "push2", "P-6", cc, new_val, channel=channel,
+                payload={
+                    "encoder": idx + 1,
+                    "mode": "keys-p6-page",
+                    "page": int(getattr(self, "push2_page", 0)) + 1,
+                })
             label = self._P6_KEYS_GRANULAR_LABELS.get(
-                param.cc, param.name)
+                cc, getattr(param, "name", spec_name or f"CC {cc}"))
             self.push_hud(f"P-6 {label}: {new_val}", theme.ACCENT)
         except Exception:
             pass
@@ -2625,6 +2965,13 @@ class P6App:
             return 2
         return 1
 
+    def _push2_default_control_layout_for(self, dev_key: str | None = None) -> int:
+        """Default Push 2 control-grid layout per focused device."""
+        dev_key = dev_key or getattr(self.device_manager, "focus_key", None)
+        if dev_key == "SP-404MKII":
+            return 1  # SP pads read naturally as four 4x4 bank quadrants.
+        return 0      # P-6 keeps all banks stacked as horizontal rows.
+
     def _push2_cycle_control_layout(self) -> None:
         """Advance push2_control_layout, wrapping per-device count.
         Resets pad_page to 0 since the new layout may have different
@@ -2971,8 +3318,7 @@ class P6App:
             midi = self._midi_connections.get("SP-404MKII")
             if midi is None:
                 return
-            bus = (int(self.twister.active_bus)
-                   if getattr(self, "twister", None) else 0)
+            bus = self._sp404_active_bus_index()
             current = self.live_cc.get(bus, {}).get(7, 100)
             if current > 0:
                 self._sp_pre_mute_vol = self._sp_pre_mute_vol or {}
@@ -3010,8 +3356,8 @@ class P6App:
                     idx = int(name.rsplit("_", 1)[1]) - 1
                 except Exception:
                     return
-                if 0 <= idx <= 4 and getattr(self, "twister", None) is not None:
-                    self.twister.active_bus = idx
+                if 0 <= idx <= 4:
+                    self._sp404_set_active_bus(idx)
                 elif idx == 7:
                     self._sp404_toggle_fx_onoff()
         elif name.startswith("bot_select_") and self.push2_mode == "keys":
@@ -3186,6 +3532,31 @@ class P6App:
             pat_idx = base + idx
             if pat_idx < self.push2_max_patterns():
                 self._push2_pattern_launch(pat_idx)
+        elif (name.startswith("top_select_")
+              and self.push2_mode == "control"
+              and getattr(self.device_manager, "focus_key", None)
+              == "SP-404MKII"):
+            # SP control top row = 8 FX favorites. Tap to recall,
+            # Shift+tap to store the current CC#83 value into the slot.
+            try:
+                idx = int(name.rsplit("_", 1)[1]) - 1
+            except Exception:
+                return
+            if not (0 <= idx < 8):
+                return
+            if self._push2_shift_held:
+                self._sp404_store_fx_favorite(idx)
+                return
+            tab = self._sp404_active_bus_tab()
+            favorites = self._sp404_fx_favorites_for_tab(tab)
+            fx_val = favorites[idx]
+            self._sp404_set_fx_value(fx_val)
+            try:
+                label, _param = self._sp404_effect_display_and_param_name(
+                    tab, fx_val)
+                self.push_hud(f"FX fav {idx + 1}: {label}", theme.ACCENT)
+            except Exception:
+                pass
         elif name.startswith("top_select_"):
             # Top-row select buttons 1-N jump directly to encoder page
             # N-1 in non-pattern modes.
@@ -3203,6 +3574,7 @@ class P6App:
         dev_key = getattr(self.device_manager, "focus_key", None)
         if dev_key != "P-6":
             return []
+        self._ensure_p6_control_pages()
         tw = getattr(self, "twister", None)
         pages = getattr(tw, "_pages", None) if tw else None
         if not pages:
@@ -3220,6 +3592,7 @@ class P6App:
         dev_key = getattr(self.device_manager, "focus_key", None)
         if dev_key != "P-6":
             return 1
+        self._ensure_p6_control_pages()
         tw = getattr(self, "twister", None)
         pages = getattr(tw, "_pages", None) if tw else None
         if not pages:
@@ -3231,6 +3604,13 @@ class P6App:
         count = self.push2_page_count()
         self.push2_page = (self.push2_page + delta) % count
         self._push2_paint_page_buttons()
+        if (self.push2_mode == "keys"
+                and getattr(self.device_manager, "focus_key", None) == "P-6"):
+            section = self._p6_keys_page_label()
+            self.push_hud(
+                f"P-6 KEYS {section} {self.push2_page + 1}/{count}",
+                theme.ACCENT,
+            )
 
     def _push2_paint_page_buttons(self):
         """Light page-left / page-right buttons dim when a move in
@@ -3251,49 +3631,391 @@ class P6App:
     # SP-404 MK2 effect-select CC (per bus channel) and on/off CC.
     _SP404_FX_SELECT_CC = 83
     _SP404_FX_ONOFF_CC = 19
+    _SP404_FX_SELECT_TICKS_PER_STEP = 4
+    _SP404_FX_FAVORITE_DEFAULTS = {
+        "bus1_fx": (1, 2, 3, 4, 5, 6, 7, 14),
+        "bus2_fx": (1, 2, 3, 4, 5, 6, 7, 14),
+        "bus3_fx": (1, 2, 3, 4, 5, 20, 23, 35),
+        "bus4_fx": (1, 2, 3, 4, 5, 20, 23, 35),
+        "input_fx": (1, 2, 3, 4, 5, 7, 8, 10),
+    }
+    _SP404_BUS_TABS = (
+        "bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx")
+    _SP404_BUS_LABELS = ("BUS 1", "BUS 2", "BUS 3", "BUS 4", "INPUT")
+    _SP404_DIRECT_FX_DEFAULTS = {
+        1: "Filter+Drive",
+        2: "Resonator",
+        3: "TimeCtrlDly",
+        4: "Isolator",
+        5: "DJFX Looper",
+    }
+    _SP404_DIRECT_FX_ALIASES = {
+        "delay": "TimeCtrlDly",
+        "timecontroldelay": "TimeCtrlDly",
+        "timectrldly": "TimeCtrlDly",
+        "djfx": "DJFX Looper",
+        "djfxlooper": "DJFX Looper",
+        "filterdrive": "Filter+Drive",
+        "filteranddrive": "Filter+Drive",
+    }
+    _SP404_DIRECT_FX_DISPLAY_NAMES = {
+        "TimeCtrlDly": "Delay",
+    }
+
+    def _sp404_active_bus_index(self) -> int:
+        """Return the app-owned SP FX bus index (0..4)."""
+        try:
+            bus = int(getattr(self, "_sp404_active_fx_bus"))
+        except Exception:
+            try:
+                bus = int(getattr(self.twister, "active_bus", 0))
+            except Exception:
+                bus = 0
+        return max(0, min(4, bus))
+
+    def _sp404_set_active_bus(self, bus: int, *, announce: bool = True) -> int:
+        """Set the active SP FX bus and sync every UI/controller view."""
+        bus = max(0, min(4, int(bus)))
+        self._sp404_active_fx_bus = bus
+        tw = getattr(self, "twister", None)
+        if tw is not None:
+            try:
+                tw.active_bus = bus
+            except Exception:
+                pass
+        screens = getattr(self, "screens", None) or {}
+        workspace = screens.get("device_workspace")
+        if workspace is not None and getattr(workspace, "_device_key", "") == "SP-404MKII":
+            try:
+                workspace._active_bus = bus
+                workspace._build_knobs()
+            except Exception:
+                pass
+        if announce:
+            try:
+                self.push_hud(
+                    f"FX {self._SP404_BUS_LABELS[bus]}", theme.ACCENT)
+            except Exception:
+                pass
+        return bus
+
+    def _sp404_active_bus_label(self) -> str:
+        return self._SP404_BUS_LABELS[self._sp404_active_bus_index()]
 
     def _sp404_active_bus_tab(self) -> str:
-        """Map the Twister-tracked active bus index (0..4) to the
+        """Map the app-tracked active bus index (0..4) to the
         sp404_effects.py tab key used to look up the right effect
         list. 0,1 = bus1/2 (BUS12_FX); 2,3 = bus3/4 (BUS34_FX);
         4 = INPUT (INPUT_FX)."""
+        return self._SP404_BUS_TABS[self._sp404_active_bus_index()]
+
+    def _sp404_normalize_effect_name(self, name: str) -> str:
+        """Resolve config/user spelling to a known SP effect name."""
+        text = str(name or "").strip()
+        if not text:
+            return ""
         try:
-            bus = int(self.twister.active_bus)
+            from engine.sp404_effect_params import SP404_EFFECT_PARAMS
+            if text in SP404_EFFECT_PARAMS:
+                return text
+            folded = text.casefold()
+            for known in SP404_EFFECT_PARAMS:
+                if known.casefold() == folded:
+                    return known
         except Exception:
-            bus = 0
-        if bus == 4:
-            return "input_fx"
-        if bus >= 2:
-            return f"bus{bus + 1}_fx"
-        return f"bus{bus + 1}_fx"
+            pass
+        key = "".join(ch for ch in text.casefold() if ch.isalnum())
+        return self._SP404_DIRECT_FX_ALIASES.get(key, "")
+
+    def _sp404_effect_display_name(self, effect_name: str) -> str:
+        return self._SP404_DIRECT_FX_DISPLAY_NAMES.get(
+            effect_name, effect_name)
+
+    def _sp404_direct_fx_name(self, slot: int) -> str:
+        """Configured real effect behind Direct FX 1..5."""
+        slot = max(1, min(5, int(slot)))
+        default = self._SP404_DIRECT_FX_DEFAULTS[slot]
+        raw = self.config.get(f"SP404_DIRECT_FX_{slot}", default)
+        return self._sp404_normalize_effect_name(raw) or default
+
+    def _sp404_direct_fx_display_name(self, slot: int) -> str:
+        return self._sp404_effect_display_name(self._sp404_direct_fx_name(slot))
+
+    def _sp404_direct_fx_choices(self) -> list[str]:
+        """Effect names valid for Settings' Direct FX assignment rows."""
+        try:
+            from engine.sp404_effects import fx_list_for_tab
+            from engine.sp404_effect_params import SP404_EFFECT_PARAMS
+            seen: list[str] = []
+            for tab in ("bus3_fx", "bus1_fx", "input_fx"):
+                for _value, name in fx_list_for_tab(tab):
+                    if name == "(OFF)" or name.startswith("Direct FX"):
+                        continue
+                    if name not in SP404_EFFECT_PARAMS or name in seen:
+                        continue
+                    seen.append(name)
+            return seen
+        except Exception:
+            return list(self._SP404_DIRECT_FX_DEFAULTS.values())
+
+    def _sp404_effect_display_and_param_name(
+            self, tab: str, fx_idx: int) -> tuple[str, str]:
+        """Return (display_name, param_name) for an SP FX slot.
+
+        Direct FX slots display as the user-configured factory/custom
+        effect and use that effect's parameter table for Ctrl labels.
+        """
+        from engine.sp404_effects import fx_name_for_tab
+        raw_name = fx_name_for_tab(tab, int(fx_idx)) or "—"
+        if raw_name.startswith("Direct FX"):
+            try:
+                slot = int(raw_name.replace("Direct FX", "").strip())
+            except Exception:
+                slot = 0
+            if 1 <= slot <= 5:
+                param_name = self._sp404_direct_fx_name(slot)
+                return self._sp404_effect_display_name(param_name), param_name
+        return raw_name, raw_name
+
+    def _sp404_pad_label(self, bank: int, pad_in_bank: int) -> str:
+        if bank < 0 or pad_in_bank < 0:
+            return "—"
+        bank_name = chr(ord("A") + int(bank)) if bank < 26 else str(bank + 1)
+        return f"{bank_name}{int(pad_in_bank) + 1:02d}"
+
+    def _sp404_current_pad_label(self) -> str:
+        key = (
+            getattr(self, "_push2_current_control_pad", None)
+            or getattr(self, "_push2_last_control_pad", None)
+        )
+        if not key or key[0] != "SP-404MKII":
+            return "—"
+        return self._sp404_pad_label(key[1], key[2])
+
+    def _sp404_current_pad_settings(self) -> dict | None:
+        key = (
+            getattr(self, "_push2_current_control_pad", None)
+            or getattr(self, "_push2_last_control_pad", None)
+        )
+        return self._sp404_pad_settings_for_key(key)
+
+    def _sp404_pad_settings_for_key(
+            self, key: tuple[str, int, int] | None) -> dict | None:
+        if not key or key[0] != "SP-404MKII":
+            return None
+        bank, pad_in_bank = key[1], key[2]
+        if bank < 0 or pad_in_bank < 0:
+            return None
+        lib = getattr(self, "sp404_lib", None)
+        if lib is None:
+            return None
+        try:
+            settings = lib.cached_project_pad_settings()
+        except Exception:
+            settings = []
+        idx = bank * 16 + pad_in_bank
+        item = settings[idx] if 0 <= idx < len(settings) else None
+        if not item:
+            self._sp404_refresh_padconf_async()
+        return item
+
+    def _sp404_push2_should_note_off_on_release(
+            self, key: tuple[str, int, int]) -> bool:
+        """Return whether Push 2 release should stop this SP pad.
+
+        Default "auto" mode follows the decoded PADCONF Gate setting when it
+        is available. Unknown pads keep the existing one-shot behavior until
+        full PADCONF chunk continuation is decoded.
+        """
+        mode = str(self.config.get(
+            "SP404_PUSH2_PAD_RELEASE_MODE", "auto")).strip().lower()
+        if mode in ("gate", "gated", "momentary", "hold"):
+            return True
+        if mode in ("one_shot", "oneshot", "latch", "latched", "playthrough"):
+            return False
+        item = self._sp404_pad_settings_for_key(key)
+        if not item:
+            return False
+        return item.get("gate") is True
+
+    def _sp404_refresh_padconf_async(self) -> None:
+        """Kick a throttled read-only PADCONF refresh for Push 2 status."""
+        if getattr(self, "_sp404_padconf_refreshing", False):
+            return
+        now = time.monotonic()
+        last = float(getattr(self, "_sp404_padconf_last_refresh", 0.0) or 0.0)
+        if now - last < 10.0:
+            return
+        self._sp404_padconf_refreshing = True
+        self._sp404_padconf_last_refresh = now
+
+        def _worker():
+            try:
+                lib = getattr(self, "sp404_lib", None)
+                if lib is not None:
+                    lib.read_project_pad_settings()
+            except Exception as e:
+                print(f"SP-404 PADCONF refresh failed: {e}", flush=True)
+            finally:
+                self._sp404_padconf_refreshing = False
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="SP404PadconfRefresh",
+        ).start()
+
+    def _sp404_current_pad_status_text(self) -> str:
+        item = self._sp404_current_pad_settings()
+        if not item:
+            return ""
+
+        def yn(value) -> str:
+            if value is True:
+                return "ON"
+            if value is False:
+                return "OFF"
+            return "?"
+
+        parts = [
+            f"G:{yn(item.get('gate'))}",
+            f"L:{yn(item.get('loop'))}",
+            f"R:{yn(item.get('reverse'))}",
+            f"BPM:{yn(item.get('bpm_sync'))}",
+        ]
+        bus = item.get("bus")
+        if bus:
+            parts.append(f"BUS{bus}")
+        return " ".join(parts)
+
+    def _sp404_fx_favorite_config_key(self, tab: str) -> str:
+        return f"SP404_FX_FAVORITES_{tab.upper()}"
+
+    def _sp404_fx_favorites_for_tab(self, tab: str | None = None) -> list[int]:
+        """Eight recall slots for the active SP-404 FX tab."""
+        from engine.sp404_effects import fx_count_for_tab
+        tab = tab or self._sp404_active_bus_tab()
+        count = fx_count_for_tab(tab)
+        if count <= 0:
+            return [0] * 8
+        defaults = list(self._SP404_FX_FAVORITE_DEFAULTS.get(tab, ()))
+        raw = str(self.config.get(
+            self._sp404_fx_favorite_config_key(tab), "")).strip()
+        parsed: list[int] = []
+        if raw:
+            for part in raw.replace(";", ",").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    parsed.append(int(part))
+                except ValueError:
+                    pass
+        out: list[int] = []
+        for i in range(8):
+            value = parsed[i] if i < len(parsed) else (
+                defaults[i] if i < len(defaults) else 0)
+            out.append(max(0, min(count - 1, int(value))))
+        return out
+
+    def _sp404_store_fx_favorite(self, slot_idx: int) -> None:
+        """Store the current FX selection into one of the 8 top buttons."""
+        if not (0 <= slot_idx < 8):
+            return
+        bus = self._sp404_active_bus_index()
+        tab = self._sp404_active_bus_tab()
+        live = self.live_cc.setdefault(bus, {})
+        current = int(live.get(self._SP404_FX_SELECT_CC, 0))
+        favorites = self._sp404_fx_favorites_for_tab(tab)
+        favorites[slot_idx] = current
+        value = ",".join(str(v) for v in favorites)
+        key = self._sp404_fx_favorite_config_key(tab)
+        self.config[key] = value
+        try:
+            save_config_key(key, value)
+        except Exception:
+            pass
+        try:
+            label, _param = self._sp404_effect_display_and_param_name(
+                tab, current)
+            self.push_hud(
+                f"FX fav {slot_idx + 1}: {label}",
+                theme.ACCENT,
+            )
+        except Exception:
+            pass
+
+    def _sp404_set_fx_value(self, fx_value: int) -> bool:
+        """Set active SP-404 FX while preserving an OFF toggle."""
+        from engine.sp404_effects import fx_count_for_tab
+        midi = self._midi_connections.get("SP-404MKII")
+        if midi is None:
+            return False
+        bus = self._sp404_active_bus_index()
+        tab = self._sp404_active_bus_tab()
+        count = fx_count_for_tab(tab)
+        if count <= 0:
+            return False
+        new_val = max(0, min(count - 1, int(fx_value)))
+        live = self.live_cc.setdefault(bus, {})
+        current = int(live.get(self._SP404_FX_SELECT_CC, 0))
+        fx_was_off = int(live.get(self._SP404_FX_ONOFF_CC, 0)) < 64
+        if new_val == current:
+            return False
+        try:
+            midi.send_cc(self._SP404_FX_SELECT_CC, new_val, channel=bus)
+            live[self._SP404_FX_SELECT_CC] = new_val
+            if fx_was_off:
+                midi.send_cc(self._SP404_FX_ONOFF_CC, 0, channel=bus)
+                live[self._SP404_FX_ONOFF_CC] = 0
+            return True
+        except Exception:
+            return False
+
+    def _sp404_fx_select_steps_for_delta(self, bus: int, delta: int) -> int:
+        """Convert Push 2 encoder ticks into slower FX-list steps."""
+        tick = 1 if delta > 0 else (-1 if delta < 0 else 0)
+        if tick == 0:
+            return 0
+        accum_by_bus = getattr(self, "_sp404_fx_select_accum", None)
+        if accum_by_bus is None:
+            accum_by_bus = {}
+            self._sp404_fx_select_accum = accum_by_bus
+        prev = int(accum_by_bus.get(bus, 0))
+        if prev and ((prev > 0) != (tick > 0)):
+            accum = tick
+        else:
+            accum = prev + tick
+        threshold = max(1, int(self._SP404_FX_SELECT_TICKS_PER_STEP))
+        steps = 0
+        while accum >= threshold:
+            steps += 1
+            accum -= threshold
+        while accum <= -threshold:
+            steps -= 1
+            accum += threshold
+        accum_by_bus[bus] = accum
+        return steps
 
     def _sp404_cycle_fx(self, delta: int) -> None:
         """Cycle the active SP-404 effect on the focused bus by `delta`
         (+1 = next, -1 = prev). Sends CC#83 to the bus channel and
-        wraps within the bus's effect list. Mirrors the touchscreen
-        FX selector behaviour."""
+        wraps within the bus's effect list. If the FX toggle is already
+        off, reassert CC#19 after selecting so browsing does not audibly
+        enable/demo every effect."""
         from engine.sp404_effects import fx_count_for_tab
         midi = self._midi_connections.get("SP-404MKII")
         if midi is None:
             return
-        try:
-            bus = int(self.twister.active_bus)
-        except Exception:
-            bus = 0
+        bus = self._sp404_active_bus_index()
         tab = self._sp404_active_bus_tab()
         count = fx_count_for_tab(tab)
         if count <= 0:
             return
-        current = int(self.live_cc.get(bus, {}).get(
-            self._SP404_FX_SELECT_CC, 0))
+        live = self.live_cc.setdefault(bus, {})
+        current = int(live.get(self._SP404_FX_SELECT_CC, 0))
         new_val = (current + delta) % count
-        if new_val == current:
-            return
-        try:
-            midi.send_cc(self._SP404_FX_SELECT_CC, new_val, channel=bus)
-            self.live_cc.setdefault(bus, {})[self._SP404_FX_SELECT_CC] = new_val
-        except Exception:
-            pass
+        self._sp404_set_fx_value(new_val)
 
     def _sp404_toggle_fx_onoff(self) -> None:
         """Toggle the FX on/off state on the focused bus by flipping
@@ -3302,10 +4024,7 @@ class P6App:
         midi = self._midi_connections.get("SP-404MKII")
         if midi is None:
             return
-        try:
-            bus = int(self.twister.active_bus)
-        except Exception:
-            bus = 0
+        bus = self._sp404_active_bus_index()
         current = int(self.live_cc.get(bus, {}).get(
             self._SP404_FX_ONOFF_CC, 0))
         new_val = 0 if current >= 64 else 127
@@ -3381,21 +4100,21 @@ class P6App:
         if dev_key == "SP-404MKII":
             if idx == 7:
                 # Encoder 8: cycle effect select on the active bus.
-                # Treat any positive delta as +1 step, any negative
-                # as -1 step so a full sweep doesn't blast through 40
-                # effects in one motion.
-                step = 1 if delta > 0 else -1
-                self._sp404_cycle_fx(step)
+                # Push 2 can emit a lot of relative ticks per small
+                # turn, so accumulate a few ticks before moving one
+                # slot. The delta sign is used instead of magnitude so
+                # firmware acceleration cannot jump the menu.
+                bus = self._sp404_active_bus_index()
+                step = self._sp404_fx_select_steps_for_delta(bus, delta)
+                if step:
+                    self._sp404_cycle_fx(step)
                 return
             if idx == 6:
                 return  # reserved
             if idx >= len(self._SP404_CTRL_CCS):
                 return
             cc = self._SP404_CTRL_CCS[idx]
-            try:
-                bus = int(self.twister.active_bus)
-            except Exception:
-                bus = 0
+            bus = self._sp404_active_bus_index()
             current = self.live_cc.get(bus, {}).get(cc, 64)
             new_val = max(0, min(127, current + delta))
             if new_val == current:
@@ -3591,16 +4310,28 @@ class P6App:
         screen-recording audio guard so the demo can re-bind the
         oscilloscope mid-take.
         """
-        if not self.device_manager.set_focus(short_name):
+        connected = self.device_manager.connected
+        if short_name not in connected:
             return False
+        focus_changed = short_name != self.device_manager.focus_key
+        if focus_changed and not self.device_manager.set_focus(short_name):
+            return False
+        elif not focus_changed:
+            # A second tap on the focused card is an explicit "make this
+            # card live" request. Keep the focus, but still run the
+            # side-effects below so stale recorder/visualizer bindings are
+            # repaired after route changes, screen changes, or boot races.
+            self.device_manager.active = connected.get(short_name)
 
         print(f"Focus → {short_name}", flush=True)
 
-        # Reset Push 2 control-layout state on focus change — the
-        # layout count is per-device, and we don't want a stale layout
-        # index pointing past what the new device offers.
-        self.push2_control_layout = 0
-        self.push2_pad_page = 0
+        if focus_changed:
+            # Reset Push 2 control-layout state on focus change — the
+            # layout count is per-device, and we don't want a stale layout
+            # index pointing past what the new device offers.
+            self.push2_control_layout = self._push2_default_control_layout_for(
+                short_name)
+            self.push2_pad_page = 0
 
         # Auto-apply hardware theme
         theme.apply_theme_for_device(short_name)
@@ -4476,6 +5207,11 @@ class P6App:
             self.current_screen.handle_event(event)
 
     def _update(self):
+        try:
+            self.system_monitor.update()
+        except Exception:
+            pass
+
         # Hot-plug: periodic USB rescan (every 5 seconds)
         now = time.monotonic()
         if now - getattr(self, "_last_usb_scan", 0) > 5.0:
@@ -4489,6 +5225,8 @@ class P6App:
             os.remove("/tmp/compa_screenshot_request")
             pygame.image.save(self.screen, "/tmp/compa_screen.png")
             print("Screenshot captured", flush=True)
+
+        self._push2_expire_control_pad_lights()
 
         # Check for remote screen-switch request: file contains target name
         if os.path.exists("/tmp/compa_switch_screen"):
@@ -4688,6 +5426,73 @@ class P6App:
         if fb_blit:
             fb_blit(self.screen)
 
+    def scope_window_frames(self) -> int:
+        return self._config_int("SCOPE_WINDOW_FRAMES", 4096, 512, 16384)
+
+    def scope_point_count(self, max_width: int) -> int:
+        points = self._config_int("SCOPE_POINTS", 640, 128, 1600)
+        return max(1, min(max(1, int(max_width)), points))
+
+    @staticmethod
+    def _format_system_rate(bytes_per_second: float) -> str:
+        value = max(0.0, float(bytes_per_second))
+        if value < 1024:
+            return f"{value:.0f}B/s"
+        value /= 1024.0
+        if value < 1024:
+            return f"{value:.0f}K/s"
+        value /= 1024.0
+        return f"{value:.1f}M/s"
+
+    def _draw_system_meters(self, x: int, y: int, max_w: int, f_tiny) -> int:
+        enabled = self._config_enabled(
+            self.config.get("SYSTEM_METER_ENABLED", "1"))
+        if enabled is False or max_w < 120:
+            return x
+        monitor = getattr(self, "system_monitor", None)
+        snap = getattr(monitor, "snapshot", None)
+        if snap is None:
+            return x
+
+        start_x = x
+        items = [
+            ("CPU", float(getattr(snap, "cpu_percent", 0.0)), theme.ACCENT),
+            ("RAM", float(getattr(snap, "ram_percent", 0.0)), theme.BLUE),
+        ]
+        for label, pct, color in items:
+            pct = max(0.0, min(100.0, pct))
+            text = f"{label} {pct:02.0f}"
+            surf = f_tiny.render(text, True, color)
+            bar_w = 22
+            needed = surf.get_width() + bar_w + 10
+            if x + needed > start_x + max_w:
+                return x
+            self.screen.blit(surf, (x, y))
+            bx = x + surf.get_width() + 3
+            by = y + 4
+            pygame.draw.rect(self.screen, (28, 28, 38),
+                             (bx, by, bar_w, 5), border_radius=2)
+            fill = int(bar_w * pct / 100.0)
+            if fill > 0:
+                meter_color = (
+                    theme.RED if pct >= 90 else
+                    theme.YELLOW if pct >= 70 else color
+                )
+                pygame.draw.rect(self.screen, meter_color,
+                                 (bx, by, fill, 5), border_radius=2)
+            x += needed
+
+        net_text = f"NET {self._format_system_rate(getattr(snap, 'net_total_bps', 0.0))}"
+        if getattr(snap, "temp_c", None) is not None:
+            temp_c = float(snap.temp_c)
+            if temp_c >= 70:
+                net_text += f" {temp_c:.0f}C"
+        surf = f_tiny.render(net_text, True, theme.TEXT_DIM)
+        if x + surf.get_width() > start_x + max_w:
+            return x
+        self.screen.blit(surf, (x, y))
+        return x + surf.get_width()
+
     def _draw_nav(self):
         f = theme.font("small")
         f_tiny = theme.font("tiny")
@@ -4784,6 +5589,11 @@ class P6App:
             surf = f_tiny.render("MOUSE", True, theme.TEXT_BRIGHT)
             self.screen.blit(surf, surf.get_rect(center=badge.center))
             x += 56
+
+        meter_end = self._draw_system_meters(
+            x, status_y, theme.SCREEN_WIDTH - x - 190, f_tiny)
+        if meter_end > x:
+            x = meter_end + 10
 
         # Right side: multi-device connection status
         # Show ALL connected devices; focused one is bright, others dim.

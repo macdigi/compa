@@ -139,6 +139,14 @@ class P6SessionScreen:
             else:
                 self.app.start_link_rx(dev_name)
             return
+        if action == "monitor_gain_down":
+            gain = self.app.recorder.adjust_monitor_gain(-0.1)
+            self.app.push_hud(f"MON {gain:.1f}x", theme.ACCENT)
+            return
+        if action == "monitor_gain_up":
+            gain = self.app.recorder.adjust_monitor_gain(0.1)
+            self.app.push_hud(f"MON {gain:.1f}x", theme.ACCENT)
+            return
         if action == "set_monitor":
             # MON on card X = "send X's audio out so I can hear it on
             # whichever other device my headphones are plugged into."
@@ -181,6 +189,9 @@ class P6SessionScreen:
             # or radio) that's currently holding its OutputStream.
             if dst_idx is not None:
                 self.app._release_device(dst_idx)
+            else:
+                print(f"Monitor: {dest} audio output not found", flush=True)
+                return
             # CRITICAL: close any existing monitor OUTPUT stream BEFORE
             # touching the recorder INPUT. Otherwise — if you're swapping
             # MON from "X→Y" to "Y→X" — there's a window where the input
@@ -189,16 +200,21 @@ class P6SessionScreen:
             # moment SP-404 (or any device with USB main-mix loopback)
             # routes USB-IN back to USB-OUT.
             self.app.recorder.stop_monitor_output()
-            # Bind recorder to source at the matching rate. Clear
-            # _monitor_source first so switch_device isn't blocked by the
-            # switch_focus guard.
+            # Bind recorder to source at the matching rate, then open the
+            # output route on the recorder worker. Opening output before the
+            # input rebind finishes can briefly route a device into itself
+            # during SP↔P-6 handoff, which is exactly the kind of crackle MON
+            # must avoid.
             self.app._monitor_source = ""
-            self.app.recorder.switch_device(src.audio_hint, preferred_rate=dst_rate)
-            if not self.app.recorder._monitoring:
-                self.app.recorder.start_monitoring()
             self.app.set_monitor_output(dest)
-            self.app.route_monitor(dev_name)
             self.app._monitor_source = dev_name
+            self.app.recorder.switch_device_then_monitor_output(
+                src.audio_hint,
+                dst_idx,
+                dst_rate,
+                preferred_rate=dst_rate,
+                user_initiated=True,
+            )
             return
 
         midi = self.app._midi_connections.get(dev_name)
@@ -466,6 +482,28 @@ class P6SessionScreen:
 
             cy += 14
 
+            if is_monitor_out:
+                gain = getattr(self.app.recorder, "monitor_gain", 1.0)
+                btn_h = 18
+                minus_rect = pygame.Rect(cx, cy, 28, btn_h)
+                value_rect = pygame.Rect(cx + 32, cy, 76, btn_h)
+                plus_rect = pygame.Rect(cx + 112, cy, 28, btn_h)
+                for rect, label, active in (
+                    (minus_rect, "-", gain > 0.25),
+                    (value_rect, f"MON {gain:.1f}x", True),
+                    (plus_rect, "+", gain < 3.0),
+                ):
+                    bg = device_color if rect is value_rect else theme.BUTTON_BG
+                    fg = theme.BG if rect is value_rect else (
+                        theme.TEXT if active else theme.TEXT_DIM)
+                    pygame.draw.rect(surface, bg, rect, border_radius=3)
+                    pygame.draw.rect(surface, theme.BORDER, rect, 1, border_radius=3)
+                    surf = f_tiny.render(label, True, fg)
+                    surface.blit(surf, surf.get_rect(center=rect.center))
+                self._card_buttons.append((minus_rect, short_name, "monitor_gain_down"))
+                self._card_buttons.append((plus_rect, short_name, "monitor_gain_up"))
+                cy += btn_h + 4
+
             # ── Row 3: Audio level meters (only for monitored device) ──
             meter_w = inner_w - 4
             meter_h = 6
@@ -617,7 +655,7 @@ class P6SessionScreen:
                 rec = self.app.recorder
                 buf = rec._recall_buf
                 wpos = rec._recall_write_pos
-                display_frames = min(2048, len(buf))
+                display_frames = min(self.app.scope_window_frames(), len(buf))
 
                 # Center + grid lines
                 center_y = wave_rect.centery
@@ -644,16 +682,19 @@ class P6SessionScreen:
                     mono = recent.mean(axis=1) if recent.ndim > 1 else recent
 
                     w = wave_rect.width - 4
-                    step = max(1, len(mono) // w)
+                    point_count = self.app.scope_point_count(w)
+                    step = max(1, len(mono) // point_count)
                     points = []
                     dc = device_color
 
-                    for px in range(w):
+                    for px in range(point_count):
                         si = px * step
                         if si < len(mono):
                             val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
                             py = center_y - int(val * half_h)
-                            points.append((wave_rect.x + 2 + px, py))
+                            x = wave_rect.x + 2 + int(
+                                px * max(1, w - 1) / max(1, point_count - 1))
+                            points.append((x, py))
 
                     if len(points) > 1:
                         # Filled waveform — single polygon spanning

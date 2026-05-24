@@ -245,19 +245,25 @@ class TransferScreen:
         bank_label = labels[bank_idx] if bank_idx < len(labels) else str(bank_idx + 1)
         pad_label = f"{bank_label}-{pad_idx + 1}" if device_type == "p6" else f"{bank_label}{pad_idx + 1:02d}"
         pad = pads[selected]
+        settings_line = ""
+        if device_type == "sp404":
+            settings_line = self._sp404_pad_settings_line(selected)
         if not pad:
             if device_type == "sp404" and (
                     self._sp404_current_project_is_protocol()
                     or self._sp404_normal_mode()):
+                lines = [
+                    "Pad is empty or not scanned yet.",
+                    "Tap SCAN BANK to read the current SP bank.",
+                    "Writes/imports are disabled in normal mode.",
+                ]
+                if settings_line:
+                    lines.insert(0, settings_line)
                 return {
                     "selected": True,
                     "title": pad_label,
                     "state": fallback_state,
-                    "lines": [
-                        "Pad is empty or not scanned yet.",
-                        "Tap SCAN BANK to read the current SP bank.",
-                        "Writes/imports are disabled in normal mode.",
-                    ],
+                    "lines": lines,
                 }
             return {
                 "selected": True,
@@ -281,6 +287,8 @@ class TransferScreen:
             meta_bits.append(_human_size(size))
         if meta_bits:
             lines.append(" · ".join(meta_bits))
+        if settings_line:
+            lines.append(settings_line)
         if state == "PENDING":
             lines.append("Action: replace or clear pending import")
         elif state == "LIVE":
@@ -296,6 +304,39 @@ class TransferScreen:
             "state": state,
             "lines": lines,
         }
+
+    def _sp404_pad_settings_line(self, selected: int) -> str:
+        lib = self.sp404_lib
+        if lib is None or selected < 0:
+            return ""
+        try:
+            settings = lib.cached_project_pad_settings(
+                self._current_sp404_project())
+        except Exception:
+            return ""
+        if selected >= len(settings):
+            return ""
+        item = settings[selected]
+        if not item:
+            return ""
+
+        def yn(value):
+            if value is True:
+                return "ON"
+            if value is False:
+                return "OFF"
+            return "?"
+
+        parts = [
+            f"Gate {yn(item.get('gate'))}",
+            f"Loop {yn(item.get('loop'))}",
+            f"Rev {yn(item.get('reverse'))}",
+            f"BPM {yn(item.get('bpm_sync'))}",
+        ]
+        bus = item.get("bus")
+        if bus:
+            parts.append(f"Bus {bus}")
+        return " · ".join(parts)
 
     def _p6_action_specs(self, mounted: bool = True) -> list[dict]:
         selected = self._p6_grid.selected_pad

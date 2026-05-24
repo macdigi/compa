@@ -49,7 +49,9 @@ from engine.device_mount import find_or_mount_device, diagnostic_info
 from engine.sp404_protocol import (
     find_sp404_librarian_port,
     list_projects as list_protocol_projects,
+    parse_padconf_settings,
     read_bank_headers as read_protocol_bank_headers,
+    read_padconf_settings as read_protocol_padconf_settings,
 )
 
 log = logging.getLogger(__name__)
@@ -138,6 +140,8 @@ class SP404Librarian:
         self._last_error = ""
         self._protocol_projects: list[str] = []
         self._protocol_pads: dict[str, list[Optional[dict]]] = {}
+        self._protocol_pad_settings: dict[str, list[Optional[dict]]] = {}
+        self._last_protocol_project = ""
         os.makedirs(images_dir, exist_ok=True)
         self._img = P6ImageManager(images_dir, mount_path=mount_path)
 
@@ -168,6 +172,10 @@ class SP404Librarian:
         if project_dir.startswith(SP404_PROTOCOL_PREFIX):
             return project_dir[len(SP404_PROTOCOL_PREFIX):]
         return project_dir
+
+    def _remember_protocol_project(self, project: str):
+        if project:
+            self._last_protocol_project = project
 
     def is_mounted(self) -> bool:
         """Return True if an SP-404 volume is mounted. Auto-rescans.
@@ -346,6 +354,8 @@ class SP404Librarian:
             try:
                 names = list_protocol_projects()
                 self._protocol_projects = names
+                if names:
+                    self._remember_protocol_project(names[0])
                 return [
                     {
                         "name": name,
@@ -407,8 +417,105 @@ class SP404Librarian:
         """Return 160 pad entries for the given project."""
         if self.is_protocol_project(project_dir):
             project = self.protocol_project_name(project_dir)
+            self._remember_protocol_project(project)
             return list(self._protocol_pads.get(project, [None] * self.NUM_PADS))
         return sp404_storage.read_project_pads(project_dir)
+
+    @staticmethod
+    def _empty_pad_settings() -> list[Optional[dict]]:
+        return [None] * SP404Librarian.NUM_PADS
+
+    @staticmethod
+    def _settings_list_from_decoded(decoded) -> list[Optional[dict]]:
+        settings: list[Optional[dict]] = [None] * SP404Librarian.NUM_PADS
+        for item in decoded:
+            try:
+                idx = (int(item.bank) - 1) * SP404Librarian.PADS_PER_BANK + (
+                    int(item.pad) - 1)
+            except Exception:
+                continue
+            if 0 <= idx < SP404Librarian.NUM_PADS:
+                settings[idx] = item.to_dict()
+        return settings
+
+    def cached_project_pad_settings(self, project_dir: str = "") -> list[Optional[dict]]:
+        """Return cached decoded PADCONF settings without touching hardware."""
+        if project_dir:
+            if self.is_protocol_project(project_dir):
+                project = self.protocol_project_name(project_dir)
+                return list(self._protocol_pad_settings.get(
+                    project, self._empty_pad_settings()))
+            padconf = os.path.join(project_dir, "PADCONF.BIN")
+            if os.path.isfile(padconf):
+                try:
+                    project = os.path.basename(project_dir)
+                    with open(padconf, "rb") as handle:
+                        data = handle.read()
+                    decoded = parse_padconf_settings(
+                        project, data, path=padconf)
+                    return self._settings_list_from_decoded(decoded)
+                except Exception:
+                    return self._empty_pad_settings()
+            return self._empty_pad_settings()
+
+        project = self._last_protocol_project
+        if not project and self._protocol_pad_settings:
+            project = next(iter(self._protocol_pad_settings))
+        if project:
+            return list(self._protocol_pad_settings.get(
+                project, self._empty_pad_settings()))
+        return self._empty_pad_settings()
+
+    def read_project_pad_settings(self, project_dir: str = "") -> list[Optional[dict]]:
+        """Read and cache decoded PADCONF settings for one project.
+
+        Normal-mode access is read-only and currently yields the first complete
+        pad record (A01) until the remaining PADCONF chunk continuation is
+        decoded.
+        """
+        if not project_dir:
+            project = self._last_protocol_project
+            if not project and self._protocol_projects:
+                project = self._protocol_projects[0]
+            if not project:
+                projects = self.list_projects()
+                for entry in projects:
+                    path = entry.get("path", "")
+                    if self.is_protocol_project(path):
+                        project = self.protocol_project_name(path)
+                        break
+            if not project:
+                return self._empty_pad_settings()
+            project_dir = self.protocol_project_ref(project)
+
+        if self.is_protocol_project(project_dir):
+            project = self.protocol_project_name(project_dir)
+            self._remember_protocol_project(project)
+            try:
+                decoded = read_protocol_padconf_settings(project)
+            except Exception as e:
+                self._last_error = f"SP-404 PADCONF read failed: {e}"
+                log.warning("%s", self._last_error)
+                return list(self._protocol_pad_settings.get(
+                    project, self._empty_pad_settings()))
+            settings = self._settings_list_from_decoded(decoded)
+            self._protocol_pad_settings[project] = settings
+            self._last_error = ""
+            return list(settings)
+
+        padconf = os.path.join(project_dir, "PADCONF.BIN")
+        if os.path.isfile(padconf):
+            try:
+                project = os.path.basename(project_dir)
+                with open(padconf, "rb") as handle:
+                    data = handle.read()
+                decoded = parse_padconf_settings(
+                    project, data, path=padconf)
+                return self._settings_list_from_decoded(decoded)
+            except Exception as e:
+                self._last_error = f"SP-404 PADCONF parse failed: {e}"
+                log.warning("%s", self._last_error)
+        return self._empty_pad_settings()
 
     def read_project_bank_pads(self, project_dir: str,
                                bank_idx: int) -> list[Optional[dict]]:
@@ -419,7 +526,9 @@ class SP404Librarian:
             return self.read_project_pads(project_dir)
 
         project = self.protocol_project_name(project_dir)
+        self._remember_protocol_project(project)
         pads = list(self._protocol_pads.get(project, [None] * self.NUM_PADS))
+        pad_settings = self.read_project_pad_settings(project_dir)
         try:
             headers = read_protocol_bank_headers(project, bank_idx + 1)
         except Exception as e:
@@ -446,6 +555,8 @@ class SP404Librarian:
                 "read_only": True,
                 "mode": "protocol",
             }
+            if 0 <= global_idx < len(pad_settings) and pad_settings[global_idx]:
+                pads[global_idx]["pad_settings"] = pad_settings[global_idx]
         self._protocol_pads[project] = pads
         self._last_error = ""
         return list(pads)

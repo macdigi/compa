@@ -336,6 +336,18 @@ class Push2Renderer:
                         top_colors[i] = dim
             except Exception:
                 pass
+        elif (mode_top == "control"
+              and getattr(getattr(self.app, "device_manager", None),
+                          "focus_key", None) == "SP-404MKII"):
+            try:
+                bus = self.app._sp404_active_bus_index()
+                tab = self.app._sp404_active_bus_tab()
+                current_fx = int(self.app.live_cc.get(bus, {}).get(83, 0))
+                favorites = self.app._sp404_fx_favorites_for_tab(tab)
+                for i, fx_val in enumerate(favorites[:8]):
+                    top_colors[i] = 122 if int(fx_val) == current_fx else 8
+            except Exception:
+                pass
         else:
             try:
                 current = self.app.push2_page
@@ -566,7 +578,7 @@ class Push2Renderer:
                 pass
         elif mode_for_oct == "control" and dev_key_for_bot == "SP-404MKII":
             try:
-                active_bus = int(self.app.twister.active_bus)
+                active_bus = self.app._sp404_active_bus_index()
             except Exception:
                 active_bus = 0
             # B1=red, B2=blue, B3=green, B4=yellow, IN=orange
@@ -684,6 +696,10 @@ class Push2Renderer:
         if frame_key != self._last_pad_frame_key:
             self._repaint_pad_frame(push2, mode, dev_key, pad_page,
                                     keys_state, pattern_state)
+            try:
+                self.app._push2_reflash_active_control_pads()
+            except Exception:
+                pass
             self._last_pad_frame_key = frame_key
 
     @staticmethod
@@ -1030,14 +1046,27 @@ class Push2Renderer:
         # letter and pattern info.
         if dev_key_for_status == "SP-404MKII":
             try:
-                from engine.sp404_effects import fx_name_for_tab
-                bus = int(self.app.twister.active_bus)
+                from engine.sp404_effects import fx_count_for_tab
+                bus = self.app._sp404_active_bus_index()
                 tab = self.app._sp404_active_bus_tab()
                 fx_idx = int(self.app.live_cc.get(bus, {}).get(83, 0))
-                fx_name = fx_name_for_tab(tab, fx_idx) or "—"
+                fx_name, _param_name = (
+                    self.app._sp404_effect_display_and_param_name(tab, fx_idx))
+                fx_total = max(0, fx_count_for_tab(tab) - 1)
                 fx_on = int(self.app.live_cc.get(bus, {}).get(19, 0)) >= 64
                 state = "ON" if fx_on else "OFF"
-                parts.append(f"FX {fx_name} · {state}")
+                pad = self.app._sp404_current_pad_label()
+                pad_state = ""
+                try:
+                    pad_state = self.app._sp404_current_pad_status_text()
+                except Exception:
+                    pad_state = ""
+                pad_text = f"PAD {pad}"
+                if pad_state:
+                    pad_text = f"{pad_text} {pad_state}"
+                parts.append(
+                    f"{self.app._sp404_active_bus_label()} FX "
+                    f"{fx_idx}/{fx_total} {fx_name} · {state} · {pad_text}")
             except Exception:
                 pass
         if total_pats > 0:
@@ -1046,6 +1075,10 @@ class Push2Renderer:
         if parts:
             txt = "  ·  ".join(parts)
             psurf = self._font_tiny.render(txt, True, dev_color)
+            max_w = SURF_W - 28
+            while psurf.get_width() > max_w and len(txt) > 8:
+                txt = txt[:-4].rstrip() + "..."
+                psurf = self._font_tiny.render(txt, True, dev_color)
             surf.blit(psurf, (14, y))
 
     def _special_encoder_overlay(self) -> tuple | None:
@@ -1369,7 +1402,7 @@ class Push2Renderer:
         # info/encoder strip (bottom). P-6 KEYS gets a taller strip so
         # the Push 2 encoders can show granular labels + live values.
         granular_slots = self._p6_keys_granular_slots()
-        strip_h = 30 if granular_slots else 16
+        strip_h = 42 if granular_slots else 16
         avail = height - strip_h - 4
         kb_h = max(48, int(avail * 0.62))
         roll_h = avail - kb_h - 2
@@ -1612,11 +1645,20 @@ class Push2Renderer:
 
         if not chord_mode:
             if granular_slots:
+                first = granular_slots[0]
+                page = int(first.get("page", 1) or 1)
+                page_count = int(first.get("page_count", 1) or 1)
+                section = str(first.get("section", "P-6 CTRL"))
+                head = f"P{page}/{page_count} {section}"
+                hs = self._font_tiny.render(head[:24], True, dev_color)
+                surf.blit(hs, (rect.x + 6, rect.y + 2))
+
                 col_w = rect.width // 8
                 for i, slot in enumerate(granular_slots[:8]):
                     x = rect.x + i * col_w
                     box = pygame.Rect(
-                        x + 3, rect.y + 2, col_w - 6, rect.height - 4)
+                        x + 3, rect.y + 14, col_w - 6,
+                        rect.height - 16)
                     pygame.draw.rect(
                         surf, (14, 14, 20), box, border_radius=4)
                     pygame.draw.rect(
@@ -1797,14 +1839,20 @@ class Push2Renderer:
 
             if peak > 0.001:
                 wave_w = scope_rect.width - 4
-                step = max(1, len(mono) // wave_w)
+                try:
+                    point_count = self.app.scope_point_count(wave_w)
+                except Exception:
+                    point_count = wave_w
+                step = max(1, len(mono) // point_count)
                 points = []
-                for px in range(wave_w):
+                for px in range(point_count):
                     si = px * step
                     if si < len(mono):
                         val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
                         py = cy - int(val * half_h)
-                        points.append((scope_rect.x + 2 + px, py))
+                        x = scope_rect.x + 2 + int(
+                            px * max(1, wave_w - 1) / max(1, point_count - 1))
+                        points.append((x, py))
 
                 if len(points) > 1:
                     # Single polygon for the fill — replaces ~900
@@ -1941,7 +1989,10 @@ class Push2Renderer:
             wpos = rec._recall_write_pos
         except Exception:
             return None
-        display_frames = min(2048, len(buf))
+        try:
+            display_frames = min(self.app.scope_window_frames(), len(buf))
+        except Exception:
+            display_frames = min(4096, len(buf))
         if display_frames == 0:
             return None
         if wpos >= display_frames:
@@ -1992,7 +2043,7 @@ class Push2Renderer:
         Slot 8 shows the active effect name + CC#83 index."""
         ctrl_ccs = [16, 17, 18, 80, 81, 82]
         try:
-            bus = int(self.app.twister.active_bus)
+            bus = self.app._sp404_active_bus_index()
         except Exception:
             bus = 0
         try:
@@ -2004,22 +2055,26 @@ class Push2Renderer:
         # Ctrl knobs with its actual parameter names AND format their
         # values in the SP's units (sec, dB, Hz, OFF/ON, sync divs, …).
         try:
-            from engine.sp404_effects import fx_name_for_tab
+            from engine.sp404_effects import fx_count_for_tab
             from engine.sp404_effect_params import (ctrl_label,
                                                      format_value)
             tab = self.app._sp404_active_bus_tab()
             fx_idx = int(live.get(83, 0))
-            fx_name = fx_name_for_tab(tab, fx_idx) or "—"
+            fx_name, param_name = (
+                self.app._sp404_effect_display_and_param_name(tab, fx_idx))
+            fx_total = max(0, fx_count_for_tab(tab) - 1)
         except Exception:
             fx_name = "—"
+            param_name = "—"
             fx_idx = 0
+            fx_total = 0
             ctrl_label = lambda *_: ""    # noqa — unused on failure
             format_value = lambda *_: ""
 
         out = []
         for i, cc in enumerate(ctrl_ccs):
             try:
-                name = ctrl_label(fx_name, i)
+                name = ctrl_label(param_name, i)
             except Exception:
                 name = f"Ctrl {i + 1}"
             if not name:
@@ -2028,12 +2083,18 @@ class Push2Renderer:
             slot = {"name": name, "value": raw}
             if raw is not None:
                 try:
-                    slot["value_text"] = format_value(fx_name, i, int(raw))
+                    slot["value_text"] = format_value(
+                        param_name, i, int(raw))
                 except Exception:
                     pass
             out.append(slot)
         # Encoder 7 — reserved.
         out.append({"name": "—", "value": None})
         # Encoder 8 — active effect name with CC#83 index as value.
-        out.append({"name": f"FX: {fx_name}", "value": fx_idx})
+        fx_bar = int(127 * (fx_idx / fx_total)) if fx_total > 0 else 0
+        out.append({
+            "name": f"FX: {fx_name}",
+            "value": fx_bar,
+            "value_text": f"{fx_idx}/{fx_total}" if fx_total else str(fx_idx),
+        })
         return out

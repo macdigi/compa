@@ -177,6 +177,113 @@ class P6SettingsScreen:
         else:
             self._set_pre_roll_seconds(cur + step * delta_sign)
 
+    def _format_monitor_gain(self) -> str:
+        gain = float(getattr(self.app.recorder, "monitor_gain", 1.0))
+        return f"{gain:.1f}x"
+
+    def _bump_monitor_gain(self, delta_sign: int):
+        from ui.p6_app import save_config_key
+        gain = self.app.recorder.adjust_monitor_gain(0.1 * delta_sign)
+        value = f"{gain:.1f}"
+        self.app.config["MONITOR_GAIN"] = value
+        save_config_key("MONITOR_GAIN", value)
+
+    @staticmethod
+    def _cycle_value(current: int, choices: list[int], delta_sign: int) -> int:
+        if not choices:
+            return current
+        closest = min(range(len(choices)),
+                      key=lambda i: abs(choices[i] - int(current)))
+        step = 1 if delta_sign > 0 else -1
+        idx = max(0, min(len(choices) - 1, closest + step))
+        return choices[idx]
+
+    def _toggle_system_meter(self):
+        from ui.p6_app import save_config_key
+        enabled = self.app.config.get("SYSTEM_METER_ENABLED", "1") == "1"
+        value = "0" if enabled else "1"
+        self.app.config["SYSTEM_METER_ENABLED"] = value
+        save_config_key("SYSTEM_METER_ENABLED", value)
+
+    def _get_ui_fps(self) -> int:
+        return int(getattr(self.app, "fps", 45))
+
+    def _bump_ui_fps(self, delta_sign: int):
+        from ui.p6_app import save_config_key
+        value = self._cycle_value(
+            self._get_ui_fps(), [24, 30, 45, 60], delta_sign)
+        self.app.fps = value
+        self.app.config["UI_FPS"] = str(value)
+        save_config_key("UI_FPS", str(value))
+
+    def _get_scope_points(self) -> int:
+        try:
+            return int(self.app.config.get("SCOPE_POINTS", "640"))
+        except Exception:
+            return 640
+
+    def _bump_scope_points(self, delta_sign: int):
+        from ui.p6_app import save_config_key
+        value = self._cycle_value(
+            self._get_scope_points(),
+            [256, 384, 512, 640, 800, 960, 1280],
+            delta_sign,
+        )
+        self.app.config["SCOPE_POINTS"] = str(value)
+        save_config_key("SCOPE_POINTS", str(value))
+
+    def _get_scope_window_frames(self) -> int:
+        try:
+            return int(self.app.config.get("SCOPE_WINDOW_FRAMES", "4096"))
+        except Exception:
+            return 4096
+
+    def _format_scope_window(self) -> str:
+        frames = self._get_scope_window_frames()
+        ms = frames / 48_000 * 1000.0
+        return f"{frames}fr {ms:.0f}ms"
+
+    def _bump_scope_window(self, delta_sign: int):
+        from ui.p6_app import save_config_key
+        value = self._cycle_value(
+            self._get_scope_window_frames(),
+            [1024, 2048, 4096, 8192, 16384],
+            delta_sign,
+        )
+        self.app.config["SCOPE_WINDOW_FRAMES"] = str(value)
+        save_config_key("SCOPE_WINDOW_FRAMES", str(value))
+
+    def _format_sp404_direct_fx(self, slot: int) -> str:
+        try:
+            return self.app._sp404_direct_fx_display_name(slot)
+        except Exception:
+            return "—"
+
+    def _bump_sp404_direct_fx(self, slot: int, delta_sign: int):
+        from ui.p6_app import save_config_key
+        try:
+            choices = self.app._sp404_direct_fx_choices()
+            current = self.app._sp404_direct_fx_name(slot)
+        except Exception:
+            return
+        if not choices:
+            return
+        try:
+            idx = choices.index(current)
+        except ValueError:
+            idx = 0
+        new_name = choices[(idx + (1 if delta_sign > 0 else -1)) % len(choices)]
+        key = f"SP404_DIRECT_FX_{slot}"
+        self.app.config[key] = new_name
+        save_config_key(key, new_name)
+        try:
+            self.app.push_hud(
+                f"Direct FX {slot}: {self.app._sp404_effect_display_name(new_name)}",
+                theme.ACCENT,
+            )
+        except Exception:
+            pass
+
     def _toggle_splash(self):
         from ui.p6_app import save_config_key
         current = self.app.config.get("SKIP_SPLASH", "0")
@@ -433,6 +540,10 @@ class P6SettingsScreen:
              "value": self._format_pre_roll(self._get_pre_roll_seconds()),
              "action_dec": lambda: self._bump_pre_roll(-1),
              "action_inc": lambda: self._bump_pre_roll(+1)},
+            {"label": "MON gain", "type": "adjust",
+             "value": self._format_monitor_gain(),
+             "action_dec": lambda: self._bump_monitor_gain(-1),
+             "action_inc": lambda: self._bump_monitor_gain(+1)},
             {"label": "Splash Screen", "type": "toggle", "value": not splash_off,
              "action": self._toggle_splash},
             {"label": "Color Theme", "type": "button",
@@ -599,6 +710,17 @@ class P6SettingsScreen:
                                "type": "info", "value": "—"})
             self._rows.append({"label": "  Reflash image or re-run install.sh",
                                "type": "info", "value": ""})
+
+        # MIDI Controller Mapping
+        self._rows.append({"label": "", "type": "section",
+                           "value": "SP-404 DIRECT FX"})
+        for slot in range(1, 6):
+            self._rows.append({
+                "label": f"  Direct FX {slot}", "type": "adjust",
+                "value": self._format_sp404_direct_fx(slot),
+                "action_dec": lambda s=slot: self._bump_sp404_direct_fx(s, -1),
+                "action_inc": lambda s=slot: self._bump_sp404_direct_fx(s, +1),
+            })
 
         # MIDI Controller Mapping
         self._rows.append({"label": "", "type": "section", "value": "MIDI CONTROLLER"})
@@ -865,6 +987,21 @@ class P6SettingsScreen:
             {"label": "Audio Input", "type": "info",
              "value": self.app.recorder.device_name},
             {"label": "Display", "type": "info", "value": self._get_resolution()},
+            {"label": "Performance meter", "type": "toggle",
+             "value": self.app.config.get("SYSTEM_METER_ENABLED", "1") == "1",
+             "action": self._toggle_system_meter},
+            {"label": "UI frame rate", "type": "adjust",
+             "value": f"{self._get_ui_fps()} fps",
+             "action_dec": lambda: self._bump_ui_fps(-1),
+             "action_inc": lambda: self._bump_ui_fps(+1)},
+            {"label": "Scope detail", "type": "adjust",
+             "value": f"{self._get_scope_points()} pts",
+             "action_dec": lambda: self._bump_scope_points(-1),
+             "action_inc": lambda: self._bump_scope_points(+1)},
+            {"label": "Scope time window", "type": "adjust",
+             "value": self._format_scope_window(),
+             "action_dec": lambda: self._bump_scope_window(-1),
+             "action_inc": lambda: self._bump_scope_window(+1)},
             {"label": "Touch Calibration", "type": "button", "btn_label": "CALIBRATE",
              "action": self._run_calibrate},
             {"label": "", "type": "section", "value": "ABOUT"},
@@ -983,7 +1120,7 @@ class P6SettingsScreen:
             elif rtype == "adjust":
                 dec_rect = pygame.Rect(ctrl_x, ry + 4, 32, row_h - 8)
                 inc_rect = pygame.Rect(
-                    ctrl_x + 80, ry + 4, 32, row_h - 8)
+                    ctrl_x + 124, ry + 4, 32, row_h - 8)
                 if dec_rect.collidepoint(mx, my):
                     row["action_dec"]()
                 elif inc_rect.collidepoint(mx, my):
@@ -1151,11 +1288,21 @@ class P6SettingsScreen:
                 surface.blit(lbl, lbl.get_rect(center=dec_rect.center))
 
                 # Value display
-                val_surf = f_med.render(str(val), True, theme.ACCENT)
-                val_x = ctrl_x + 36 + (44 - val_surf.get_width()) // 2
-                surface.blit(val_surf, (val_x, ry + (row_h - val_surf.get_height()) // 2))
+                value_rect = pygame.Rect(ctrl_x + 36, ry + 4, 84, row_h - 8)
+                val_font = f_med
+                val_surf = val_font.render(str(val), True, theme.ACCENT)
+                if val_surf.get_width() > value_rect.width:
+                    val_surf = f_small.render(str(val), True, theme.ACCENT)
+                if val_surf.get_width() > value_rect.width:
+                    scale = value_rect.width / max(1, val_surf.get_width())
+                    val_surf = pygame.transform.smoothscale(
+                        val_surf,
+                        (value_rect.width,
+                         max(8, int(val_surf.get_height() * scale))),
+                    )
+                surface.blit(val_surf, val_surf.get_rect(center=value_rect.center))
 
-                inc_rect = pygame.Rect(ctrl_x + 80, ry + 4, 32, row_h - 8)
+                inc_rect = pygame.Rect(ctrl_x + 124, ry + 4, 32, row_h - 8)
                 pygame.draw.rect(surface, theme.BUTTON_BG, inc_rect, border_radius=6)
                 pygame.draw.rect(surface, theme.BORDER, inc_rect, 1, border_radius=6)
                 lbl = f_med.render("+", True, theme.TEXT)

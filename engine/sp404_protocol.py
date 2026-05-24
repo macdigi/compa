@@ -94,6 +94,48 @@ class SP404SampleHeader:
         return f"{chr(ord('A') + self.bank - 1)}{self.pad:02d}"
 
 
+@dataclass(frozen=True)
+class SP404PadSettings:
+    """Decoded read-only PADCONF settings for one SP pad."""
+
+    project: str
+    bank: int
+    pad: int
+    gate: Optional[bool]
+    loop: Optional[bool]
+    reverse: Optional[bool]
+    bpm_sync: Optional[bool]
+    bus: Optional[int]
+    raw_bus: int
+    reverse_boundary: Optional[int]
+    path: str = ""
+
+    @property
+    def pad_id(self) -> str:
+        return f"{chr(ord('A') + self.bank - 1)}{self.pad:02d}"
+
+    @property
+    def bus_label(self) -> str:
+        return f"Bus {self.bus}" if self.bus else "Unknown"
+
+    def to_dict(self) -> dict:
+        return {
+            "project": self.project,
+            "bank": self.bank,
+            "pad": self.pad,
+            "pad_id": self.pad_id,
+            "gate": self.gate,
+            "loop": self.loop,
+            "reverse": self.reverse,
+            "bpm_sync": self.bpm_sync,
+            "bus": self.bus,
+            "bus_label": self.bus_label,
+            "raw_bus": self.raw_bus,
+            "reverse_boundary": self.reverse_boundary,
+            "path": self.path,
+        }
+
+
 def _usb_device_for_tty(tty_name: str) -> Optional[str]:
     """Return the parent USB device sysfs path for a ttyACM node."""
     device_link = f"/sys/class/tty/{tty_name}/device"
@@ -216,6 +258,12 @@ def _remote_smp_path(project: str, bank: int, pad: int) -> str:
     )
 
 
+def _remote_padconf_path(project: str) -> str:
+    if not re.fullmatch(r"PROJECT_[0-9]{2}", project):
+        raise ValueError("project must look like PROJECT_05")
+    return f"/SP404REMOTE///ROLAND/SP-404MKII/{project}/PADCONF.BIN"
+
+
 def _build_file_read_path(path: str) -> bytes:
     path_bytes = path.encode("ascii")
     if len(path_bytes) > 220:
@@ -299,6 +347,135 @@ def _parse_rfwv_header(project: str, bank: int, pad: int,
         bit_depth=int.from_bytes(data[pos + 16:pos + 20], "big"),
         path=path,
     )
+
+
+def _read_remote_file_first_chunk(path: str, timeout: float,
+                                  *, preamble: bool) -> bytes:
+    """Read the first decoded data chunk for one normal-mode remote file."""
+    port = find_sp404_librarian_port()
+    if not port:
+        raise RuntimeError("SP-404 CDC port not found")
+
+    responses: list[bytes] = []
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        configure_sp404_librarian_fd(fd)
+        time.sleep(0.2)
+        file_key: Optional[bytes] = None
+        payloads = _file_read_payloads(path, preamble=preamble)
+        for idx, (_label, payload) in enumerate(payloads):
+            if idx > 0 and file_key:
+                payload = _apply_file_key(payload, file_key)
+            os.write(fd, payload)
+            response = _read_until_quiet(fd, timeout)
+            responses.append(response)
+            if idx == 0:
+                file_key = _extract_file_key(response)
+    finally:
+        os.close(fd)
+    return b"".join(responses)
+
+
+def _padconf_word(record: bytes, offset: int) -> Optional[int]:
+    if offset < 0 or len(record) < offset + 4:
+        return None
+    return int.from_bytes(record[offset:offset + 4], "big")
+
+
+def _padconf_bool_word(record: bytes, offset: int) -> Optional[bool]:
+    value = _padconf_word(record, offset)
+    if value == 0:
+        return False
+    if value == 1:
+        return True
+    return None
+
+
+def _padconf_bpm_sync(record: bytes) -> Optional[bool]:
+    if len(record) <= 0x23:
+        return None
+    value = record[0x23]
+    if value == 0:
+        return True
+    if value == 1:
+        return False
+    return None
+
+
+def _padconf_loop(record: bytes) -> Optional[bool]:
+    value = _padconf_word(record, 0x14)
+    if value == 0:
+        return False
+    if value == 0x7fffffff:
+        return True
+    return None
+
+
+def _padconf_bus(record: bytes) -> tuple[Optional[int], int]:
+    if len(record) <= 0x53:
+        return None, 0
+    raw = record[0x53]
+    if raw in (1, 2):
+        return raw, raw
+    return None, raw
+
+
+def parse_padconf_settings(project: str, data: bytes,
+                           path: str = "") -> list[SP404PadSettings]:
+    """Parse any full pad records present in a PADCONF/RFPD byte chunk.
+
+    The normal-mode reader currently returns the RFPD header plus the first
+    complete pad record. This parser is intentionally record-count agnostic so
+    it will start returning more pads once chunk continuation is decoded.
+    """
+    pos = data.find(b"RFPD")
+    if pos < 0 or len(data) < pos + 16:
+        return []
+    payload = data[pos:]
+    header_bytes = int.from_bytes(payload[4:8], "big")
+    pad_table_bytes = int.from_bytes(payload[12:16], "big")
+    if header_bytes <= 0 or pad_table_bytes <= 0:
+        return []
+    record_bytes = pad_table_bytes // 160
+    if record_bytes <= 0:
+        return []
+    available = max(0, len(payload) - header_bytes)
+    full_records = min(160, available // record_bytes)
+
+    settings: list[SP404PadSettings] = []
+    for index in range(full_records):
+        start = header_bytes + index * record_bytes
+        record = payload[start:start + record_bytes]
+        bank = index // 16 + 1
+        pad = index % 16 + 1
+        bus, raw_bus = _padconf_bus(record)
+        settings.append(SP404PadSettings(
+            project=project,
+            bank=bank,
+            pad=pad,
+            gate=_padconf_bool_word(record, 0x10),
+            loop=_padconf_loop(record),
+            reverse=_padconf_bool_word(record, 0x3c),
+            bpm_sync=_padconf_bpm_sync(record),
+            bus=bus,
+            raw_bus=raw_bus,
+            reverse_boundary=_padconf_word(record, 0x2c),
+            path=path,
+        ))
+    return settings
+
+
+def read_padconf_settings(project: str,
+                          timeout: float = 1.5) -> list[SP404PadSettings]:
+    """Read decoded PADCONF settings via normal-mode CDC.
+
+    This is read-only. It currently decodes whatever full records are returned
+    by the first data chunk; on observed SP-404MKII firmware that is A01 only.
+    """
+    remote_path = _remote_padconf_path(project)
+    data = _read_remote_file_first_chunk(
+        remote_path, timeout, preamble=False)
+    return parse_padconf_settings(project, data, path=remote_path)
 
 
 def list_projects(timeout: float = 1.5) -> list[str]:

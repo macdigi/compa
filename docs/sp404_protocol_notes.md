@@ -255,6 +255,169 @@ This confirms the SP normal-mode librarian protocol can read internal sample
 files without USB mass-storage mode. Keep this as read-only lab functionality
 until chunk continuation, pad config parsing, and safe UI threading are decoded.
 
+## PADCONF read probe (2026-05-24)
+
+The same normal-mode path reader can open project pad configuration files, but
+unlike the first .SMP sample read it must skip the captured sample-file
+preamble:
+
+    tools/sp404_protocol_lab.py read-path \
+      --path /SP404REMOTE///ROLAND/SP-404MKII/PROJECT_05/PADCONF.BIN \
+      --no-preamble
+
+Live result on Jordan's SP-404MKII:
+
+- path-open returned a dynamic file key (01 55 in the observed run)
+- the first data chunk contained RFPD
+- header fields observed:
+  - magic: RFPD
+  - header size / pad-table offset: 0xa0 / 160 bytes
+  - version/format marker: little-endian 3
+  - pad-table bytes: 0x7a80 / 31360
+  - known SP pad count: 160
+  - implied pad record size: 196 bytes
+  - project name appears inside the header block at offset 0x80
+
+Added lab helpers:
+
+    tools/sp404_protocol_lab.py padconf-dump --project PROJECT_05 --label baseline
+    tools/sp404_protocol_lab.py padconf-diff before.bin after.bin --pad A01
+
+First setting diff:
+
+- Baseline: A01 Gate was ON.
+- Change: Jordan turned A01 Gate OFF on the SP.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_gate-off-a01_20260524T163433Z.bin
+- Diff: one byte changed in A01:
+  - record offset 0x13, absolute offset 0x00b3: 01 -> 00
+- Working interpretation: A01 Gate is represented by the 32-bit word at record
+  offset 0x10, with 00000001 = Gate ON and 00000000 = Gate OFF.
+- Confirmation: Jordan turned A01 Gate back ON, captured
+  sessions/sp404_protocol/padconf_PROJECT_05_gate-on-confirm-a01_20260524T163714Z.bin.
+  Diff from Gate OFF showed the same byte at record+0x13 / abs 0x00b3
+  changed 00 -> 01, and diff against the original baseline showed no A01
+  pad-record changes. Gate offset is confirmed.
+
+Second setting diff:
+
+- Baseline: A01 Loop was OFF.
+- Change: Jordan turned A01 Loop ON on the SP.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_loop-on-a01_20260524T170921Z.bin
+- Diff: four bytes changed in A01:
+  - record offset 0x14, absolute offset 0x00b4: 00 -> 7f
+  - record offset 0x15, absolute offset 0x00b5: 00 -> ff
+  - record offset 0x16, absolute offset 0x00b6: 00 -> ff
+  - record offset 0x17, absolute offset 0x00b7: 00 -> ff
+- Working interpretation: A01 Loop is represented by the 32-bit word at record
+  offset 0x14, with 00000000 = Loop OFF and 7fffffff = Loop ON.
+- Confirmation: Jordan turned A01 Loop back OFF, captured
+  sessions/sp404_protocol/padconf_PROJECT_05_loop-off-confirm-a01_20260524T172010Z.bin.
+  Diff from Loop ON showed record+0x14..0x17 / abs 0x00b4..0x00b7
+  changed 7fffffff -> 00000000, and diff against Gate-confirm showed no
+  A01 pad-record changes. Loop offset is confirmed.
+
+Third setting diff:
+
+- Baseline: A01 Reverse was OFF.
+- Change: Jordan turned A01 Reverse ON on the SP.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_reverse-on-a01_20260524T172142Z.bin
+- Diff: four bytes changed in A01:
+  - record offsets 0x2d..0x2f, absolute offsets 0x00cd..0x00cf:
+    00 02 00 -> 0e 28 b0, making the 32-bit word at 0x2c change
+    00000200 -> 000e28b0
+  - record offset 0x3f, absolute offset 0x00df: 00 -> 01, making the
+    32-bit word at 0x3c change 00000000 -> 00000001
+- Working interpretation: record word 0x3c is likely the Reverse ON/OFF flag.
+  The word at 0x2c also changes when reverse is enabled and may be a play
+  boundary/cursor value that moves to the sample end.
+- Confirmation: Jordan turned A01 Reverse back OFF, captured
+  sessions/sp404_protocol/padconf_PROJECT_05_reverse-off-confirm-a01_20260524T172304Z.bin.
+  Diff from Reverse ON showed record+0x2d..0x2f / abs 0x00cd..0x00cf
+  changed 0e 28 b0 -> 00 02 00 and record+0x3f / abs 0x00df changed
+  01 -> 00. Diff against Loop OFF showed no A01 pad-record changes. Treat
+  record word 0x3c as the Reverse flag: 00000000 = Reverse OFF and
+  00000001 = Reverse ON. Keep record word 0x2c as related playback-boundary
+  state unless later captures prove it is independently meaningful.
+
+Fourth setting diff:
+
+- Baseline: A01 Gate ON, Loop OFF, Reverse OFF.
+- Change: Jordan turned A01 BPM Sync ON on the SP.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_bpm-sync-on-a01_20260524T172514Z.bin
+- Diff: no A01 pad-record byte changes against Reverse OFF / Loop OFF.
+- Follow-up change: Jordan turned A01 BPM Sync back OFF on the SP.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_bpm-sync-off-confirm-a01_20260524T172645Z.bin
+- Diff from BPM Sync ON and from Reverse OFF / Loop OFF:
+  - record offset 0x23, absolute offset 0x00c3: 00 -> 01
+- Working interpretation: A01 BPM Sync was already ON during the first capture.
+  Record byte 0x23 is likely the BPM Sync flag, with 00 = BPM Sync ON and
+  01 = BPM Sync OFF.
+- Confirmation: Jordan turned A01 BPM Sync back ON, captured
+  sessions/sp404_protocol/padconf_PROJECT_05_bpm-sync-on-confirm-a01_20260524T172859Z.bin.
+  Diff from BPM Sync OFF showed record+0x23 / abs 0x00c3 changed 01 -> 00.
+  BPM Sync offset is confirmed.
+
+Fifth setting diff:
+
+- Baseline for clean comparison: A01 BPM Sync OFF, Bus 1.
+- Change: Jordan changed A01 from Bus 1 to Bus 2.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_bus-2-a01_20260524T173031Z.bin
+- Diff against BPM Sync OFF / Bus 1:
+  - record offset 0x53, absolute offset 0x00f3: 01 -> 02
+- Working interpretation: record byte 0x53 is likely pad bus assignment, with
+  01 = Bus 1 and 02 = Bus 2.
+- Confirmation: Jordan changed A01 back from Bus 2 to Bus 1, captured
+  sessions/sp404_protocol/padconf_PROJECT_05_bus-1-confirm-a01_20260524T173229Z.bin.
+  Diff from Bus 2 showed record+0x53 / abs 0x00f3 changed 02 -> 01, and
+  diff against the earlier BPM Sync OFF / Bus 1 capture showed no A01
+  pad-record changes. Bus assignment offset is confirmed for Bus 1 and Bus 2.
+- Note: diff against the immediately previous BPM Sync ON capture also showed
+  record+0x23 changed 00 -> 01, meaning BPM Sync was OFF by the time Bus 2 was
+  captured. This appears unrelated to the bus byte.
+- Jordan could not find a direct SP UI path to assign a pad to Bus 3, Bus 4, or
+  Input, so the confirmed per-pad assignment range may be Bus 1/Bus 2 only.
+
+Hold check:
+
+- Change: Jordan held A01, engaged Hold, and released the pad so the SP latched
+  playback live.
+- Dump: sessions/sp404_protocol/padconf_PROJECT_05_hold-on-a01_20260524T174137Z.bin
+- Diff against Bus 1 confirm: no A01 pad-record byte changes.
+- Working interpretation: Hold is a live latch state, not a saved A01 PADCONF
+  setting. Compa should model Push 2 momentary-vs-latched behavior through the
+  saved Gate setting, and treat a future Hold button as a separate live control.
+
+This is enough to start a read-only PADCONF parser. It is not enough yet to
+write PADCONF safely or claim exact meanings for Gate/Loop/Reverse/BPM Sync/
+Bus/Hold bytes. Next decoding step: capture or read full PADCONF chunks, then
+compare before/after files where only one SP pad setting changes.
+
+Implemented read-only parsing in Compa for the confirmed fields present in the
+currently available PADCONF chunk:
+
+- Gate: record word 0x10, 00000000 = OFF, 00000001 = ON
+- Loop: record word 0x14, 00000000 = OFF, 7fffffff = ON
+- BPM Sync: record byte 0x23, 00 = ON, 01 = OFF
+- Reverse: record word 0x3c, 00000000 = OFF, 00000001 = ON
+- Pad bus: record byte 0x53, 01 = Bus 1, 02 = Bus 2
+
+Push 2 status uses this cache to show the selected SP pad settings when the
+record is available. As of this note the normal-mode read yields A01 only;
+other pads must stay unknown until PADCONF chunk continuation is decoded.
+Push 2 pad release behavior now defaults to auto mode: when a decoded pad has
+Gate ON, release sends Note Off and clears the white pad light; when Gate is OFF
+or the pad setting is unknown, Compa keeps the one-shot play-through behavior.
+
+Deferred follow-up:
+
+- Jordan confirmed we should pass on grabbing PADCONF for all 160 pads/banks
+  right now. Keep the limitation visible: full-pad support requires decoding
+  PADCONF chunk continuation or another way to read the complete 31360-byte pad
+  table.
+- If Push 2 Bus 2 appears to affect Bus 1 pads, first check the SP's own bus
+  routing. Jordan found Bus 1 was routed into Bus 2; after changing the SP bus
+  routing, the Push 2 bus selector behaved correctly.
+
 Compa integration now exposes this as read-only manual scanning in
 Files -> Device -> SP-404 while the SP is connected normally:
 

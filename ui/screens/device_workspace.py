@@ -132,11 +132,11 @@ class DeviceWorkspaceScreen:
         dev_key = ctx.get("device", self.app.device_name)
         self.app._screen_context = {}
 
-        if dev_key != self.app.device_name:
-            self.app.switch_focus(dev_key)
-        else:
-            # Already focused — but Twister/recorder may not be retargeted yet
-            # (happens on first boot when default focus matches dev_key)
+        focus_synced = self.app.switch_focus(dev_key, user_initiated=True)
+        if not focus_synced:
+            dev_key = self.app.device_name
+            # Invalid or stale context — fall back to the current focus and
+            # refresh local controller state so the workspace remains usable.
             focused_midi = self.app._midi_connections.get(dev_key)
             if focused_midi:
                 # Always update the Twister's target + rebuild pages so the
@@ -148,12 +148,17 @@ class DeviceWorkspaceScreen:
         self._device_key = dev_key
         self._device_profile = self.app.device
         self._device_color = theme.get_device_color(dev_key)
+        if dev_key == "SP-404MKII":
+            try:
+                self._active_bus = self.app._sp404_active_bus_index()
+            except Exception:
+                self._active_bus = 0
 
         self._build_tabs()
         self._current_tab = 0
 
         # Start monitoring
-        if not self.app.recorder._monitoring:
+        if not focus_synced and not self.app.recorder._monitoring:
             dev = self.app.device
             if dev and dev.audio_hint:
                 self.app.recorder.switch_device(dev.audio_hint)
@@ -229,7 +234,6 @@ class DeviceWorkspaceScreen:
 
     def _build_sp404_knobs(self):
         """SP-404: 3x2 knob grid for active bus FX parameters."""
-        from engine.sp404_effects import fx_name_for_tab, fx_count_for_tab
         from engine.device_profiles import cc_map_to_legacy
 
         bus_tab_keys = ["bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"]
@@ -334,9 +338,17 @@ class DeviceWorkspaceScreen:
                 # selected pad silently. Entering KEYS should never fire
                 # an audible preview or schedule a note-off that can cut
                 # off the first held SP chromatic note.
+                if hasattr(self.app, "current_bank"):
+                    bank_count = 8 if self._device_key == "P-6" else (
+                        10 if self._device_key == "SP-404MKII" else 4)
+                    self._keys_bank = max(
+                        0, min(bank_count - 1,
+                               int(self.app.current_bank.get(
+                                   self._device_key, self._keys_bank))))
                 self._retarget_keys_for_device()
                 self._select_chromatic_pad(
-                    self._keys_bank, self._keys_pad, preview=False)
+                    self._keys_bank, self._keys_pad, preview=False,
+                    sync=self._device_key == "P-6")
             elif old_tab == "keys" and not self._keys_persistent:
                 # Only disable if the user hasn't marked it persistent.
                 self.app.chromatic_kb.enabled = False
@@ -457,8 +469,12 @@ class DeviceWorkspaceScreen:
         if tab_key == "control":
             for knob, cc, ch in self._knobs:
                 if knob.handle_event(event):
-                    if self.app.p6:
-                        self.app.p6.send_cc(cc, int(knob.value), channel=ch)
+                    if self._device_key == "SP-404MKII":
+                        midi = self.app._midi_connections.get("SP-404MKII")
+                    else:
+                        midi = self.app.p6
+                    if midi:
+                        midi.send_cc(cc, int(knob.value), channel=ch)
 
         # DJ panel needs full event stream for crossfader drag + per-deck
         # volume faders + FX knob drag. Delegate every event (including
@@ -481,11 +497,7 @@ class DeviceWorkspaceScreen:
         for i in range(5):
             r = pygame.Rect(40 + i * (theme.SCREEN_WIDTH - 80) // 5, bus_y, (theme.SCREEN_WIDTH - 80) // 5 - 4, 28)
             if r.collidepoint(mx, my):
-                self._active_bus = i
-                self._build_knobs()
-                # Sync Twister bus
-                if hasattr(self.app, 'twister'):
-                    self.app.twister.active_bus = i
+                self.app._sp404_set_active_bus(i)
                 return
 
         fx_y = self._controls_top + 2
@@ -509,9 +521,10 @@ class DeviceWorkspaceScreen:
         if toggle_r.collidepoint(mx, my):
             self._fx_on = not self._fx_on
             val = 127 if self._fx_on else 0
-            if self.app.p6:
-                self.app.p6.send_cc(19, val, channel=self._active_bus)
-            self.app.live_cc[self._active_bus][19] = val
+            midi = self.app._midi_connections.get("SP-404MKII")
+            if midi:
+                midi.send_cc(19, val, channel=self._active_bus)
+            self.app.live_cc.setdefault(self._active_bus, {})[19] = val
             return
 
         # FX Select
@@ -521,9 +534,11 @@ class DeviceWorkspaceScreen:
             tab_key = bus_tab_keys[self._active_bus]
             max_fx = fx_count_for_tab(tab_key) - 1
             self._fx_select_val = (self._fx_select_val + 1) % (max_fx + 1)
-            if self.app.p6:
-                self.app.p6.send_cc(83, self._fx_select_val, channel=self._active_bus)
-            self.app.live_cc[self._active_bus][83] = self._fx_select_val
+            midi = self.app._midi_connections.get("SP-404MKII")
+            if midi:
+                midi.send_cc(83, self._fx_select_val, channel=self._active_bus)
+            self.app.live_cc.setdefault(
+                self._active_bus, {})[83] = self._fx_select_val
             return
 
     def _handle_p6_clicks(self, mx, my):
@@ -569,6 +584,13 @@ class DeviceWorkspaceScreen:
 
         # Sync SP-404 live CC values into workspace knobs + FX state
         if self._device_key == "SP-404MKII":
+            try:
+                active_bus = self.app._sp404_active_bus_index()
+                if active_bus != self._active_bus:
+                    self._active_bus = active_bus
+                    self._build_knobs()
+            except Exception:
+                pass
             live = self.app.live_cc.get(self._active_bus, {})
             # Update FX on/off from CC19
             if 19 in live:
@@ -763,7 +785,7 @@ class DeviceWorkspaceScreen:
         if rec._monitoring:
             buf = rec._recall_buf
             wpos = rec._recall_write_pos
-            display_frames = min(2048, len(buf))
+            display_frames = min(self.app.scope_window_frames(), len(buf))
 
             if wpos >= display_frames:
                 recent = buf[wpos - display_frames:wpos]
@@ -773,16 +795,19 @@ class DeviceWorkspaceScreen:
             if len(recent) > 0 and float(np.max(np.abs(recent))) > 0.001:
                 mono = recent.mean(axis=1) if recent.ndim > 1 else recent
 
-                step = max(1, len(mono) // wave_w)
+                point_count = self.app.scope_point_count(wave_w)
+                step = max(1, len(mono) // point_count)
                 points = []
                 dc = self._device_color
 
-                for px in range(wave_w):
+                for px in range(point_count):
                     si = px * step
                     if si < len(mono):
                         val = max(-1.0, min(1.0, float(mono[si]) * 3.0))
                         py = center_y - int(val * half_h)
-                        points.append((scope_rect.x + 4 + px, py))
+                        x = scope_rect.x + 4 + int(
+                            px * max(1, wave_w - 1) / max(1, point_count - 1))
+                        points.append((x, py))
 
                 if len(points) > 1:
                     # Filled waveform — single polygon spanning the
@@ -872,8 +897,6 @@ class DeviceWorkspaceScreen:
     # ── SP-404 Control ───────────────────────────────────────────────
 
     def _draw_sp404_control(self, surface, f_med, f_small, f_tiny):
-        from engine.sp404_effects import fx_name_for_tab
-
         bus_tab_keys = ["bus1_fx", "bus2_fx", "bus3_fx", "bus4_fx", "input_fx"]
         tab_key = bus_tab_keys[self._active_bus]
 
@@ -883,7 +906,8 @@ class DeviceWorkspaceScreen:
         surf = f_small.render(bus_labels[self._active_bus], True, self._device_color)
         surface.blit(surf, (10, fx_y + 3))
 
-        fx_name = fx_name_for_tab(tab_key, self._fx_select_val)
+        fx_name, param_name = self.app._sp404_effect_display_and_param_name(
+            tab_key, self._fx_select_val)
 
         # FX On/Off
         toggle_r = pygame.Rect(theme.SCREEN_WIDTH - 160, fx_y, 70, 26)
@@ -922,10 +946,8 @@ class DeviceWorkspaceScreen:
         # Relabel knobs each frame to match the active effect's
         # parameter names AND value formatters. Falls through to the
         # generic "Bx Ctrl N" + raw int when the effect isn't in the
-        # SP404_EFFECT_PARAMS table (e.g. user-assigned Direct FX
-        # slots, OFF state). Mirrors what the standalone Control
-        # screen does — this is the "smart Push 2-style labels"
-        # fix promised in the SP-404 deep-dive scene.
+        # SP404_EFFECT_PARAMS table. Direct FX slots are resolved
+        # through Compa's configured factory/custom assignments.
         try:
             from engine.sp404_effect_params import (ctrl_label,
                                                      format_value)
@@ -935,13 +957,13 @@ class DeviceWorkspaceScreen:
                 idx = _CTRL_CC_TO_IDX.get(cc)
                 if idx is None:
                     continue
-                lbl = ctrl_label(fx_name, idx)
+                lbl = ctrl_label(param_name, idx)
                 if lbl:
                     knob.label = lbl
                 # Default-arg capture so each knob keeps the right
                 # (effect, ctrl_idx) pair.
                 knob.format_func = (
-                    lambda v, _fx=fx_name, _i=idx:
+                    lambda v, _fx=param_name, _i=idx:
                         format_value(_fx, _i, int(v))
                 )
         except Exception:
@@ -2190,6 +2212,9 @@ class DeviceWorkspaceScreen:
                 # bank.
                 if hasattr(self.app, "current_bank"):
                     self.app.current_bank[self._device_key] = bi
+                self._select_chromatic_pad(
+                    self._keys_bank, self._keys_pad, preview=False,
+                    sync=self._device_key == "P-6")
                 return
 
         pad_start_x = 10 + bank_count * (bank_btn_w + 2) + 8
@@ -2261,7 +2286,8 @@ class DeviceWorkspaceScreen:
             kb.set_target(midi, channel, pitchbend_mode=False)
 
     def _select_chromatic_pad(
-        self, bank_idx: int, pad_idx: int, *, preview: bool = True
+        self, bank_idx: int, pad_idx: int, *, preview: bool = True,
+        sync: bool = False,
     ):
         """Select a pad as the active sound for chromatic play.
 
@@ -2269,8 +2295,8 @@ class DeviceWorkspaceScreen:
                 Optionally sends a brief trigger so the user hears a
                 preview. Subsequent piano keys use the chromatic channel.
         P-6:    Triggers the pad on the sampler channel so the granular
-                engine picks it up when preview=True. Ch4 chromatic play
-                continues.
+                engine picks it up. preview=True is audible; sync=True uses
+                a very low-velocity blip to arm the pad before the first key.
         """
         kb = getattr(self.app, 'chromatic_kb', None)
         if kb is None or kb._target_midi is None:
@@ -2332,7 +2358,7 @@ class DeviceWorkspaceScreen:
 
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            action = "preview" if preview else "selected"
+            action = "preview" if preview else ("sync" if sync else "selected")
             print(f"KEYS: SP-404 {action} {bank_letter}-{pad_idx + 1} "
                   f"(Ch{channel + 1} note {note}); push2_keys_base_note="
                   f"{self.app.push2_keys_base_note}", flush=True)
@@ -2341,18 +2367,18 @@ class DeviceWorkspaceScreen:
             # P-6: trigger the pad on the sampler channel
             channel = midi.ch_sampler
             note = 48 + bank_idx * 6 + pad_idx
-            if preview:
+            if preview or sync:
                 import threading
-                midi.send_note_on(note, 80, channel=channel)
+                midi.send_note_on(note, 80 if preview else 1, channel=channel)
 
                 def _off():
                     import time
-                    time.sleep(0.12)
+                    time.sleep(0.12 if preview else 0.03)
                     midi.send_note_off(note, channel=channel)
                 threading.Thread(target=_off, daemon=True).start()
             bank_letter = chr(ord("A") + bank_idx)
             self._keys_selected_name = f"Bank {bank_letter} Pad {pad_idx + 1}"
-            action = "preview" if preview else "selected"
+            action = "preview" if preview else ("sync" if sync else "selected")
             print(f"KEYS: P-6 {action} → {bank_letter}-{pad_idx + 1} "
                   f"(Ch{channel + 1} note {note})", flush=True)
 

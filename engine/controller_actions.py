@@ -196,6 +196,21 @@ def _notify_bank_change(app, device_key: str, bank_idx: int):
         pass
     if ws and hasattr(ws, "_keys_bank"):
         ws._keys_bank = bank_idx
+        try:
+            tabs = getattr(ws, "_tabs", [])
+            idx = getattr(ws, "_current_tab", 0)
+            tab_key = tabs[idx][0] if 0 <= idx < len(tabs) else ""
+            if (getattr(ws, "_device_key", "") == device_key
+                    and tab_key == "keys"
+                    and hasattr(ws, "_select_chromatic_pad")):
+                ws._select_chromatic_pad(
+                    bank_idx,
+                    getattr(ws, "_keys_pad", 0),
+                    preview=False,
+                    sync=device_key == "P-6",
+                )
+        except Exception:
+            pass
     if hasattr(app, "push_hud"):
         letter = chr(ord("A") + bank_idx)
         app.push_hud(f"Bank {letter}", None)
