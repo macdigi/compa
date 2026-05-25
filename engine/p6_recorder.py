@@ -1194,6 +1194,10 @@ class P6Recorder:
         self._enqueue(self._recall_buffer_impl, session_name)
         return None
 
+    def save_recall(self, session_name: str = "") -> Optional[str]:
+        """Compatibility wrapper for UI paths that still call save_recall."""
+        return self.recall_buffer(session_name)
+
     def _recall_buffer_impl(self, session_name: str = "") -> Optional[str]:
         """Worker-thread body: snapshot the recall buffer and write it
         to a WAV file. Returns the filepath, or None on failure."""

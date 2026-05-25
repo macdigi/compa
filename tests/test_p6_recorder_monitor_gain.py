@@ -32,5 +32,22 @@ class MonitorGainTests(unittest.TestCase):
         self.assertLess(float(boosted[0, 1]), -0.95)
 
 
+class RecallCompatibilityTests(unittest.TestCase):
+    def test_save_recall_delegates_to_recall_buffer(self):
+        from engine.p6_recorder import P6Recorder
+
+        rec = P6Recorder.__new__(P6Recorder)
+        calls = []
+
+        def recall_buffer(session_name=""):
+            calls.append(session_name)
+            return "queued"
+
+        rec.recall_buffer = recall_buffer
+
+        self.assertEqual(rec.save_recall("SP-404MKII"), "queued")
+        self.assertEqual(calls, ["SP-404MKII"])
+
+
 if __name__ == "__main__":
     unittest.main()
