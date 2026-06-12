@@ -156,6 +156,10 @@ class P6Recorder:
         self._current_file: Optional[str] = None
         self._lock = threading.Lock()
         self._samples_written = 0
+        self._record_queue = None
+        self._record_writer_thread: Optional[threading.Thread] = None
+        self._record_write_error: Optional[str] = None
+        self._record_queue_peak_blocks = 0
 
         # Level metering (lock-free via numpy)
         self._peak_l = 0.0
@@ -265,6 +269,45 @@ class P6Recorder:
                           getattr(fn, "__name__", fn), e)
             finally:
                 self._cmd_queue.task_done()
+
+    def _record_writer_loop(self, writer, record_queue, filepath: str) -> None:
+        """Drain queued audio blocks to disk in order.
+
+        Disk I/O must not run inside PortAudio's callback. The callback only
+        copies incoming blocks into this FIFO; this thread absorbs filesystem
+        stalls without forcing ALSA to drop the next input buffer.
+        """
+        while True:
+            block = record_queue.get()
+            try:
+                if block is None:
+                    return
+                writer.write(block)
+            except Exception as e:
+                with self._lock:
+                    if self._record_write_error is None:
+                        self._record_write_error = str(e)
+                log.error("Write error: %s", e)
+            finally:
+                try:
+                    record_queue.task_done()
+                except Exception:
+                    pass
+
+    def _enqueue_recording_block(self, indata: np.ndarray, frames: int) -> None:
+        """Copy one input block into the active recording queue, if any."""
+        with self._lock:
+            record_queue = self._record_queue if self._recording else None
+            if record_queue is None:
+                return
+            record_queue.put(np.array(indata, copy=True))
+            self._samples_written += frames
+            try:
+                pending = record_queue.qsize()
+            except Exception:
+                pending = 0
+            if pending > self._record_queue_peak_blocks:
+                self._record_queue_peak_blocks = pending
 
     def _find_device(self, preferred_rate: int = 0) -> None:
         """Find the audio input device (P-6 or audio interface) and probe sample rate."""
@@ -828,11 +871,18 @@ class P6Recorder:
             log.error("Failed to create WAV file: %s", e)
             return None
 
+        # Reset per-take health counters. If these move during a take, ALSA
+        # still dropped input before Compa received it.
+        self._input_overruns = 0
+        self._input_underruns = 0
+        self._input_overrun_console_count = 0
+
         # Pre-roll: if requested, dump the tail of the recall buffer into the
-        # new file as the first frames. Snapshot the buffer state without
-        # the audio lock since numpy reads on a fixed-size array are safe
-        # against concurrent writes (we may get a torn frame at the seam,
-        # but that's a single-block hiccup, not corruption).
+        # new file as the first frames. It is queued ahead of live blocks so a
+        # large Recall+Continue write can no longer make live capture miss time.
+        # Snapshot the buffer state without the audio lock since numpy reads on a
+        # fixed-size array are safe against concurrent writes.
+        pre_roll_audio = None
         pre_roll_frames_written = 0
         if pre_roll_seconds > 0.0 and self._recall_total_written > 0:
             wanted = int(pre_roll_seconds * self._sample_rate)
@@ -841,12 +891,12 @@ class P6Recorder:
             if take > 0:
                 pos = self._recall_write_pos
                 if self._recall_total_written >= self._recall_buf_frames:
-                    # Buffer wrapped — take the most recent `take` frames
+                    # Buffer wrapped — take the most recent requested frames
                     # ending at write_pos (= now). That's the trailing
-                    # `take` of the ordered buffer.
+                    # segment of the ordered buffer.
                     start = (pos - take) % self._recall_buf_frames
                     if start + take <= self._recall_buf_frames:
-                        ordered = self._recall_buf[start:start + take]
+                        ordered = self._recall_buf[start:start + take].copy()
                     else:
                         first = self._recall_buf_frames - start
                         ordered = np.concatenate([
@@ -854,18 +904,31 @@ class P6Recorder:
                             self._recall_buf[:take - first],
                         ])
                 else:
-                    # Buffer hasn't wrapped — take the most recent `take`
+                    # Buffer hasn't wrapped — take the most recent requested
                     # frames ending at write_pos.
                     start = max(0, pos - take)
                     ordered = self._recall_buf[start:pos].copy()
-                try:
-                    writer.write(ordered)
-                    pre_roll_frames_written = len(ordered)
-                except Exception as e:
-                    log.error("Pre-roll write failed: %s", e)
+                pre_roll_audio = ordered
+                pre_roll_frames_written = len(ordered)
+
+        record_queue = queue.Queue()
+        if pre_roll_audio is not None and pre_roll_frames_written > 0:
+            record_queue.put(pre_roll_audio)
+        with self._lock:
+            self._record_write_error = None
+            self._record_queue_peak_blocks = record_queue.qsize()
+        writer_thread = threading.Thread(
+            target=self._record_writer_loop,
+            args=(writer, record_queue, filepath),
+            daemon=True,
+            name="record-wav-writer",
+        )
+        writer_thread.start()
 
         with self._lock:
             self._writer = writer
+            self._record_queue = record_queue
+            self._record_writer_thread = writer_thread
             self._current_file = filepath
             self._samples_written = pre_roll_frames_written
             self._recording = True
@@ -951,17 +1014,35 @@ class P6Recorder:
         """Worker-thread body: close the WAV file and write the sidecar."""
         filepath = None
         duration = 0.0
+        writer = None
+        record_queue = None
+        writer_thread = None
 
         with self._lock:
             if self._writer:
                 filepath = self._current_file
                 duration = self._samples_written / self._sample_rate
-                try:
-                    self._writer.close()
-                except Exception:
-                    pass
+                writer = self._writer
+                record_queue = self._record_queue
+                writer_thread = self._record_writer_thread
                 self._writer = None
+                self._record_queue = None
+                self._record_writer_thread = None
+                self._current_file = None
             self._recording = False
+
+        if record_queue is not None:
+            record_queue.put(None)
+        if writer_thread is not None:
+            writer_thread.join()
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception as e:
+                with self._lock:
+                    if self._record_write_error is None:
+                        self._record_write_error = str(e)
+                log.error("Failed to close WAV file: %s", e)
 
         if filepath:
             log.info("Recording stopped: %s (%.1fs)", filepath, duration)
@@ -972,12 +1053,19 @@ class P6Recorder:
             meta.setdefault("notes", "")
             meta["duration"] = round(duration, 1)
             meta["created_at"] = datetime.now().isoformat()
+            meta["input_overruns"] = int(self._input_overruns)
+            meta["input_underruns"] = int(self._input_underruns)
+            meta["record_queue_peak_blocks"] = int(self._record_queue_peak_blocks)
+            if self._record_write_error:
+                meta["write_error"] = self._record_write_error
             try:
                 with open(filepath + ".meta.json", "w") as f:
                     json.dump(meta, f, indent=2)
             except Exception as e:
                 log.error("Failed to write metadata: %s", e)
             self._record_metadata = {}
+            self._record_write_error = None
+            self._record_queue_peak_blocks = 0
 
             if self.on_recording_complete:
                 self.on_recording_complete(filepath, duration)
@@ -1016,13 +1104,9 @@ class P6Recorder:
                             flush=True,
                         )
 
-        # Write to disk FIRST if recording (highest priority)
-        if self._recording and self._writer:
-            try:
-                self._writer.write(indata)
-                self._samples_written += frames
-            except Exception as e:
-                log.error("Write error: %s", e)
+        # Queue disk writes outside the real-time audio callback. Blocking
+        # here is what turns filesystem jitter into audible skipped time.
+        self._enqueue_recording_block(indata, frames)
 
         # Always fill the recall buffer (rolling last 60s)
         pos = self._recall_write_pos
