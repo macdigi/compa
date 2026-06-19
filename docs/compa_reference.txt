@@ -263,7 +263,7 @@ The Radio screen provides access to internet radio stations for
 discovering and capturing new music and sounds.
 
 Station Library
-  137 stations organized across 25 genres. Scroll through the genre
+  138 stations organized across 25 genres. Scroll through the genre
   tabs at the top and tap a station to start playback. The station
   name and current track info (when available) appear at the top.
 
