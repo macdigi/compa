@@ -90,7 +90,7 @@ Record on one device, convert, load on another. Cross-device sample sharing in s
 - Export as Akai `.xpm` drum program or Ableton `.adg` Drum Rack
 
 ### Internet Radio
-- **137 stations** across 25+ genres (Jazz, Soul, Funk, Lo-fi, Hip Hop, Metal, Classical, Electronic, Vintage, Paranormal, and more)
+- **138 stations** across 25+ genres (Jazz, Soul, Funk, Lo-fi, Hip Hop, Metal, Classical, Electronic, Vintage, Paranormal, and more)
 - ICY metadata -- current artist and track displayed live
 - Full-width real-time waveform visualizer
 - **Capture buffer** -- save the last 60 seconds of any stream as WAV
@@ -297,7 +297,7 @@ For the full per-button reference, see [docs/compa_reference.txt](docs/compa_ref
 | 3 | **PATTERN** | Grid view (4x4 or 8x8), chain/song mode with FX snapshots, step sequencer with chromatic/ghost/EXT SOURCE rows |
 | 4 | **RECORD** | Record from any device, input source selector, 60s recall buffer, threshold recording, level meters |
 | 5 | **SAMPLE** | Folder browser, visual waveform slicer, format converter (P-6 / SP-404 / MPC / Ableton) |
-| 6 | **RADIO** | 137 internet radio stations, real-time visualizer, capture buffer, threshold recording |
+| 6 | **RADIO** | 138 internet radio stations, real-time visualizer, capture buffer, threshold recording |
 | 7 | **KIT BUILDER** | 4x4 pad grid, 8 banks (128 pads), smart drum import, waveform preview, export XPM + ADG |
 | 8 | **XFER** | Push/pull files to MPC/Force via USB Computer Mode, SD card and SSD drive selector |
 | 9 | **SETTINGS** | Device config, audio routing, MIDI clock relay, themes, touch calibration |
@@ -624,7 +624,7 @@ compa/
     components/             Reusable widgets (pad_grid, waveform, knob, button, modal, etc.)
   docs/                   Reference data and templates
     fonts/                  Inter + JetBrains Mono (bundled)
-    radio_stations.json     137 internet radio stations
+    radio_stations.json     138 internet radio stations
     akai_drum_template.xpm  Golden Akai Force/MPC drum program template
     ableton_drumrack_template.adg  Ableton Live Drum Rack template
     compa_reference.txt     Compa reference manual
