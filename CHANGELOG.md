@@ -10,9 +10,10 @@ affect what a user sees.
 
 ---
 
-## Unreleased
+## RARE DATA RADIO restored — 2026-06-26
 
-(nothing yet — this section fills up as new commits land)
+- **RARE DATA RADIO is back at the top of the Radio tab** (electronic),
+  streaming from radio.raredata.net.
 
 ## v0.3.1 — 2026-05-15
 
