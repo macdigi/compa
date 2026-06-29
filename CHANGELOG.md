@@ -10,6 +10,18 @@ affect what a user sees.
 
 ---
 
+## v0.3.2 — 2026-06-28
+
+- Settings → Updates now finds new versions on a freshly flashed card.
+  The clean image always said "Up to date" even when there was new
+  stuff — fixed. Check Now pulls the latest, Update Now installs + reboots.
+- A failed update check now says so, instead of pretending you're current.
+- No touchscreen? The first setup screen tells you to press M for
+  mouse + keyboard mode — and M turns the cursor on right there.
+- RARE DATA RADIO sits at the top of the Radio tab on a fresh card.
+- The User Manual is now a download link (not an email attachment),
+  with the Rare Data logo on the cover.
+
 ## RARE DATA RADIO restored — 2026-06-26
 
 - **RARE DATA RADIO is back at the top of the Radio tab** (electronic),
