@@ -61,6 +61,21 @@ class Updater:
         code, out = self._run("rev-parse", "--abbrev-ref", "HEAD")
         return out if code == 0 else "?"
 
+    def _compare_branch(self) -> str:
+        """Branch to compare against ``origin/<branch>``.
+
+        Falls back to the configured default branch (``COMPA_BRANCH``,
+        or ``main``) when HEAD is detached — i.e. the image was flashed
+        at a version tag, so ``rev-parse --abbrev-ref HEAD`` returns the
+        literal ``"HEAD"``. Without this the updater would compare
+        against ``origin/HEAD`` (which doesn't resolve on a fresh clone)
+        and silently report "no updates" on every freshly-flashed unit.
+        """
+        branch = self.current_branch()
+        if not branch or branch in ("HEAD", "?"):
+            return os.environ.get("COMPA_BRANCH", "main")
+        return branch
+
     def check(self) -> dict:
         """Check the remote for updates. Returns status dict."""
         result = {
@@ -85,7 +100,7 @@ class Updater:
             self._last_result = result
             return result
 
-        result["branch"] = self.current_branch()
+        result["branch"] = self._compare_branch()
         result["current"] = self.current_commit()
 
         # Get remote commit hash
@@ -123,8 +138,12 @@ class Updater:
         # Stash any local changes (should be none in production)
         self._run("stash", "--include-untracked")
 
-        # Pull
-        code, out = self._run("pull", "--ff-only", timeout=60)
+        # Pull. Target origin/<branch> explicitly so the pull still
+        # works when HEAD is detached at a version tag (a freshly
+        # flashed image) — a bare `git pull` has no upstream there.
+        code, out = self._run(
+            "pull", "--ff-only", "origin", self._compare_branch(),
+            timeout=60)
         result["log"] = out
 
         if code != 0:
@@ -222,7 +241,7 @@ class Updater:
         entries for the upcoming version."""
         if not self.is_git_repo:
             return []
-        branch = self.current_branch()
+        branch = self._compare_branch()
         if not branch or branch == "?":
             return []
         code, out = self._run(
@@ -286,7 +305,7 @@ class Updater:
         if not self.is_git_repo:
             return []
         if remote:
-            branch = self.current_branch()
+            branch = self._compare_branch()
             if not branch or branch == "?":
                 return []
             code, content = self._run(

@@ -56,7 +56,15 @@ class UpdatesScreen:
             self._cached_pending = None
             self._is_checking = False
             try:
-                if self.app.updater.update_available:
+                err = (_result or {}).get("error") if isinstance(
+                    _result, dict) else ""
+                if err:
+                    # Surface fetch/remote failures instead of silently
+                    # showing "Up to date" — otherwise a broken remote
+                    # (no creds, detached HEAD, no network) looks
+                    # identical to being current.
+                    self._status = f"Check failed — {err}"[:78]
+                elif self.app.updater.update_available:
                     n = self.app.updater.commits_behind
                     self._status = (
                         f"{n} new change{'s' if n != 1 else ''} ready")

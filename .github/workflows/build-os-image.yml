@@ -41,6 +41,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: compa-src
+          # CRITICAL: do NOT persist the job's GITHUB_TOKEN into
+          # compa-src/.git/config. That .git is rsync'd verbatim into
+          # the shipped OS image; with persist-credentials on, every
+          # image leaks a short-lived `http.extraheader` token and,
+          # once it expires, on-device `git fetch` 401s so the in-app
+          # updater can never reach origin. Keep this false.
+          persist-credentials: false
 
       - name: Resolve version
         id: ver
@@ -106,12 +113,33 @@ jobs:
           cp compa-src/setup/install.sh pi-gen/setup/install.sh
           cp compa-src/setup/50-ableton-push-2.rules \
              pi-gen/setup/50-ableton-push-2.rules
-          # NOTE: .git is intentionally INCLUDED so the resulting image is a
-          # real git checkout. install.sh keeps .git in place; the in-app
-          # Settings → Updates flow uses it to fetch new commits from origin.
-          # Removing this would silently break the auto-updater.
+
+          # Normalize the .git that ships inside the image so the in-app
+          # updater works on first boot. A tag-push checkout leaves git
+          # in detached HEAD with a tag-only fetch refspec; left as-is,
+          # the on-device updater can't resolve origin/<branch>. Attach
+          # HEAD to main, point origin at the public repo, restore the
+          # standard fetch refspec, and strip any leftover CI auth
+          # header. (persist-credentials:false already prevents the
+          # token, but unset defensively.)
+          git -C compa-src config --unset-all \
+            'http.https://github.com/.extraheader' 2>/dev/null || true
+          git -C compa-src remote set-url origin \
+            https://github.com/macdigi/compa.git
+          git -C compa-src config remote.origin.fetch \
+            '+refs/heads/*:refs/remotes/origin/*'
+          git -C compa-src branch -f main HEAD
+          git -C compa-src symbolic-ref HEAD refs/heads/main
+          git -C compa-src config branch.main.remote origin
+          git -C compa-src config branch.main.merge refs/heads/main
+          echo "── staged .git state ──"
+          git -C compa-src status -sb | head -1
+          git -C compa-src remote -v
+
+          # .github IS shipped (it's tiny) so the image's working tree
+          # matches HEAD exactly — a phantom "deleted .github" would
+          # make `git status` dirty and can block `git pull --ff-only`.
           rsync -a --delete \
-            --exclude '.github' \
             --exclude '__pycache__' \
             --exclude '*.pyc' \
             --exclude '.DS_Store' \
@@ -169,6 +197,35 @@ jobs:
           echo "filename=${FRIENDLY}" >> "$GITHUB_OUTPUT"
           echo "sha256_filename=${FRIENDLY}.sha256" >> "$GITHUB_OUTPUT"
 
+      # ------------------------------------------------------------------
+      # Build the User Manual PDF and ship it to B2 alongside the image,
+      # so the download email can link a stable B2 URL instead of
+      # attaching the file. Script: compa-src/docs/build_pdf.py; assets
+      # (screenshots + logos) read from compa-src/docs/.
+      # ------------------------------------------------------------------
+      - name: Set up Python (for PDF build)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PDF build dependencies
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet 'reportlab>=4.0' 'Pillow>=10.0'
+
+      - name: Build User Manual PDF
+        id: pdf
+        run: |
+          UNVERSIONED="Compa_User_Manual.pdf"
+          VERSIONED="Compa_User_Manual_${{ steps.ver.outputs.version }}.pdf"
+          python compa-src/docs/build_pdf.py \
+            --version "${{ steps.ver.outputs.version }}" \
+            --output "./${UNVERSIONED}"
+          cp "./${UNVERSIONED}" "./${VERSIONED}"
+          ls -lh ./Compa_User_Manual*.pdf
+          echo "unversioned=${UNVERSIONED}" >> "$GITHUB_OUTPUT"
+          echo "versioned=${VERSIONED}" >> "$GITHUB_OUTPUT"
+
       - name: Upload to Backblaze B2 (S3-compatible API)
         # The native B2 CLI's `b2 account authorize` implicitly calls
         # listBuckets — which our bucket-scoped application key
@@ -201,6 +258,18 @@ jobs:
           aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
             "${SHA}" "s3://${B2_BUCKET}/compa-os-latest.img.xz.sha256"
 
+          # User manual: a stable "Compa_User_Manual.pdf" the download
+          # email links to, plus a versioned archive copy. The stable
+          # name always serves the newest build.
+          MANUAL="${{ steps.pdf.outputs.unversioned }}"
+          MANUAL_VER="${{ steps.pdf.outputs.versioned }}"
+          aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
+            "${MANUAL}" "s3://${B2_BUCKET}/${MANUAL}" \
+            --content-type application/pdf
+          aws --endpoint-url "${B2_ENDPOINT}" s3 cp \
+            "${MANUAL_VER}" "s3://${B2_BUCKET}/${MANUAL_VER}" \
+            --content-type application/pdf
+
       - name: Create GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -212,6 +281,12 @@ jobs:
             **Download:** [compa-os-${{ steps.ver.outputs.version }}.img.xz](${{ steps.download_base.outputs.url }}/compa-os-${{ steps.ver.outputs.version }}.img.xz)
 
             **SHA-256:** [checksum file](${{ steps.download_base.outputs.url }}/compa-os-${{ steps.ver.outputs.version }}.img.xz.sha256)
+
+            ## User Manual
+
+            **Download:** [${{ steps.pdf.outputs.versioned }}](${{ steps.download_base.outputs.url }}/${{ steps.pdf.outputs.versioned }})
+
+            Always-current link: `${{ steps.download_base.outputs.url }}/Compa_User_Manual.pdf`
 
             ### Install
             1. Download the `.img.xz` file above.

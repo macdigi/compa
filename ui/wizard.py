@@ -37,12 +37,29 @@ def run_wizard(screen: pygame.Surface, clock: pygame.time.Clock, app):
     f_small = theme.font("small")
     f_mono = theme.font("mono_med")
 
+    def _enable_mouse_mode():
+        """Turn on mouse + keyboard mode immediately and persist it.
+
+        Lets a user with no touchscreen press M on the very first slide
+        and instantly get a visible cursor, instead of having to guess
+        their way to the input-mode picker."""
+        from ui.p6_app import save_config_key
+        app.mouse_mode = True
+        pygame.mouse.set_visible(True)
+        save_config_key("MOUSE_MODE", "1")
+
     def _wait_for_tap():
-        """Block until the user taps/clicks anywhere. Returns False if quit."""
+        """Block until the user taps/clicks/presses a key. Returns False if quit.
+
+        Pressing M switches to mouse + keyboard mode on the spot (for
+        no-touchscreen users) and then continues."""
         while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+                    _enable_mouse_mode()
+                    return True
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN,
                                   pygame.KEYDOWN):
                     return True
@@ -114,8 +131,15 @@ def run_wizard(screen: pygame.Surface, clock: pygame.time.Clock, app):
     surf = f_med.render("SP-404 MK2 + P-6 Companion", True, theme.TEXT_DIM)
     screen.blit(surf, (sw // 2 - surf.get_width() // 2, text_y + 34))
 
+    # No-touchscreen hint — a keyboard+mouse user might not realise the
+    # screen isn't touch. Tell them the key (M) that turns on the cursor.
+    hint = f_small.render(
+        "No touchscreen? Press M for mouse + keyboard mode",
+        True, theme.ACCENT)
+    screen.blit(hint, (sw // 2 - hint.get_width() // 2, text_y + 78))
+
     _draw_step_indicator(0, total_steps)
-    _draw_footer("Tap anywhere to continue")
+    _draw_footer("Tap anywhere — or press any key — to continue")
     _flip(screen)
 
     if not _wait_for_tap():
